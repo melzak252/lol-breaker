@@ -184,8 +184,8 @@ def main() -> int:
     parser.add_argument(
         "--model",
         type=str,
-        default="C0",
-        help="Model specification to evaluate (e.g. 'C0', 'C0-D', 'C0-Slim', 'C0-D1', 'C0-Mini', 'C0-Small'; default: 'C0')",
+        default="C0-D-20T",
+        help="Model specification to evaluate (e.g. 'C0-D-20T', 'C0-D', 'C0-Slim', 'C0-Mini', 'C0'; default: 'C0-D-20T')",
     )
     parser.add_argument("--odds1", type=float, default=None, help="Decimal odds for Team 1 (e.g. 2.10)")
     parser.add_argument("--odds2", type=float, default=None, help="Decimal odds for Team 2 (e.g. 1.70)")

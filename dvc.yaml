@@ -21,6 +21,15 @@ stages:
       - data/08_reporting/optimal_strategy_simulation_ledger.csv
       - data/06_models/model_preservation/prop_distribution_20261007_01.zip
       - data/08_reporting/prop_distribution/prop_distribution_20261007_01/metrics.json
+      - src/models/cross_region_input_normalizer.py
+      - data/08_reporting/c0_upgrade_and_distillation_20261017/multiscale_20token_predictions.parquet
+      - data/08_reporting/c0_upgrade_and_distillation_20261017/multiscale_20token_distilled.json
+      - data/08_reporting/c0_upgrade_and_distillation_20261017/models/multiscale_20token_distilled/seed_20260910/checkpoint_epoch16.pt
+      - data/08_reporting/c0_upgrade_and_distillation_20261017/models/multiscale_20token_distilled/seed_20260911/checkpoint_epoch16.pt
+      - data/08_reporting/c0_upgrade_and_distillation_20261017/models/multiscale_20token_distilled/seed_20260912/checkpoint_epoch16.pt
+      - data/08_reporting/c0_upgrade_and_distillation_20261017/year_anchor_bank/quarter_90d_history.npy
+      - data/08_reporting/c0_upgrade_and_distillation_20261017/year_anchor_bank/half_year_180d_history.npy
+      - data/08_reporting/c0_upgrade_and_distillation_20261017/year_anchor_bank/year_anchor_history.npy
     outs:
       - data/08_reporting/simulation_pipeline/stage1_input_manifest.json
 
@@ -37,6 +46,9 @@ stages:
       - data/08_reporting/a0_data_focus/a0_data_focus_20260929_192443/market_T1_joined.parquet
       - data/07_model_output/oddsportal/c0_thesis_books_joint_20261009_115922Z/joint_scoring_cohorts.parquet
       - data/07_model_output/model_bookmaker_competitiveness/plan12_model_bookmaker_20261009_175136Z/paired_probability_panel.parquet
+      - src/models/cross_region_input_normalizer.py
+      - data/08_reporting/c0_upgrade_and_distillation_20261017/multiscale_20token_predictions.parquet
+      - data/08_reporting/c0_upgrade_and_distillation_20261017/multiscale_20token_distilled.json
     params:
       - conf/base/parameters.yml:
           - simulation.benchmark

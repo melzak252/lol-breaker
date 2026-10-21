@@ -62,5 +62,15 @@ prop_distribution_metrics:
   path: data/08_reporting/prop_distribution/prop_distribution_20261007_01/metrics.json
   sha256: cde886218dd5c22fe6093fc3c670897927ac2b61d95fd0c442c568f43e5e438b
 
+
+# Layer 08: 20-Token Multi-Scale Distilled Standard (90d + 180d + 365d + 16m)
+c0_multiscale_20token_predictions:
+  path: data/08_reporting/c0_upgrade_and_distillation_20261017/multiscale_20token_predictions.parquet
+  expected_rows: 3103
+  sha256: d2bc4b99f1983cf1acc40dec2aa1be60e9a2010c63808f38ee13f0eaa1e5f54e
+
+c0_multiscale_20token_report:
+  path: data/08_reporting/c0_upgrade_and_distillation_20261017/multiscale_20token_distilled.json
+  sha256: 10625eb4142cf923eef771bf2826468798da3abaad2ae77e9670454d2777eb40
 # Pipeline Output Directory
 output_dir: data/08_reporting/simulation_pipeline
