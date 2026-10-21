@@ -1,6 +1,6 @@
 # Project Map & Architecture
 
-Scope: LoL-Breaker repository, inspected local contracts as of 2026-10-06. **Local implementation, historical server observations and deployment are separate facts.** This guide does not authorize collectors, training, notifications, database changes or deployment.
+Scope: LoL-Breaker repository, inspected local contracts as of 2026-10-21. **Local implementation, historical server observations and deployment are separate facts.** This guide does not authorize collectors, training, notifications, database changes or deployment.
 
 Current model choices, completed study decisions, prop recovery and archive/trash boundaries: **[MODEL_CATALOG.md](MODEL_CATALOG.md)**. Historical reports and frozen paths remain in place; this architecture guide describes implementation contracts, not a current candidate shortlist or research promotion.
 
@@ -9,6 +9,9 @@ Current model choices, completed study decisions, prop recovery and archive/tras
 | Function | Canonical source | Boundary |
 |---|---|---|
 | Research match benchmark | [`src/analysis/research_benchmark.py`](../src/analysis/research_benchmark.py), [`src/analysis/model_benchmark.py`](../src/analysis/model_benchmark.py); [`scripts/run_model_benchmark.py`](../scripts/run_model_benchmark.py) | Frozen annual A0/rating/039 comparison via the pinned [research manifest](../conf/base/research_benchmark.json); retrospective development, not serving certification |
+| End-to-End 5-stage simulation pipeline | [`src/analysis/simulation_pipeline.py`](../src/analysis/simulation_pipeline.py); [`scripts/run_simulation_pipeline.py`](../scripts/run_simulation_pipeline.py), [`dvc.yaml`](../dvc.yaml) | Kedro 8-layer data catalog, 2026 & 11,550 benchmarks, cross-regional input normalization, shrinkage grid, Polish 12% tax & multi-year simulations, econometric audit |
+| Pre-match matchup predictor & cross-region normalizer | [`src/models/cross_region_input_normalizer.py`](../src/models/cross_region_input_normalizer.py), [`scripts/predict_matchup.py`](../scripts/predict_matchup.py) | Standalone C0/C0-D/C0-Slim matchup inference with automatic FamilyCalibratedGlicko2 regional offsets, pyramid-drift removal, and 4-rule DRO safety gates |
+| Live native feature history & regional state exporter | [`betting_app/services/live_native_feature_builder.py`](../betting_app/services/live_native_feature_builder.py) | Exports post-cutoff PostgreSQL `golgg_matches` into `extended_matches.json` and `FamilyCalibratedGlicko2` (`ratings-v2`) state into `regional_offsets_state.json` |
 | Historical financial evaluation | [`src/analysis/unified_evaluation_engine.py`](../src/analysis/unified_evaluation_engine.py); [`scripts/run_unified_betting_evaluation.py`](../scripts/run_unified_betting_evaluation.py) | Explicit study/protocol and cash-flow assumptions; not executed betting returns |
 | Recommendation qualification | [`betting_app/services/bet_qualification_service.py`](../betting_app/services/bet_qualification_service.py) | `is_bet_eligible(...)` applies configurable policy; eligibility is not proof of reliable EV or profitability |
 | Local sports/hybrid inference | [`registry.py`](../betting_app/core/models/registry.py), [`engine.py`](../betting_app/core/models/engine.py); [`run_upcoming_prediction_pipeline.py`](../betting_app/scripts/run_upcoming_prediction_pipeline.py) | Native C0 and separately identified Fixed50 hybrid; reads existing inputs and writes predictions/signals |

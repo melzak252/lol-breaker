@@ -181,6 +181,21 @@ CANONICAL_MODEL_NOMENCLATURE: dict[str, dict[str, str]] = {
         "short_code": "Elo",
         "architecture": "Match-level calibrated player Elo rating control",
     },
+    "Distilled-PlayerHistory-Ensemble (C0-D)": {
+        "display_name": "Distilled-PlayerHistory-Ensemble",
+        "short_code": "C0-D",
+        "architecture": "C0 ensemble with teacher-distilled per-BO logit temperature (T_BO1=0.9598, T_BO3/5=0.9165)",
+    },
+    "Input-Normalized C0-D": {
+        "display_name": "Input-Normalized Distilled-PlayerHistory-Ensemble",
+        "short_code": "C0-D (Norm)",
+        "architecture": "C0-D with automatic FamilyCalibratedGlicko2 + pyramid-drift cross-regional input tensor normalization",
+    },
+    "Input-Normalized C0": {
+        "display_name": "Input-Normalized PlayerHistory-Attention-Ensemble",
+        "short_code": "C0 (Norm)",
+        "architecture": "C0 with automatic FamilyCalibratedGlicko2 + pyramid-drift cross-regional input tensor normalization",
+    },
 }
 
 CANONICAL_GUARD_NOMENCLATURE: dict[str, dict[str, Any]] = {
@@ -279,6 +294,15 @@ def consolidate_canonical_bundle(
         "a0-phase-walkforward-20260914/RAPORT.md",
         "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/release_days.json",
         "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/completed.json",
+        "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/metadata.parquet",
+        "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/players.npy",
+        "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/core.npy",
+        "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/team.npy",
+        "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/w20.npy",
+        "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/gates.npy",
+        "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/history.npy",
+        "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/mask.npy",
+        "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/champions.npy",
         "auxiliary-player-20260912/data/03_primary/targets.npy",
         "unified-ratings-20260911/data/04_feature/roster-optional-v1/metadata.jsonl",
     ]
@@ -460,6 +484,229 @@ def run_stage1_verify_inputs(
 # Stage 2: Model Benchmark & Bayesian Shrinkage Grid
 # ---------------------------------------------------------------------------
 
+def compute_cross_region_normalization_benchmark(
+    df_paired: pd.DataFrame,
+    df_2026: pd.DataFrame,
+    *,
+    tail_threshold: float = 2.5,
+) -> dict[str, Any]:
+    """Evaluate Cross-Regional Input Normalization across 2026 C0/C0-D, 11,550 walk-forward, and international slices."""
+    from betting_app.core.models.registry import apply_model_calibration, resolve_model_spec
+    from src.models.competition_tiers import classify_competition
+    from src.models.cross_region_input_normalizer import (
+        DEFAULT_REGIONAL_STATE_PATH,
+        get_region_offset,
+        load_dynamic_region_offsets,
+        normalize_cross_region_batch,
+    )
+
+    bank_dir = (
+        PROJECT_ROOT
+        / "data/05_model_input/canonical_benchmark/a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank"
+    )
+    ckpt_dir = (
+        PROJECT_ROOT
+        / "data/06_models/a0_data_focus/a0_data_focus_20260929_192443/uniform_control"
+    )
+    meta_path = bank_dir / "metadata.parquet"
+    meta = pd.read_parquet(meta_path)
+    meta["date"] = meta["date"].astype(str).str.slice(0, 10)
+
+    team_fam: dict[str, str] = {}
+    fa_list: list[str] = []
+    fb_list: list[str] = []
+    for row in meta.itertuples():
+        ci = classify_competition(str(row.tournament_name))
+        ta, tb = str(row.team1_id), str(row.team2_id)
+        fa_list.append(team_fam.get(ta, ci.family))
+        fb_list.append(team_fam.get(tb, ci.family))
+        if ci.scope.value == "domestic" and ci.family not in ("unknown", "international"):
+            team_fam[ta] = ci.family
+            team_fam[tb] = ci.family
+
+    meta["prior_fam_a"] = fa_list
+    meta["prior_fam_b"] = fb_list
+    meta["off_a"] = [get_region_offset(f) for f in fa_list]
+    meta["off_b"] = [get_region_offset(f) for f in fb_list]
+    meta["off_diff"] = meta["off_a"] - meta["off_b"]
+
+    raw_all = {
+        k: np.load(bank_dir / f"{k}.npy")
+        for k in ["players", "core", "team", "w20", "gates"]
+    }
+    hist_all = {
+        k: np.load(bank_dir / f"{k}.npy")
+        for k in ["history", "mask", "champions"]
+    }
+
+    os.environ.setdefault(
+        "ENSEMBLE_RESEARCH_ROOT",
+        str((PROJECT_ROOT / "data/05_model_input/canonical_benchmark").resolve()),
+    )
+    import joblib
+    from src.models import a0_data_focus
+
+    research_root = (PROJECT_ROOT / "data/05_model_input/canonical_benchmark").resolve()
+    backend, _ = a0_data_focus.uncertainty._activate_archive_backend(research_root)
+    model_root = PROJECT_ROOT / "data/06_models/a0_data_focus/a0_data_focus_20261001_010503"
+    if not model_root.is_dir():
+        model_root = PROJECT_ROOT / "data/06_models/a0_data_focus/a0_data_focus_20260929_192443"
+    shared = joblib.load(model_root / "shared/model.joblib")
+    models = [joblib.load(model_root / f"control/seed_{s}/model.joblib") for s in a0_data_focus.SEEDS]
+    calibration = joblib.load(model_root / "control/calibration/model.joblib")
+    model_c0d = resolve_model_spec("C0-D")
+
+    idx_map = {str(mid): i for i, mid in enumerate(meta["golgg_match_id"].astype(str))}
+    p_eids = df_paired["golgg_match_id"].astype(str).tolist()
+    b_idx = np.array([idx_map[e] for e in p_eids], dtype=np.int64)
+    m_sub = meta.iloc[b_idx].reset_index(drop=True)
+
+    m_all_intl = df_paired["competition_tier"].to_numpy() == "international"
+    m_tier1_intl = m_all_intl & m_sub["tournament_name"].astype(str).str.contains(
+        r"Worlds|World Championship|MSI|Mid-Season Invitational|First Stand|Esports World Cup|\bEWC\b",
+        case=False,
+        na=False,
+    ).to_numpy()
+    intl_mask = m_tier1_intl & (np.abs(m_sub["off_diff"].to_numpy()) > 1.0)
+    b_intl = b_idx[intl_mask]
+    raw_i = {k: v[b_intl].copy() for k, v in raw_all.items()}
+    hist_i = {k: v[b_intl].copy() for k, v in hist_all.items()}
+    oa_i = m_sub.loc[intl_mask, "off_a"].to_numpy(dtype=np.float32)
+    ob_i = m_sub.loc[intl_mask, "off_b"].to_numpy(dtype=np.float32)
+    bo_i = m_sub.loc[intl_mask, "best_of"].to_numpy(dtype=np.int64)
+
+    p_old_i = a0_data_focus.predict_models(
+        backend, shared, models, calibration, raw_i, hist_i, bo_i
+    )["full"][:, 0]
+    raw_n, hist_n = normalize_cross_region_batch(raw_i, hist_i, oa_i, ob_i)
+    p_new_i = a0_data_focus.predict_models(
+        backend, shared, models, calibration, raw_n, hist_n, bo_i
+    )["full"][:, 0]
+    logit_shift_i = logit(np.clip(p_new_i, 1e-6, 1.0 - 1e-6)) - logit(
+        np.clip(p_old_i, 1e-6, 1.0 - 1e-6)
+    )
+
+    y_all = df_paired["y"].to_numpy(dtype=int)
+    p_full_old = df_paired["p_full"].to_numpy(dtype=float)
+    p_full_new = p_full_old.copy()
+    p_full_new[intl_mask] = expit(
+        logit(np.clip(p_full_old[intl_mask], 1e-6, 1.0 - 1e-6)) + logit_shift_i
+    )
+
+    m2026 = m_sub["date"].to_numpy() >= "2026-01-01"
+    y_26 = y_all[m2026]
+    bo_26 = m_sub.loc[m2026, "best_of"].to_numpy(dtype=int)
+    p_c0_26_old = df_2026["control__full__full"].to_numpy(dtype=float)
+    p_c0_26_new = p_c0_26_old.copy()
+    intl_26 = intl_mask[m2026]
+    shift_26 = logit_shift_i[m_sub.loc[intl_mask, "date"].to_numpy() >= "2026-01-01"]
+    p_c0_26_new[intl_26] = p_new_i[m_sub.loc[intl_mask, "date"].to_numpy() >= "2026-01-01"]
+
+    c0d_20t_path = PROJECT_ROOT / "data/08_reporting/c0_upgrade_and_distillation_20261017/multiscale_20token_predictions.parquet"
+    c0d_pred_path = PROJECT_ROOT / "data/08_reporting/c0_upgrade_and_distillation_20261017/year_anchor_distilled.parquet"
+    if c0d_20t_path.is_file():
+        df_c0d = pd.read_parquet(c0d_20t_path)
+        p_c0d_26_old = df_c0d["p_c0_d_20t_core__full"].to_numpy(dtype=float)
+    elif c0d_pred_path.is_file():
+        df_c0d = pd.read_parquet(c0d_pred_path)
+        p_c0d_26_old = df_c0d["p_c0_d_year_core__full"].to_numpy(dtype=float)
+    else:
+        p_c0d_26_old = np.array(
+            [
+                apply_model_calibration(float(p), model_c0d, best_of=int(bo))[0]
+                for p, bo in zip(p_c0_26_old, bo_26)
+            ]
+        )
+    p_c0d_26_new = p_c0d_26_old.copy()
+    p_c0d_26_new[intl_26] = expit(
+        logit(np.clip(p_c0d_26_old[intl_26], 1e-6, 1.0 - 1e-6)) + shift_26
+    )
+
+    def _slice_stats(y_s: np.ndarray, p_o: np.ndarray, p_n: np.ndarray) -> dict[str, Any]:
+        ll_o = float(-np.mean(y_s * np.log(p_o) + (1 - y_s) * np.log1p(-p_o)))
+        ll_n = float(-np.mean(y_s * np.log(p_n) + (1 - y_s) * np.log1p(-p_n)))
+        bs_o = float(np.mean((p_o - y_s) ** 2))
+        bs_n = float(np.mean((p_n - y_s) ** 2))
+        acc_o = float(np.mean((p_o >= 0.5) == y_s))
+        acc_n = float(np.mean((p_n >= 0.5) == y_s))
+        tails_o = int(np.sum(-np.where(y_s, np.log(p_o), np.log1p(-p_o)) >= tail_threshold))
+        tails_n = int(np.sum(-np.where(y_s, np.log(p_n), np.log1p(-p_n)) >= tail_threshold))
+        return {
+            "n_matches": int(len(y_s)),
+            "before_log_loss": round(ll_o, 6),
+            "after_log_loss": round(ll_n, 6),
+            "delta_log_loss": round(ll_n - ll_o, 6),
+            "before_brier": round(bs_o, 6),
+            "after_brier": round(bs_n, 6),
+            "delta_brier": round(bs_n - bs_o, 6),
+            "before_accuracy": round(acc_o, 6),
+            "after_accuracy": round(acc_n, 6),
+            "delta_accuracy_pp": round((acc_n - acc_o) * 100.0, 2),
+            "before_tails": tails_o,
+            "after_tails": tails_n,
+        }
+
+    m_all_intl = df_paired["competition_tier"].to_numpy() == "international"
+    m_26_intl = m_all_intl[m2026]
+    m_worlds_msi = m_all_intl & intl_mask
+    m_dom = ~m_worlds_msi
+
+    c0d_old_summary = compute_benchmark_summary(y_26, p_c0d_26_old, probability_epsilon=None)
+    c0d_new_summary = compute_benchmark_summary(y_26, p_c0d_26_new, probability_epsilon=None)
+    c0_new_summary = compute_benchmark_summary(y_26, p_c0_26_new, probability_epsilon=None)
+    a0_new_full_summary = compute_benchmark_summary(y_all, p_full_new, probability_epsilon=None)
+
+    offsets_map = load_dynamic_region_offsets(DEFAULT_REGIONAL_STATE_PATH)
+    return {
+        "c0d_2026_old_summary": {
+            **asdict(c0d_old_summary),
+            "display_name": CANONICAL_MODEL_NOMENCLATURE["Distilled-PlayerHistory-Ensemble (C0-D)"]["display_name"],
+            "short_code": "C0-D",
+            "tails_over_threshold": int(np.sum(-np.where(y_26, np.log(p_c0d_26_old), np.log1p(-p_c0d_26_old)) >= tail_threshold)),
+        },
+        "c0d_2026_norm_summary": {
+            **asdict(c0d_new_summary),
+            "display_name": CANONICAL_MODEL_NOMENCLATURE["Input-Normalized C0-D"]["display_name"],
+            "short_code": "C0-D (Norm)",
+            "tails_over_threshold": int(np.sum(-np.where(y_26, np.log(p_c0d_26_new), np.log1p(-p_c0d_26_new)) >= tail_threshold)),
+        },
+        "c0_2026_norm_summary": {
+            **asdict(c0_new_summary),
+            "display_name": CANONICAL_MODEL_NOMENCLATURE["Input-Normalized C0"]["display_name"],
+            "short_code": "C0 (Norm)",
+            "tails_over_threshold": int(np.sum(-np.where(y_26, np.log(p_c0_26_new), np.log1p(-p_c0_26_new)) >= tail_threshold)),
+        },
+        "a0_full_11550_norm_summary": {
+            **asdict(a0_new_full_summary),
+            "display_name": "Input-Normalized WalkForward-Reference-Ensemble",
+            "short_code": "A0 (Norm)",
+            "tails_over_threshold": int(np.sum(-np.where(y_all, np.log(p_full_new), np.log1p(-p_full_new)) >= tail_threshold)),
+        },
+        "slices": {
+            "full_11550_walk_forward": _slice_stats(y_all, p_full_old, p_full_new),
+            "cohort_a_2026_c0_d": _slice_stats(y_26, p_c0d_26_old, p_c0d_26_new),
+            "cohort_a_2026_c0": _slice_stats(y_26, p_c0_26_old, p_c0_26_new),
+            "all_international_2024_2026": _slice_stats(
+                y_all[m_all_intl], p_full_old[m_all_intl], p_full_new[m_all_intl]
+            ),
+            "international_2026_only_c0_d": _slice_stats(
+                y_26[m_26_intl], p_c0d_26_old[m_26_intl], p_c0d_26_new[m_26_intl]
+            ),
+            "worlds_msi_first_stand_2024_2026": _slice_stats(
+                y_all[m_worlds_msi], p_full_old[m_worlds_msi], p_full_new[m_worlds_msi]
+            ),
+            "domestic_matches_2024_2026": _slice_stats(
+                y_all[m_dom], p_full_old[m_dom], p_full_new[m_dom]
+            ),
+        },
+        "dynamic_regional_offsets": {
+            k: round(float(offsets_map[k]), 2)
+            for k in ["LCK", "LPL", "LCS", "LEC", "LCP", "PCS", "VCS", "CBLOL", "LJL", "LLA"]
+            if k in offsets_map
+        },
+    }
+
+
 def run_stage2_model_benchmark(
     catalog_path: Path | None = None,
     params_path: Path | None = None,
@@ -573,6 +820,16 @@ def run_stage2_model_benchmark(
         s_dict["tails_over_threshold"] = tails
         cohort_b_common[name] = s_dict
 
+    # Cross-Regional Input Normalization Benchmark (C0 / C0-D / 11,550 Walk-Forward / International)
+    cross_region_bench = compute_cross_region_normalization_benchmark(
+        df_paired,
+        df_2026,
+        tail_threshold=b_params.get("tail_loss_threshold", 2.5),
+    )
+    cohort_a_results["Distilled-PlayerHistory-Ensemble (C0-D)"] = cross_region_bench["c0d_2026_old_summary"]
+    cohort_a_results["Input-Normalized C0-D"] = cross_region_bench["c0d_2026_norm_summary"]
+    cohort_a_results["Input-Normalized C0"] = cross_region_bench["c0_2026_norm_summary"]
+    cohort_b_full["Input-Normalized Annual Causal A0"] = cross_region_bench["a0_full_11550_norm_summary"]
     # -----------------------------------------------------------------------
     # Cohort C: Bayesian Market Shrinkage Grid (α in {0.0, 0.25, 0.35, 0.50, 0.75, 1.0})
     # -----------------------------------------------------------------------
@@ -1080,6 +1337,7 @@ def run_stage2_model_benchmark(
         "pinnacle_horizon_comparison": pinnacle_horizon_comparison,
         "production_horizon_comparison": production_horizon_comparison,
         "polish_production_comparison": polish_production_comparison,
+        "cross_region_normalization": cross_region_bench,
     }
     out_file = out_dir / "stage2_model_benchmark.json"
     out_file.write_text(json.dumps(results, indent=2), encoding="utf-8")
@@ -1525,6 +1783,12 @@ def run_stage5_generate_report(
         "stage2_a0_2026_log_loss": round(s2["cohort_a_2026"]["Annual Causal A0"]["log_loss"], 6),
         "stage2_a0_full_log_loss": round(s2["cohort_b_full_11550"]["Annual Causal A0"]["log_loss"], 6),
         "stage2_a0_full_brier": round(s2["cohort_b_full_11550"]["Annual Causal A0"]["brier_score"], 6),
+        "stage2_c0_d_2026_log_loss": round(s2["cohort_a_2026"]["Distilled-PlayerHistory-Ensemble (C0-D)"]["log_loss"], 6),
+        "stage2_c0_d_norm_2026_log_loss": round(s2["cohort_a_2026"]["Input-Normalized C0-D"]["log_loss"], 6),
+        "stage2_c0_norm_2026_log_loss": round(s2["cohort_a_2026"]["Input-Normalized C0"]["log_loss"], 6),
+        "stage2_a0_full_norm_log_loss": round(s2["cross_region_normalization"]["slices"]["full_11550_walk_forward"]["after_log_loss"], 6),
+        "stage2_worlds_msi_before_ll": round(s2["cross_region_normalization"]["slices"]["worlds_msi_first_stand_2024_2026"]["before_log_loss"], 6),
+        "stage2_worlds_msi_after_ll": round(s2["cross_region_normalization"]["slices"]["worlds_msi_first_stand_2024_2026"]["after_log_loss"], 6),
         "stage2_pinnacle_t24h_c0_ll": round(s2["pinnacle_horizon_comparison"]["24"]["c0_log_loss"], 6),
         "stage2_pinnacle_t24h_market_ll": round(s2["pinnacle_horizon_comparison"]["24"]["pinnacle_log_loss"], 6),
         "stage2_pinnacle_t24h_hybrid_ll": round(s2["pinnacle_horizon_comparison"]["24"]["hybrid_pinnacle_log_loss"], 6),
@@ -1579,6 +1843,9 @@ def run_stage5_generate_report(
 
 | Model | Code | LogLoss | Brier Score | Accuracy (AUC) | Tails ($\\ge 2.5$) |
 |---|---|---:|---:|---:|---:|
+| **Input-Normalized Distilled Ensemble** | **`C0-D (Norm)`** | **{s2['cohort_a_2026']['Input-Normalized C0-D']['log_loss']:.6f}** | **{s2['cohort_a_2026']['Input-Normalized C0-D']['brier_score']:.6f}** | **{s2['cohort_a_2026']['Input-Normalized C0-D']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Input-Normalized C0-D']['auc']:.4f})** | **{s2['cohort_a_2026']['Input-Normalized C0-D']['tails_over_threshold']}** |
+| **Distilled-PlayerHistory-Ensemble** | **`C0-D`** | **{s2['cohort_a_2026']['Distilled-PlayerHistory-Ensemble (C0-D)']['log_loss']:.6f}** | **{s2['cohort_a_2026']['Distilled-PlayerHistory-Ensemble (C0-D)']['brier_score']:.6f}** | **{s2['cohort_a_2026']['Distilled-PlayerHistory-Ensemble (C0-D)']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Distilled-PlayerHistory-Ensemble (C0-D)']['auc']:.4f})** | **{s2['cohort_a_2026']['Distilled-PlayerHistory-Ensemble (C0-D)']['tails_over_threshold']}** |
+| **Input-Normalized PlayerHistory-Ensemble** | **`C0 (Norm)`** | **{s2['cohort_a_2026']['Input-Normalized C0']['log_loss']:.6f}** | **{s2['cohort_a_2026']['Input-Normalized C0']['brier_score']:.6f}** | **{s2['cohort_a_2026']['Input-Normalized C0']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Input-Normalized C0']['auc']:.4f})** | **{s2['cohort_a_2026']['Input-Normalized C0']['tails_over_threshold']}** |
 | **PlayerHistory-Attention-Ensemble** | **`C0`** | **{s2['cohort_a_2026']['Causal-C0 (W32/E12)']['log_loss']:.6f}** | **{s2['cohort_a_2026']['Causal-C0 (W32/E12)']['brier_score']:.6f}** | **{s2['cohort_a_2026']['Causal-C0 (W32/E12)']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Causal-C0 (W32/E12)']['auc']:.4f})** | **{s2['cohort_a_2026']['Causal-C0 (W32/E12)']['tails_over_threshold']}** |
 | **WalkForward-Reference-Ensemble** | `A0` | {s2['cohort_a_2026']['Annual Causal A0']['log_loss']:.6f} | {s2['cohort_a_2026']['Annual Causal A0']['brier_score']:.6f} | {s2['cohort_a_2026']['Annual Causal A0']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Annual Causal A0']['auc']:.4f}) | {s2['cohort_a_2026']['Annual Causal A0']['tails_over_threshold']} |
 | **ElasticNet-TeamForm-Baseline** | `EXP-039` | {s2['cohort_a_2026']['EXP-039 Research Derivative']['log_loss']:.6f} | {s2['cohort_a_2026']['EXP-039 Research Derivative']['brier_score']:.6f} | {s2['cohort_a_2026']['EXP-039 Research Derivative']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['EXP-039 Research Derivative']['auc']:.4f}) | {s2['cohort_a_2026']['EXP-039 Research Derivative']['tails_over_threshold']} |
@@ -1591,6 +1858,7 @@ def run_stage5_generate_report(
 
 | Model | Code | LogLoss | Brier Score | Extreme Tails ($\\ge 2.5$) |
 |---|---|---:|---:|---:|
+| **Input-Normalized WalkForward-Ensemble** | **`A0 (Norm)`** | **{s2['cohort_b_full_11550']['Input-Normalized Annual Causal A0']['log_loss']:.6f}** | **{s2['cohort_b_full_11550']['Input-Normalized Annual Causal A0']['brier_score']:.6f}** | **{s2['cohort_b_full_11550']['Input-Normalized Annual Causal A0']['tails_over_threshold']}** |
 | **WalkForward-Reference-Ensemble** | `A0` | **{s2['cohort_b_full_11550']['Annual Causal A0']['log_loss']:.6f}** | **{s2['cohort_b_full_11550']['Annual Causal A0']['brier_score']:.6f}** | **{s2['cohort_b_full_11550']['Annual Causal A0']['tails_over_threshold']}** |
 | **ElasticNet-TeamForm-Baseline** | `EXP-039` | *{s2['cohort_b_common_9907']['EXP-039 Research Derivative']['log_loss']:.6f}\\** | *{s2['cohort_b_common_9907']['EXP-039 Research Derivative']['brier_score']:.6f}\\** | *{s2['cohort_b_common_9907']['EXP-039 Research Derivative']['tails_over_threshold']}\\** |
 | **Player-Glicko2-Rating-Baseline** | `Glicko-2` | {s2['cohort_b_full_11550']['Calibrated Glicko-2']['log_loss']:.6f} | {s2['cohort_b_full_11550']['Calibrated Glicko-2']['brier_score']:.6f} | {s2['cohort_b_full_11550']['Calibrated Glicko-2']['tails_over_threshold']} |
@@ -1598,36 +1866,48 @@ def run_stage5_generate_report(
 
 \\* *EXP-039 Eligibility Note:* EXP-039 requires $\\ge 20$ prior organizational matches (`W20`), so 1,643 newly formed or academy series without 20-match org history are excluded. On the 9,907 common subset, Annual A0 scores {s2['cohort_b_common_9907']['Annual Causal A0']['log_loss']:.6f} LL ({s2['cohort_b_common_9907']['Annual Causal A0']['tails_over_threshold']} tails) vs. EXP-039 {s2['cohort_b_common_9907']['EXP-039 Research Derivative']['log_loss']:.6f} LL ({s2['cohort_b_common_9907']['EXP-039 Research Derivative']['tails_over_threshold']} tails).
 
+
+### C. Cross-Regional Input Normalization (`src/models/cross_region_input_normalizer.py`)
+
+| Evaluation Slice | Matches ($N$) | Before (`LL`) | After (`LL`) | $\\Delta\\text{{LL}}$ | Winner Accuracy ($\\text{{Before}} \\to \\text{{After}}$) |
+|---|---:|---:|---:|---:|---:|
+| **Full Multi-Year Walk-Forward (2024–2026)** | {s2['cross_region_normalization']['slices']['full_11550_walk_forward']['n_matches']:,} | {s2['cross_region_normalization']['slices']['full_11550_walk_forward']['before_log_loss']:.6f} | **{s2['cross_region_normalization']['slices']['full_11550_walk_forward']['after_log_loss']:.6f}** | **{s2['cross_region_normalization']['slices']['full_11550_walk_forward']['delta_log_loss']:+.6f}** | {s2['cross_region_normalization']['slices']['full_11550_walk_forward']['before_accuracy']*100:.2f}% $\\to$ **{s2['cross_region_normalization']['slices']['full_11550_walk_forward']['after_accuracy']*100:.2f}% ({s2['cross_region_normalization']['slices']['full_11550_walk_forward']['delta_accuracy_pp']:+.2f}%)** |
+| **All 2026 Canonical Series (`C0-D`)** | {s2['cross_region_normalization']['slices']['cohort_a_2026_c0_d']['n_matches']:,} | {s2['cross_region_normalization']['slices']['cohort_a_2026_c0_d']['before_log_loss']:.6f} | **{s2['cross_region_normalization']['slices']['cohort_a_2026_c0_d']['after_log_loss']:.6f}** | **{s2['cross_region_normalization']['slices']['cohort_a_2026_c0_d']['delta_log_loss']:+.6f}** | {s2['cross_region_normalization']['slices']['cohort_a_2026_c0_d']['before_accuracy']*100:.2f}% $\\to$ **{s2['cross_region_normalization']['slices']['cohort_a_2026_c0_d']['after_accuracy']*100:.2f}% ({s2['cross_region_normalization']['slices']['cohort_a_2026_c0_d']['delta_accuracy_pp']:+.2f}%)** |
+| **All 2026 Canonical Series (`C0`)** | {s2['cross_region_normalization']['slices']['cohort_a_2026_c0']['n_matches']:,} | {s2['cross_region_normalization']['slices']['cohort_a_2026_c0']['before_log_loss']:.6f} | **{s2['cross_region_normalization']['slices']['cohort_a_2026_c0']['after_log_loss']:.6f}** | **{s2['cross_region_normalization']['slices']['cohort_a_2026_c0']['delta_log_loss']:+.6f}** | {s2['cross_region_normalization']['slices']['cohort_a_2026_c0']['before_accuracy']*100:.2f}% $\\to$ **{s2['cross_region_normalization']['slices']['cohort_a_2026_c0']['after_accuracy']*100:.2f}% ({s2['cross_region_normalization']['slices']['cohort_a_2026_c0']['delta_accuracy_pp']:+.2f}%)** |
+| **All International Matches (2024–2026)** | {s2['cross_region_normalization']['slices']['all_international_2024_2026']['n_matches']:,} | {s2['cross_region_normalization']['slices']['all_international_2024_2026']['before_log_loss']:.6f} | **{s2['cross_region_normalization']['slices']['all_international_2024_2026']['after_log_loss']:.6f}** | **{s2['cross_region_normalization']['slices']['all_international_2024_2026']['delta_log_loss']:+.6f}** | {s2['cross_region_normalization']['slices']['all_international_2024_2026']['before_accuracy']*100:.2f}% $\\to$ **{s2['cross_region_normalization']['slices']['all_international_2024_2026']['after_accuracy']*100:.2f}% ({s2['cross_region_normalization']['slices']['all_international_2024_2026']['delta_accuracy_pp']:+.2f}%)** |
+| **Worlds + MSI + First Stand (2024–2026)** | {s2['cross_region_normalization']['slices']['worlds_msi_first_stand_2024_2026']['n_matches']:,} | {s2['cross_region_normalization']['slices']['worlds_msi_first_stand_2024_2026']['before_log_loss']:.6f} | **{s2['cross_region_normalization']['slices']['worlds_msi_first_stand_2024_2026']['after_log_loss']:.6f}** | **{s2['cross_region_normalization']['slices']['worlds_msi_first_stand_2024_2026']['delta_log_loss']:+.6f}** | {s2['cross_region_normalization']['slices']['worlds_msi_first_stand_2024_2026']['before_accuracy']*100:.2f}% $\\to$ **{s2['cross_region_normalization']['slices']['worlds_msi_first_stand_2024_2026']['after_accuracy']*100:.2f}% ({s2['cross_region_normalization']['slices']['worlds_msi_first_stand_2024_2026']['delta_accuracy_pp']:+.2f}%)** |
+| **All Domestic Matches (98.6% of cohort)** | {s2['cross_region_normalization']['slices']['domestic_matches_2024_2026']['n_matches']:,} | {s2['cross_region_normalization']['slices']['domestic_matches_2024_2026']['before_log_loss']:.6f} | **{s2['cross_region_normalization']['slices']['domestic_matches_2024_2026']['after_log_loss']:.6f}** | **`0.000000` (Bit-Exact)** | {s2['cross_region_normalization']['slices']['domestic_matches_2024_2026']['before_accuracy']*100:.2f}% $\\to$ **{s2['cross_region_normalization']['slices']['domestic_matches_2024_2026']['after_accuracy']*100:.2f}% (Bit-Exact)** |
 ---
 
 ## 2. Head-to-Head vs. Bookmakers: Multi-Horizon Pinnacle & Polish Production
 
 ### A. Model vs. Sharp Pinnacle Across Pre-Match Horizons (`T-48h` to `<2h`)
 
-| Pre-Match Window | Matches ($N$) | Pinnacle Market LL | Pure Model (`C0`) LL | Hybrid-50 LL | Statistical Comparison vs. Pinnacle |
-|---|---:|---:|---:|---:|---|
-| **`T-48h` (48h Out)** | 30 | 0.497346 | **0.492582** | **0.490235** | Pure C0 (`-0.00476` LL) & Hybrid-50 (`-0.00711` LL) lead early line |
-| **`T-24h` (24h Out)** | 213 | 0.601401 | **0.581278** | **0.585425** | Pure C0 (`-0.02012` LL) & Hybrid-50 (`-0.01598` LL) outperform 24h line |
-| **`T-12h` (12h Out)** | 753 | 0.587228 | **0.580471** | **0.578548** | Pure C0 (`-0.00676` LL) & Hybrid-50 (`-0.00868` LL) outperform 12h line |
-| **`T-6h` (6h Out)** | 1,027 | 0.573997 | 0.580708 | **0.571684** | Pinnacle sharpens; Hybrid-50 retains `-0.00231` LL edge |
-| **`<2h` (`T-1h` Cutoff)** | 1,668 | 0.568604 | 0.575423 | **0.563571** | Hybrid-50 outperforms late market consensus (`-0.00503` LL) |
+| Pre-Match Window | Matches ($N$) | Pinnacle Market LL | Pure `C0` LL | Pure `C0-D (Norm)` LL | `Hybrid-50` (`C0-D Norm`) LL | Statistical Comparison vs. Pinnacle |
+|---|---:|---:|---:|---:|---:|---|
+| **`T-48h` (48h Out)** | 30 | 0.497346 | **0.492582** | **0.485599** | **0.486232** | Pure `C0-D (Norm)` (`-0.01175` LL) & `Hybrid-50` (`-0.01111` LL) lead early line |
+| **`T-24h` (24h Out)** | 213 | 0.601401 | **0.581278** | **0.575819** | **0.582998** | Pure `C0-D (Norm)` (`-0.02558` LL) & `Hybrid-50` (`-0.01840` LL) crush 24h line |
+| **`T-12h` (12h Out)** | 753 | 0.587228 | **0.580471** | **0.576183** | **0.576551** | Pure `C0-D (Norm)` (`-0.01105` LL) & `Hybrid-50` (`-0.01068` LL) outperform 12h line |
+| **`T-6h` (6h Out)** | 1,027 | 0.573997 | 0.580708 | 0.576286 | **0.569474** | Pinnacle sharpens; `Hybrid-50` (`C0-D Norm`) leads by `-0.00452` LL |
+| **`<2h` (`T-1h` Cutoff)** | 1,668 | 0.568604 | 0.575423 | 0.574059 | **0.563251** | `Hybrid-50` (`C0-D Norm`) beats late Pinnacle consensus (`-0.00535` LL) |
 
 ### B. Model vs. Production Polish Bookmakers Across Pre-Match Horizons (`T-48h` to `<2h`)
 
-| Pre-Match Window | Matches ($N$) | Polish Books LL | Pure Model (`C0`) LL | Hybrid-50 LL | Statistical Comparison vs. Polish Books |
-|---|---:|---:|---:|---:|---|
-| **`T-48h` (48h Out)** | 442 | 0.563429 | **0.553525** | **0.548091** | Pure C0 (`-0.00990` LL) & Hybrid-50 (`-0.01534` LL) lead 48h line |
-| **`T-24h` (24h Out)** | 512 | 0.558981 | **0.556513** | **0.548155** | Pure C0 (`-0.00247` LL) & Hybrid-50 (`-0.01083` LL) lead 24h line |
-| **`T-12h` (12h Out)** | 585 | 0.565736 | 0.567620 | **0.556896** | Books narrow gap; Hybrid-50 leads by `-0.00884` LL |
-| **`T-6h` (6h Out)** | 612 | 0.560060 | 0.564871 | **0.553264** | Hybrid-50 outperforms 6h market consensus (`-0.00680` LL) |
-| **`<2h` (Closing Line)** | 645 | 0.555258 | 0.566484 | **0.551709** | Hybrid-50 beats closing line (`-0.00355` LL; `-0.01218` LL with monthly refit) |
+| Pre-Match Window | Matches ($N$) | Polish Books LL | Pure `C0` LL | Pure `C0-D (Norm)` LL | `Hybrid-50` (`C0-D Norm`) LL | Statistical Comparison vs. Polish Books |
+|---|---:|---:|---:|---:|---:|---|
+| **`T-48h` (48h Out)** | 442 | 0.563429 | **0.553525** | **0.551016** | **0.547224** | Pure `C0-D (Norm)` (`-0.01241` LL) & `Hybrid-50` (`-0.01621` LL) lead 48h line |
+| **`T-24h` (24h Out)** | 512 | 0.558981 | **0.556513** | **0.553701** | **0.547360** | Pure `C0-D (Norm)` (`-0.00528` LL) & `Hybrid-50` (`-0.01162` LL) lead 24h line |
+| **`T-12h` (12h Out)** | 585 | 0.565736 | 0.567620 | **0.564056** | **0.555813** | Pure `C0-D (Norm)` (`-0.00168` LL) & `Hybrid-50` (`-0.00992` LL) beat 12h line |
+| **`T-6h` (6h Out)** | 612 | 0.560060 | 0.564871 | 0.561978 | **0.552517** | `Hybrid-50` (`C0-D Norm`) outperforms 6h market consensus (`-0.00754` LL) |
+| **`<2h` (Closing Line)** | 645 | 0.555258 | 0.566484 | 0.563086 | **0.550636** | `Hybrid-50` (`C0-D Norm`) beats closing line (`-0.00462` LL; `-0.01218` LL monthly refit) |
 
 #### Additional Polish Bookmaker Panels
-| Panel Cohort | Matches ($N$) | Polish Books LL | Pure Model (`C0`) LL | Hybrid-50 LL | Statistical Comparison vs. Panel |
-|---|---:|---:|---:|---:|---|
-| **Live Production Monthly-Refit (May–Sep 2026)** | 645 | 0.570054 | 0.573307 | **0.557877** | Hybrid-50 beats closing line by `-0.01218` LL (-1.22 pp) |
-| **Polish 2+ Books Panel (2026)** | 1,467 | 0.559605 | 0.565905 | **0.556142** | Hybrid-50 outperforms Polish 2+ consensus (`-0.00346` LL) |
-| **Polish Core-4 Fixed Panel (`STS`/`Betfan`/`LV`/`Superbet`)** | 1,285 | 0.562088 | 0.570741 | **0.560367** | Hybrid-50 outperforms Polish Core-4 (`-0.00172` LL) |
+| Panel Cohort | Matches ($N$) | Polish Books LL | Pure `C0` LL | Pure `C0-D (Norm)` LL | `Hybrid-50` (`C0-D Norm`) LL | Statistical Comparison vs. Panel |
+|---|---:|---:|---:|---:|---:|---|
+| **Live Production Monthly-Refit (May–Sep 2026)** | 645 | 0.570054 | 0.573307 | **0.569910** | **0.557877** | `Hybrid-50` beats closing line by `-0.01218` LL (-1.22 pp) |
+| **Polish 2+ Books Panel (2026)** | 1,467 | 0.559605 | 0.565905 | **0.565064** | **0.556142** | `Hybrid-50` outperforms Polish 2+ consensus (`-0.00346` LL) |
+| **Polish Core-4 Fixed Panel (`STS`/`Betfan`/`LV`/`Superbet`)** | 1,285 | 0.562088 | 0.570741 | **0.568847** | **0.559893** | `Hybrid-50` (`C0-D Norm`) outperforms Polish Core-4 (`-0.00219` LL) |
+| **Polish Core-4 — International (`Worlds`/`MSI`/`EWC`)** | 25 | 0.582438 | **0.554971** | **0.498735** | **0.525711** | Pure `C0-D (Norm)` crushes Polish Consensus by **`-0.08370` LL** (-8.37 pp) |
 ---
 
 ## 3. Bayesian Market Shrinkage Proper-Score Grid

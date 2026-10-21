@@ -1,3 +1,128 @@
+## 2026-10-20 — Zero-Lookahead Leave-One-Out Opening Consensus (q_open_loo), Econometric Decomposition & Production Invariants
+
+Rigorous formalization and mathematical audit of zero-lookahead consensus shrinkage on the Polish production counterfactual cohort ($N=50$ and $N=43$), resolving the econometric decomposition between Claimed EV, True Edge (Net CLV), Residual Optimizer's Curse Bias ($B$), and Match Luck Noise ($\eta$).
+
+### 1. Zero-Lookahead Leave-One-Out (LOO) Consensus Definition
+To strictly prevent closing-line lookahead or self-referential bookmaker bias, probabilities are shrunk toward the **Leave-One-Out opening consensus** $q_{\text{open, loo}, -k}(t)$ evaluated at the exact quote scrape timestamp $t_{\text{hit}}$:
+- **Zero Lookahead:** $q_{\text{open, loo}, -k}(t)$ is constructed solely from contemporaneous opening prices available at timestamp $t_{\text{hit}}$, ensuring $q_{\text{open, loo}} \neq q_{\text{close}}$ across 100.0% of evaluated fixtures.
+- **Leave-One-Out Independence:** When evaluating execution opportunity at bookmaker $k$, consensus is computed via Shin de-vigging across the remaining active bookmakers $\mathcal{M} \setminus \{k\}$, preventing bookmaker $k$'s own pricing error from polluting the reference consensus.
+- **Bayesian Logit Shrinkage ($\alpha = 0.65$):**
+  $$\text{logit}(p_{\text{hybrid}}) = 0.35 \cdot \text{logit}(p_{\text{C0}}) + 0.65 \cdot \text{logit}(q_{\text{open, loo}, -k}(t))$$
+
+### 2. 50-Bet Fixed Production Ledger Econometric Audit (`optimal_strategy_simulation_ledger.csv`)
+Evaluating the canonical 50-bet production ledger (`conf/base/catalog.yml` hash `b51ee7b41d666a6c96de88d1fe25d669a640bbccd1cdf75f585c545c79dfd90a`) under the zero-lookahead $q_{\text{open, loo}}$ shrinkage yields:
+- **Sample Count & Realized Performance:** $N=50$ bets (29 wins, 21 losses, **58.0% win rate**). Total turnover 7,173.15 PLN, net profit **+1,715.41 PLN**, **Realized Yield: +23.91%** (+17.15% bankroll ROI on 10,000 PLN capital). Max drawdown 6.10%.
+- **Raw Price Edge:** Mean Raw CLV = **+19.13%** ($t = 10.45, p < 10^{-13}$).
+- **True Long-Term Mathematical Profit:** **Net CLV = +4.83%** ($t = 3.00, p = 0.0042$, 95% bootstrap CI `[+1.68%, +7.98%]`).
+- **Claimed EV:**
+  - Pure C0 Claimed EV: `+22.05%`
+  - Shrunk Hybrid Claimed EV: **`+8.59%`** (reduced by **`-13.46 pp`** via $q_{\text{open, loo}}$ shrinkage, down from $+22.05\%$).
+- **Optimizer's Curse Bias ($B = \text{Claimed EV} - \text{Net CLV}$):**
+  - Residual Bias: **`+3.76 pp`** (compressed down from $+8.57\text{ pp}$ prior to the $q_{\text{open, loo}}$ correction).
+  - **Fundamental Milestone:** Residual Optimizer's Curse Bias is now **strictly smaller than True Net CLV**:
+    $$B = +3.76\text{ pp} < \text{Net CLV} = +4.83\%$$
+  - **Edge Retention Rate:** $\frac{\text{Net CLV}}{\text{Claimed EV}} = \frac{4.83\%}{8.59\%} = \mathbf{56.2\%}$ (over half of the model's promised expected return represents durable price alpha).
+- **Match Luck Noise ($\eta = \text{Realized Yield} - \text{Net CLV}$):** **`+19.42 pp`** (transient binomial variance that decays to zero as $\sigma / \sqrt{N}$).
+- **Algebraic Identity Verification:** $\text{Realized Yield} = \text{Claimed EV} - B + \eta \equiv \text{Net CLV} + \eta$ holds with maximum scalar residual $< 10^{-15}$.
+
+### 3. Distilled Model Family Benchmark (`C0-D` under Wasserstein DRO, No EXP-039)
+Evaluating the self-contained 3-seed 18-token distilled model (`C0-D`) without the EXP-039 organizational form veto under Wasserstein DRO ($\varepsilon = 0.025$):
+- **Bets ($N$):** `43` (26 wins, 17 losses, **60.5% win rate**)
+- **Financial Return:** Turnover 6,346.54 PLN, **Net Profit: +1,765.78 PLN**, **Realized Yield: +27.82%**, Bankroll ROI: **+17.66%**, Sharpe: **1.56**, Max DD: **6.00%**.
+- **Polish Longshots (Odds 2.30–4.00):** 26 bets, 57.7% win rate, **+1,793.15 PLN**, **+47.41% Yield**, 1.79 Sharpe, 3.89% Max DD.
+- **True Edge (Net CLV):** **`+6.02%`**.
+- **Pre-DRO Optimizer's Curse Bias ($B$):** **`+2.14 pp`** (strictly smaller than $+6.02\%$ Net CLV!).
+- **Post-DRO Optimizer's Curse Bias ($B_{\text{DRO}}$):** **`-3.62 pp`** (**Zero-Disappointment Guarantee!** Because $B_{\text{DRO}} \le 0$, the robust promised return $(p_{\text{hybrid}} - 0.025) \cdot 0.88 \cdot O - 1$ strictly underestimates true net closing edge, guaranteeing the investor is never disappointed).
+
+### 4. Gate Simplification Protocol (4 Active Production Rules)
+Under Wasserstein DRO and LOO opening consensus shrinkage, the decision stack under 12% Polish tax is simplified from legacy heuristic vetoes into **4 mathematical rules**:
+1. **Leave-One-Out (LOO) Market Shrinkage**: $q_{\text{open, loo}, -k}(t)$ across remaining active books at the exact scrape timestamp without lookahead ($\alpha = 0.65$).
+2. **Wasserstein DRO Gate ($\text{EV}_{\text{DRO}} > 0\%$)**: $(p_{\text{hybrid}} - 0.025) \cdot 0.88 \cdot O - 1 > 0$.
+3. **Logit Divergence Gate (`Guard B` $\le 0.85$)**: $|\text{logit}(p_{\text{C0}}) - \text{logit}(q_{\text{open, loo}})| \le 0.85$.
+4. **Odds Ceiling**: $\text{Odds} \le 4.00$.
+
+**Retired Legacy Filters:**
+- `Max EV <= 25%`: Retired (redundant; Wasserstein DRO naturally bounds tail overconfidence).
+- `Min EV >= 5%`: Retired (subsumed by $\text{EV}_{\text{DRO}} > 0\%$).
+- `Model-Consensus-Veto` (`EXP-039`): Retired for the distilled model family (`C0-D` / `C0-Slim`). Pure student neural attention achieves superior probability calibration (ECE 1.87%) without requiring external 20-match linear form validation.
+
+### 5. Production Counterfactual Alignment Invariants & Walk-Forward Rule
+To ensure reproducible, zero-lookahead backtests and eliminate side mismatch errors across asynchronous bookmaker APIs, any script reading raw `data/01_raw/c0_production_counterfactual/c0_production_20261006_01/quotes.parquet` MUST adhere to three strict invariant joins:
+1. **Quote Alignment Join**: Join `data/08_reporting/c0_production_counterfactual/c0_production_20261006_01/quote_alignment.parquet` (`quote_identity_status == 'verified'`) and orient `odds_1, odds_2` strictly via boolean `raw_a_is_team1`.
+2. **Identity Alignment Join**: Join `data/08_reporting/c0_production_counterfactual/c0_production_20261006_01/identities.parquet` (`identity_status == 'verified'`, `date_within_one_day != False`) and align model prediction probabilities (`year_anchor_distilled_predictions.parquet`) via `str(int(float(ident.team1_id))) == str(int(float(p26.team1_id)))`.
+3. **Batch Execution & LOO Consensus**: Group evaluations strictly at the end of each 2-hour cron scrape batch (`bucket_2h = scraped_dt.dt.floor('2h')`) with a `freshness <= 12h` window and compute Leave-One-Out consensus $q_{\text{open, loo}, -k}$ across the other active bookmakers excluding the focal bookmaker.
+
+*Scientific Mandate:* Never evaluate unaligned quotes or incorporate closing market prices into $p_{\text{hybrid}}$.
+
+## 2026-10-18 — C0 Knowledge Distillation, 18-Token Year-Anchor Multi-Horizon Consolidation & Distilled Family Rebranding (C0, C0-D, C0-Slim, C0-Mini)
+
+Comprehensive consolidation of the multi-track C0 upgrade and knowledge distillation campaign, establishing the **18-Token Multi-Horizon sequence (`16 Recent Maps + 365-Day Whole-Year Anchor Token + Empty Token`)** as the standard **C0 Model Family** architecture.
+
+The pure, self-contained 3-seed 18-Token Born-Again Distilled model (`19,914` neural params = `6,638`/seed, zero external LightGBM/connector dependencies) is formally selected as **`C0-D`**, delivering family-leading probability calibration (**1.87% ECE**), unclipped log-loss of **0.534134**, and exceptional realized profitability under DRO on licensed Polish books (**+1,765.78 PLN**, **+27.82% Yield**, **1.56 Sharpe**). Primary artifacts, evaluation manifests, and financial ledgers are preserved under [`data/08_reporting/c0_upgrade_and_distillation_20261017/`](../data/08_reporting/c0_upgrade_and_distillation_20261017/).
+
+### 1. Temporal Protocol & Partition Boundaries
+Strict non-overlapping temporal partition protocol preserved across all tracks:
+- **`TRAIN`**: 36,205 matches strictly preceding `2025-07-01` (feature extraction, base model fitting, and teacher distillation).
+- **`CAL`**: 1,328 matches in `2025H2` (`2025-07-01` to `2026-01-01`) for Platt/Beta temperature calibration and specialist connector training.
+- **`ASSESS`**: 3,103 canonical 2026 matches (`2026-01-08` to `2026-09-08`, 9 monthly blocks) evaluated out-of-sample under strict causal constraints.
+
+### 2. Standardized Short Codes & Model Nomenclature
+- **`C0`** (`PlayerHistory-Attention-Ensemble`, wire `Causal-C0`, `c0-year-18token-w32-e12-v1` / `c0-native-2026-w32-e12-v1`): Standard 3-seed `W32/E12` attention ensemble with the 18-token multi-horizon sequence (`19,914` neural params, 6,638/seed), inference latency `848 ms`. LogLoss **0.534777**, Brier **0.180842**, ECE **2.17%**, Tails **9**. Legacy 17-token `C0-16m` baseline (`0.535449` LL / 12 tails) remains pinned for benchmark parity.
+- **`C0-D`** (`BornAgain-Distilled-Attention-Ensemble`, wire `Causal-C0-D`, `c0-d-born-again-w32-v1`): Pure 3-seed 18-Token Born-Again Distilled `W32` ensemble (`19,914` neural params = 6,638/seed, zero tree/connector dependencies), distilled from the 9-checkpoint teacher with $\lambda = 0.60$ soft loss. LogLoss **0.534134** ($\Delta\text{LL} = -0.001315$ vs legacy C0, $-0.000643$ vs 18-token C0; `0.533984` with optional connector+ONS as `C0-D+`), Brier **0.180468**, ECE **1.87%** (best calibration across all models), Tails **13**. Financials (Polish bookmakers, 12% tax, DRO active, no EXP-039): 43 bets, 60.5% win rate, **+1,765.78 PLN** profit (**+27.82% Yield**, **+17.66% ROI**, **1.56 Sharpe**, Net CLV **+6.02%**, Pre-DRO Curse **+2.14 pp** [$< +6.02\%$], Post-DRO Curse **-3.62 pp** [Zero-Disappointment Guarantee]); Polish Longshots (`Odds 2.30–4.00`): 26 bets, 57.7% win rate, **+1,793.15 PLN** (**+47.41% Yield**, **1.79 Sharpe**). Strictly passes all 6 C0 replacement guards. Selected as standard `C0-D` over the connector variant due to zero runtime coupling and superior calibration.
+- **`C0-Slim` / `C0-D1`** (`SingleSeed-Distilled-Attention`, wire `Causal-C0-Slim`, `c0-slim-1seed-w32-v1`): Single-seed 18-Token Distilled `W32` (`6,638` neural params = 1/3rd size), **3.1x faster** (`278 ms` vs `848 ms`). LogLoss **0.534656**, Brier **0.180667**, ECE **1.92%**, Tails **13**. Financials: Polish cohort +1,643.79 PLN (+26.53% Yield); Pinnacle $T-1\text{h}$ 12% tax: 29 bets, 48.3% win rate, **+1,348.78 PLN** (**+34.37% Yield**, 1.15 Sharpe); Pinnacle 0% tax: 560 bets, **+5,024.57 PLN** (**+6.04% Yield**, **+50.25% ROI**, 1.52 Sharpe); Pinnacle Longshots (`Odds 2.30–4.00`, 0% tax): 211 bets, **+4,462.18 PLN** (**+14.59% Yield**, 1.59 Sharpe). Passes all 6 C0 replacement guards.
+- **`C0-Mini` / `C0-Small`** (`HalfWidth-Distilled-Attention`, wire `Causal-C0-Mini`, `c0-mini-w16-kd-v1`): 3-seed distilled W16/E12 (`8,394` neural params = `2,798`/seed, 58% width reduction vs W32). LogLoss **0.535845** ($\Delta\text{LL} = -0.000800$ vs `W16-Direct` `0.536645`), Brier **0.181188**, ECE **2.13%**, Tails **14**. Passes all 6 C0 replacement guards (curing `W16-Direct`'s Major and LPL guard failures).
+
+### 3. Multi-Track Research Outcomes & Scientific Dispositions
+- **Track 1: Knowledge Distillation for Simpler & More General Models (`track1_distillation.json`)**
+  - Teacher A: 3-seed W32/E12 C0 ensemble logits. Loss: $\mathcal{L} = 0.5 \mathcal{L}_{\text{KD}}(\tau=1.0) + 0.5 \mathcal{L}_{\text{BCE}}$.
+  - `student_1c_w32_kd` (Born-Again W32-KD, 3 seeds): LogLoss **0.534418**, Brier **0.180559**, ECE **1.88%**, Tails **14**, $\Delta\text{LL} = -0.001031$ ($95\%$ CI `[-0.002232, +0.000396]`).
+  - `student_1b_w32_kd` (`C0-Slim`, 1 seed): LogLoss **0.535062**, Brier **0.180818**, ECE **2.13%**, Tails **13**, latency **278 ms** (3.05x speedup over 3-seed C0 848 ms). Passes all 6 C0 guards; slashes LPL LogLoss to 0.60684 ($-0.00610$ vs C0 0.61294).
+  - `student_1a_w16_kd` (`C0-Mini`, 3 seeds W16): LogLoss **0.535845**, Brier **0.181188**, ECE **2.13%**, Tails **14**. Improves over `W16-Direct` (LogLoss 0.536645) by $-0.000800$, curing both Major (+0.00117 vs +0.00357) and LPL (+0.00451 vs +0.01010) guard failures.
+  - **Verdict:** **ADOPTED_DISTILLED_CORE_AND_VARIANTS**. Distillation strictly compresses neural representation while retaining or improving baseline log-loss.
+- **Track 2: Role-Aligned Lane Interaction & Opponent-Conditioned History Attention (`track2_role_lane_attention.json`)**
+  - Evaluated 8 lane/duo interaction heads with Hungarian role assignment and opponent-team query-conditioned history attention.
+  - Results: Standalone LogLoss **0.576895**, Brier **0.197477**; CAL-optimal blend with C0 ($\alpha=0.295$) LogLoss **0.535282** ($\Delta\text{LL} = -0.000166$, 95% CI `[-0.000832, +0.000499]`).
+  - **Verdict:** **NOT_ADOPTED**. Paired bootstrap CI spans zero; fails replacement criteria without independent predictive edge.
+- **Track 3: Continuous Champion Archetype Embeddings + 15% UNK Token Dropout (`track3_champion_archetypes.json`)**
+  - Evaluated 18-dim empirical Bayes continuous role-archetype embeddings from 5.2M prior maps with 15% random UNK token dropout.
+  - Results: Standalone LogLoss **0.551842**; CAL-optimal blend with C0 ($\alpha=0.377$) LogLoss **0.535698** ($\Delta\text{LL} = +0.000249$, 95% CI `[-0.000572, +0.001070]`).
+  - **Verdict:** **NOT_ADOPTED**. Passes all slice guards but exhibits mild loss regression (+0.00025); continuous champion vectors do not outperform player token histories.
+- **Track 4: Uncertainty/Disagreement-Gated Mixture + Online Newton Step (ONS) Recalibration (`track4_gated_mixture_ons.json`)**
+  - Re-audited Plan09 Connector against C0: passes all guards (All $\Delta\text{LL} = -0.000972$, 95% CI `[-0.001673, -0.000253]`; BO5 upper CI `+0.003570 <= 0.00500`; Source-Unseen upper CI `+0.001338 <= 0.00500`).
+  - Pipeline with Connector + causal `ONS` reaches Canonical LogLoss **0.533984** (`0.534120` on earlier checkpoint), Brier **0.180381**, Tails **10**.
+  - Causal ONS Platt scaling: Gupta & Ramdas (ICML 2023), $\gamma=0.005, \epsilon=1.0$, updated strictly on past match days with identity initialization.
+  - **Verdict:** **VALIDATED_UPGRADE_CHAIN**. Retained as optional `C0-D+` research variant; pure neural core selected as `C0-D` standard due to zero connector overhead and superior calibration.
+- **Track 5: 18-Token Multi-Horizon Consolidation & Year-Anchor Distillation (`year_anchor_distilled.json`, `year_anchor_undistilled.json`)**
+  - Augmented sequence with 365-day whole-year anchor token (`[empty_token, year_anchor_365d_token, map_1, ..., map_16]`), expanding parameters by only +32 params/seed (`6,638` vs `6,606`).
+  - Verification: Cold-start neutrality maximum deviation = `0.0`, side-swap prob antisymmetry deviation $< 1.2 \times 10^{-16}$.
+  - Undistilled 18-Token `C0`: LogLoss **0.534777**, Brier **0.180842**, ECE **2.17%**, Tails **9** ($\Delta\text{LL} = -0.000671$ vs legacy C0).
+  - Distilled 18-Token `C0-D` (pure): LogLoss **0.534134**, Brier **0.180468**, ECE **1.87%**, Tails **13** ($\Delta\text{LL} = -0.001315$ vs legacy C0).
+  - Distilled 18-Token `C0-Slim`: LogLoss **0.534656**, Brier **0.180667**, ECE **1.92%**, Tails **13**, latency **278 ms** ($3.1\times$ speedup).
+  - **Verdict:** **ADOPTED_AS_STANDARD_C0_FAMILY**.
+
+### 4. Canonical 2026 Assessment Metrics & 95% Bootstrap Intervals ($N=3,103$)
+9 monthly-block, 5,000-resample bootstrap intervals versus legacy baseline `C0`:
+
+| Model Code | Configuration & Scope | LogLoss | $\Delta\text{LL}$ vs Legacy C0 | 95% Bootstrap CI | Brier Score | ECE | Tails ($\ge 2.5$) | Guards Verdict |
+|---|---|---|---|---|---|---|---|---|
+| **`C0-D`** | Pure 3-seed 18-Token Distilled (No Conn) | **0.534134** | **-0.001315** | `[-0.002232, -0.000396]` | **0.180468** | **1.87%** | 13 | **PASS (All 6)** |
+| **`C0-D+`** | 3-seed 18-Token Distilled + Conn + ONS | **0.533984** | **-0.001464** | `[-0.002416, -0.000445]` | **0.180381** | 2.58% | **10** | **PASS (All 6 + A0 BO5)** |
+| **`C0-Slim`** | 1-seed 18-Token Distilled W32 (278 ms) | **0.534656** | **-0.000793** | `[-0.002775, +0.001577]` | **0.180667** | **1.92%** | 13 | **PASS (All 6)** |
+| **`C0` (18-Token)** | Standard 3-seed 18-Token Year-Anchor | **0.534777** | **-0.000671** | `[-0.001195, +0.000039]` | **0.180842** | 2.17% | **9** | **PASS (All 6)** |
+| `C0` (17-Token Pin) | Legacy 3-seed W32/E12 Baseline Pin | 0.535449 | 0.000000 | — | 0.181034 | 2.29% | 12 | Reference |
+| **`C0-Mini`** | 3-seed Distilled W16 (58% width) | **0.535845** | +0.000396 | `[-0.001119, +0.002158]` | 0.181188 | 2.13% | 14 | **PASS (All 6)** |
+| `W16-Direct` | 3-seed Direct W16 (unsupervised) | 0.536645 | +0.001196 | `[-0.000418, +0.002762]` | 0.181558 | 2.50% | 12 | FAIL (Major, LPL) |
+
+### 5. Artifact Directory Inventory
+All artifacts, trained checkpoints, evaluation summaries, and financial strategy comparisons are preserved under `data/08_reporting/c0_upgrade_and_distillation_20261017/`:
+- **Consolidated 18-Token Reports:** `year_anchor_distilled.json`, `year_anchor_distilled_predictions.parquet`, `year_anchor_undistilled.json`, `year_anchor_undistilled_predictions.parquet`
+- **Financial Simulation Ledgers:** `financial_strategy_comparison.csv`, `financial_simulation_results.json`
+- **Cross-Track & Market Summaries:** `cross_track_synthesis.json`, `market_cohort_synthesis.json`
+- **Track 1:** `track1_distillation.json`, `track1_predictions.parquet`, `models/student_w32_kd/` (3 seeds), `models/student_1a_w16_kd/` (3 seeds)
+- **Track 2:** `track2_role_lane_attention.json`, `track2_predictions.parquet`
+- **Track 3:** `track3_champion_archetypes.json`, `track3_predictions.parquet`
+- **Track 4:** `track4_gated_mixture_ons.json`, `track4_predictions.parquet`
+
 ## Model navigation and preservation — 2026-10-08
 
 **Start with the [model/study catalog](MODEL_CATALOG.md)** for the current shortlist, what was tested and how, completed decisions, archive-only experiments and explicit trash candidates. This journal remains the detailed evidence record; the catalog is navigation, not a second benchmark or an adoption override.

@@ -432,6 +432,8 @@ class TournamentSimulationResult:
     seed: int
     tournament: str = ""
     parameters: dict[str, Any] = field(default_factory=dict)
+    swiss_record_probs: dict[str, dict[str, float]] | None = None
+    top_qualifier_sets: list[dict[str, Any]] | None = None
 
     def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
@@ -450,6 +452,8 @@ class TournamentSimulationResult:
             "seed": self.seed,
             "tournament": self.tournament,
             "parameters": self.parameters,
+            "swiss_record_probs": self.swiss_record_probs,
+            "top_qualifier_sets": self.top_qualifier_sets,
         }
 
 
@@ -701,6 +705,8 @@ class AdvancedTournamentSimulator:
         joint_final_acc: Counter[tuple[str, str]] = Counter()
         bo3_counts: Counter[str] = Counter()
         bo5_counts: Counter[str] = Counter()
+        swiss_rec_acc: dict[str, Counter[str]] = {t: Counter() for t in team_list}
+        top8_set_acc: Counter[tuple[str, ...]] = Counter()
 
         master_rng = random.Random(sim_seed)
 
@@ -818,6 +824,9 @@ class AdvancedTournamentSimulator:
             for t in qualifiers:
                 qual_acc[t] += 1.0
 
+            for t, rec in active_records.items():
+                swiss_rec_acc[t][f"{rec[0]}-{rec[1]}"] += 1
+            top8_set_acc[tuple(sorted(qualifiers))] += 1
             distinct_reg = len({regions.get(t, "Unknown") for t in qualifiers})
             region_acc[distinct_reg] += 1
 
@@ -983,6 +992,21 @@ class AdvancedTournamentSimulator:
             t: round(qual_acc[t] * inv_n, 6)
             for t in sorted(team_list, key=lambda t: -qual_acc[t])
         }
+        swiss_record_probs = {
+            t: {
+                r_key: round(swiss_rec_acc[t].get(r_key, 0) * inv_n, 6)
+                for r_key in ("3-0", "3-1", "3-2", "2-3", "1-3", "0-3")
+            }
+            for t in sorted(team_list, key=lambda t: -qual_acc[t])
+        }
+        top_qualifier_sets = [
+            {
+                "teams": list(q_set),
+                "prob": round(cnt * inv_n, 6),
+                "count": int(cnt),
+            }
+            for q_set, cnt in sorted(top8_set_acc.items(), key=lambda x: -x[1])[:10]
+        ]
 
         region_dict: dict[int, float] = {
             k: round(region_acc.get(k, 0) * inv_n, 6) for k in (2, 3, 4, 5)
@@ -1032,6 +1056,8 @@ class AdvancedTournamentSimulator:
                 "shrinkage_lambda": s_lambda,
                 "temperature": temp,
             },
+            swiss_record_probs=swiss_record_probs,
+            top_qualifier_sets=top_qualifier_sets,
         )
 
     def simulate_bracket(
@@ -1360,3 +1386,159 @@ class AdvancedTournamentSimulator:
                 "temperature": temp,
             },
         )
+
+
+WORLDS_2026_SWISS_R1_PAIRINGS: tuple[tuple[str, str], ...] = (
+    ("Gen.G", "Invictus Gaming"),
+    ("Team Liquid", "CTBC Flying Oyster"),
+    ("Anyone's Legend", "Karmine Corp"),
+    ("G2 Esports", "Dplus KIA"),
+    ("Hanwha Life Esports", "Top Esports"),
+    ("Los Grandes", "T1"),
+    ("Team Secret Whales", "LYON"),
+    ("Bilibili Gaming", "Movistar KOI"),
+)
+
+
+def build_or_load_worlds_2026_pair_probabilities(
+    *,
+    model_code: str = "C0-D",
+    force_rebuild: bool = False,
+) -> dict[tuple[str, str, int], float]:
+    """Compute or load all 120 unordered pairs x {BO1, BO3, BO5} for Worlds 2026 using C0-D (Norm)."""
+    from pathlib import Path
+    import os
+    import joblib
+    from betting_app.core.models.native_c0 import PROJECT_ROOT, NativeC0Adapter
+    from betting_app.core.models.registry import apply_model_calibration, resolve_model_spec
+    from src.models.cross_region_input_normalizer import (
+        build_prior_domestic_family_lookup,
+        get_region_offset,
+        normalize_cross_region_batch,
+        resolve_side_domestic_family,
+    )
+    from scripts.predict_matchup import load_raw_matches, resolve_team
+
+    cache_path = (
+        PROJECT_ROOT
+        / f"data/04_feature/live_c0_cache/worlds_2026_all_pairs_{model_code.lower().replace('-', '_')}_norm.json"
+    )
+    if cache_path.is_file() and not force_rebuild:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+        out: dict[tuple[str, str, int], float] = {}
+        for row in data["rows"]:
+            ta, tb, bo, p = str(row["team_a"]), str(row["team_b"]), int(row["best_of"]), float(row["p"])
+            out[(ta, tb, bo)] = p
+            out[(tb, ta, bo)] = 1.0 - p
+        return out
+
+    import pickle
+    from src.models.cross_region_input_normalizer import decode_encoded_snapshot
+
+    os.environ.setdefault(
+        "ENSEMBLE_RESEARCH_ROOT",
+        str((PROJECT_ROOT / "data/05_model_input/canonical_benchmark").resolve()),
+    )
+    spec = resolve_model_spec(model_code)
+    snap_path = PROJECT_ROOT / "data/04_feature/live_c0_cache/worlds_2026_swiss_r1_snapshots.pkl"
+
+    single_raw: dict[str, dict[str, np.ndarray]] = {}
+    single_hist: dict[str, dict[str, np.ndarray]] = {}
+    team_offsets: dict[str, float] = {}
+
+    if snap_path.is_file():
+        with snap_path.open("rb") as f:
+            snaps = pickle.load(f)
+        r1_by_mid = {
+            146609: ("Gen.G", "Invictus Gaming"),
+            146610: ("Team Liquid", "CTBC Flying Oyster"),
+            146611: ("Anyone's Legend", "Karmine Corp"),
+            146612: ("G2 Esports", "Dplus KIA"),
+            146613: ("Hanwha Life Esports", "Top Esports"),
+            146614: ("Los Grandes", "T1"),
+            146615: ("Team Secret Whales", "LYON"),
+            146616: ("Bilibili Gaming", "Movistar KOI"),
+        }
+        for mid, (ta, tb) in r1_by_mid.items():
+            _, enc_snap, fa, fb, _, _ = snaps[mid]
+            raw_pair, hist_pair = decode_encoded_snapshot(enc_snap)
+            single_raw[ta] = {k: v[0].copy() for k, v in raw_pair.items()}
+            single_raw[tb] = {k: v[1].copy() for k, v in raw_pair.items()}
+            single_hist[ta] = {k: v[0].copy() for k, v in hist_pair.items()}
+            single_hist[tb] = {k: v[1].copy() for k, v in hist_pair.items()}
+            team_offsets[ta] = get_region_offset(fa)
+            team_offsets[tb] = get_region_offset(fb)
+    else:
+        os.environ["BETTING_APP_C0_WORKER"] = "1"
+        raw_matches = load_raw_matches()
+        team_fam_map, player_fam_map = build_prior_domestic_family_lookup(raw_matches)
+        adapter = NativeC0Adapter()
+        decision_iso = "2026-10-21T00:00:00Z"
+        start_iso = "2026-10-21T02:00:00Z"
+        for ta, tb in WORLDS_2026_SWISS_R1_PAIRINGS:
+            ia = resolve_team(ta, raw_matches)
+            ib = resolve_team(tb, raw_matches)
+            fa = resolve_side_domestic_family(ia["id"], ia["player_ids"], team_fam_map, player_fam_map)
+            fb = resolve_side_domestic_family(ib["id"], ib["player_ids"], team_fam_map, player_fam_map)
+            req = {
+                "team1_id": ia["id"], "team2_id": ib["id"],
+                "roster_a": ia["player_ids"], "roster_b": ib["player_ids"],
+                "best_of": 1, "decision_at": decision_iso, "start_at": start_iso,
+                "competition_context": "Worlds", "mode": "full",
+            }
+            _, _, raw_pair, hist_pair, _ = adapter._prepare_prediction(req, None)
+            single_raw[ta] = {k: v[0].copy() for k, v in raw_pair.items()}
+            single_raw[tb] = {k: v[1].copy() for k, v in raw_pair.items()}
+            single_hist[ta] = {k: v[0].copy() for k, v in hist_pair.items()}
+            single_hist[tb] = {k: v[1].copy() for k, v in hist_pair.items()}
+            team_offsets[ta] = get_region_offset(fa)
+            team_offsets[tb] = get_region_offset(fb)
+
+    pair_list: list[tuple[str, str]] = []
+    raw_list: list[dict[str, np.ndarray]] = []
+    hist_list: list[dict[str, np.ndarray]] = []
+    oa_list: list[float] = []
+    ob_list: list[float] = []
+
+    for i, ta in enumerate(DEFAULT_WORLDS_16_TEAMS):
+        for tb in DEFAULT_WORLDS_16_TEAMS[i + 1 :]:
+            pair_list.append((ta, tb))
+            raw_list.append({k: np.stack([single_raw[ta][k], single_raw[tb][k]], axis=0) for k in single_raw[ta]})
+            hist_list.append({k: np.stack([single_hist[ta][k], single_hist[tb][k]], axis=0) for k in single_hist[ta]})
+            oa_list.append(float(team_offsets[ta]))
+            ob_list.append(float(team_offsets[tb]))
+    raw_batch = {k: np.stack([r[k] for r in raw_list], axis=0) for k in raw_list[0]}
+    hist_batch = {k: np.stack([h[k] for h in hist_list], axis=0) for k in hist_list[0]}
+    oa_arr = np.array(oa_list, dtype=np.float32)
+    ob_arr = np.array(ob_list, dtype=np.float32)
+    raw_norm, hist_norm = normalize_cross_region_batch(raw_batch, hist_batch, oa_arr, ob_arr)
+
+    from src.models import a0_data_focus
+
+    research_root = (PROJECT_ROOT / "data/05_model_input/canonical_benchmark").resolve()
+    backend, _ = a0_data_focus.uncertainty._activate_archive_backend(research_root)
+    model_root = PROJECT_ROOT / "data/06_models/a0_data_focus/a0_data_focus_20260929_192443"
+    shared = joblib.load(model_root / "shared/model.joblib")
+    models = [joblib.load(model_root / f"control/seed_{s}/model.joblib") for s in a0_data_focus.SEEDS]
+    calibration = joblib.load(model_root / "control/calibration/model.joblib")
+
+    rows_out = []
+    prob_table: dict[tuple[str, str, int], float] = {}
+    n_pairs = len(pair_list)
+    for bo in (1, 3, 5):
+        bo_arr = np.full(n_pairs, bo, dtype=np.int64)
+        preds = a0_data_focus.predict_models(
+            backend, shared, models, calibration, raw_norm, hist_norm, bo_arr
+        )["full"][:, 0]
+        for (ta, tb), p_raw in zip(pair_list, preds):
+            pa, pb = apply_model_calibration(float(p_raw), spec, best_of=bo)
+            prob_table[(ta, tb, bo)] = pa
+            prob_table[(tb, ta, bo)] = pb
+            rows_out.append({"team_a": ta, "team_b": tb, "best_of": bo, "p": round(pa, 6)})
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps({"model": model_code, "rows": rows_out}, indent=2),
+        encoding="utf-8",
+    )
+    return prob_table

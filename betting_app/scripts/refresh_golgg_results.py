@@ -369,16 +369,22 @@ async def main() -> None:
 
 def select_tournaments_to_fetch(all_tournaments: list[dict], games_per_tournament: dict[str, int], *, refresh_matches: bool) -> list[dict]:
     tournaments_to_fetch = []
+    max_season = max((int(t.get("season") or 0) for t in all_tournaments if isinstance(t, dict)), default=16)
+    active_season_idx = 0
     for tournament in all_tournaments:
         name = tournament.get("trname")
         if not name:
             continue
+        season_num = int(tournament.get("season") or max_season)
+        if season_num < max_season:
+            continue
+        active_season_idx += 1
         try:
             expected_games = int(tournament.get("nbgames") or 0)
         except (TypeError, ValueError):
             expected_games = 0
         have_games = games_per_tournament.get(name, 0)
-        if refresh_matches or have_games < expected_games:
+        if have_games < expected_games or (refresh_matches and active_season_idx <= 20):
             tournaments_to_fetch.append(tournament)
     return tournaments_to_fetch
 

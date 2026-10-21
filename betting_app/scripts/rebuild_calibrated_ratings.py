@@ -317,7 +317,10 @@ def load_matches(*, from_date: str | None = None, until_date: str | None = None)
     for row in match_rows:
         event_id = str(row["match_id"])
         event_date = date.fromisoformat(str(row["date"])[:10])
-        competition = classify_competition(row.get("tournament_name"), event_date)
+        raw_tname = str(row.get("tournament_name") or "")
+        if "world star challengers invitational" in raw_tname.lower():
+            raw_tname = "EMEA Masters 2026"
+        competition = classify_competition(raw_tname, event_date)
         if (
             competition.family == UNKNOWN_AFFILIATION
             or competition.tier is CompetitionTier.UNKNOWN

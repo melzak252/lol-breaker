@@ -50,7 +50,7 @@ production_2h_trajectory:
 optimal_synergy_ledger:
   path: data/08_reporting/optimal_strategy_simulation_ledger.csv
   expected_rows: 50
-  sha256: d4b960e204b99ae7288cfbb3912eac0b3296a9b08666a1d2d0dff9b8dc9cd434
+  sha256: b51ee7b41d666a6c96de88d1fe25d669a640bbccd1cdf75f585c545c79dfd90a
 
 # Layer 06: Frozen Models (Prop Distribution Preservation Bundle)
 prop_distribution_bundle:

@@ -95,6 +95,12 @@ def test_stage2_model_benchmark_invariants() -> None:
     assert glicko["log_loss"] == pytest.approx(0.570519, abs=1e-5)
     assert elo["log_loss"] == pytest.approx(0.580481, abs=1e-5)
 
+    c0d_norm = cohort_a["Input-Normalized C0-D"]
+    assert c0d_norm["log_loss"] < cohort_a["Distilled-PlayerHistory-Ensemble (C0-D)"]["log_loss"]
+    assert "cross_region_normalization" in res
+    cr_slices = res["cross_region_normalization"]["slices"]
+    assert cr_slices["domestic_matches_2024_2026"]["delta_log_loss"] == 0.0
+    assert cr_slices["worlds_msi_first_stand_2024_2026"]["delta_log_loss"] < -0.05
     # 2. Full 11,550 Walk-Forward Cohort
     cohort_b_full = res["cohort_b_full_11550"]
     a0_full = cohort_b_full["Annual Causal A0"]
@@ -195,7 +201,7 @@ def test_stage3_betting_simulation_invariants() -> None:
     assert opt["win_rate_pct"] == 58.0
     assert opt["mean_raw_clv_pct"] == pytest.approx(19.13, abs=0.1)
     assert opt["mean_net_clv_pct"] == pytest.approx(4.83, abs=0.1)
-    assert opt["mean_model_ev_pct"] == pytest.approx(13.41, abs=0.1)
+    assert opt["mean_model_ev_pct"] == pytest.approx(8.59, abs=0.1)
     assert opt["realized_yield_pct"] == pytest.approx(23.91, abs=0.2)
     assert opt["bankroll_roi_pct"] == pytest.approx(17.15, abs=0.2)
     assert opt["max_drawdown_pct"] <= 10.0
@@ -230,9 +236,10 @@ def test_stage4_econometric_audit_invariants() -> None:
     # Exact three-part identity: Realized Yield = Claimed EV - Curse B + Noise eta
     assert decomp["max_identity_discrepancy"] < 1e-9
     assert decomp["pure_c0_claimed_ev_pct"] == pytest.approx(22.05, abs=0.1)
-    assert decomp["shrunk_hybrid_claimed_ev_pct"] == pytest.approx(13.41, abs=0.1)
-    assert decomp["curse_removed_by_shrinkage_pp"] == pytest.approx(8.64, abs=0.1)
-    assert decomp["residual_optimizers_curse_pp"] == pytest.approx(8.57, abs=0.1)
+    assert decomp["shrunk_hybrid_claimed_ev_pct"] == pytest.approx(8.59, abs=0.1)
+    assert decomp["curse_removed_by_shrinkage_pp"] == pytest.approx(13.46, abs=0.1)
+    assert decomp["residual_optimizers_curse_pp"] == pytest.approx(3.76, abs=0.1)
+    assert decomp["residual_optimizers_curse_pp"] < decomp["true_long_term_edge_net_clv_pct"]
     assert decomp["match_outcome_noise_pp"] == pytest.approx(19.42, abs=0.1)
     assert decomp["true_long_term_edge_net_clv_pct"] == pytest.approx(4.83, abs=0.05)
     assert decomp["realized_yield_stake_weighted_pct"] == pytest.approx(23.91, abs=0.2)

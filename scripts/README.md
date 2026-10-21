@@ -17,6 +17,8 @@ Use the **[model/study catalog](../docs/MODEL_CATALOG.md)** to choose a retained
 | Purpose | Interface | Boundary |
 |---|---|---|
 | End-to-End 5-stage simulation pipeline | `run_simulation_pipeline.py --stage all` / `dvc repro` | Kedro 8-layer data catalog, proper-score benchmarks, shrinkage grid, Polish 12% tax & multi-year simulations, econometric audit |
+| Pre-match matchup prediction, EV/DRO gates & live region ranks | `predict_matchup.py <TeamA> <TeamB> [--bo 1\|3\|5] [--model C0-D] [--show-region-ranks] [--live-db]` | Standalone inference with automatic cross-regional input normalization, 4-rule DRO safety gates, and dynamic regional offset table |
+| Live PostgreSQL GOL.GG extended history & regional state exporter | `python -m betting_app.services.live_native_feature_builder [--cutoff YYYY-MM-DD]` | Exports post-cutoff DB matches to `extended_matches.json` and `FamilyCalibratedGlicko2` state to `regional_offsets_state.json` |
 | Canonical saved-prediction benchmark | `run_model_benchmark.py --suite --doctor` / an authorized new output directory | Annual A0/rating/039 controls; no training or deployment |
 | Existing standalone prop inference | `train_prop_distribution.py predict --run-id prop_distribution_20261007_01 --match-id ID` | Frozen historical feature rows; Map1 kills/duration and series length, not a live adapter |
 | Prop preservation/recovery | `preserve_prop_model.py create|verify|restore|replay` | Checksummed separate archive; never overwrite outputs, fit or activate models |

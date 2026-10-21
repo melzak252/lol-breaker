@@ -187,10 +187,22 @@ class GolggScraper:
     async def get_tournaments_in_season(self, season: int = 9) -> list[dict]:
         if not self.client:
             raise RuntimeError("GolggScraper is not started")
-        async with self.semaphore:
-            response = await self.client.post(GOLGG_TOURNAMENT_API, data={"season": f"S{season}"})
-        response.raise_for_status()
-        return response.json()
+        for attempt in range(1, 6):
+            try:
+                async with self.semaphore:
+                    response = await self.client.post(GOLGG_TOURNAMENT_API, data={"season": f"S{season}"})
+                response.raise_for_status()
+                rows = response.json()
+                if isinstance(rows, list):
+                    for item in rows:
+                        if isinstance(item, dict):
+                            item.setdefault("season", season)
+                return rows
+            except Exception:
+                if attempt == 5:
+                    raise
+                await asyncio.sleep(min(attempt, 5))
+        return []
 
     async def get_all_tournaments(self) -> list[dict]:
         result = []
