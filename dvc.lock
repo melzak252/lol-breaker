@@ -69,8 +69,8 @@ stages:
       isexec: true
     - path: src/analysis/simulation_pipeline.py
       hash: md5
-      md5: 2b9d599ad4b6be6376cbe27c37b3f3b0
-      size: 94025
+      md5: 2429877aeb25c9e4eabc93f95be71e49
+      size: 114604
     outs:
     - path: data/08_reporting/simulation_pipeline/stage1_input_manifest.json
       hash: md5
@@ -124,8 +124,8 @@ stages:
       isexec: true
     - path: src/analysis/simulation_pipeline.py
       hash: md5
-      md5: 2b9d599ad4b6be6376cbe27c37b3f3b0
-      size: 94025
+      md5: 2429877aeb25c9e4eabc93f95be71e49
+      size: 114604
     params:
       conf/base/parameters.yml:
         simulation.benchmark:
@@ -150,8 +150,8 @@ stages:
       size: 2272
     - path: data/08_reporting/simulation_pipeline/stage2_model_benchmark.json
       hash: md5
-      md5: b344d97f2cf183b780446d6e43dd377f
-      size: 26620
+      md5: cbdc8235cdb53cf124cd51c3cc1303a9
+      size: 38185
     - path: data/08_reporting/simulation_pipeline/stage2_shrinkage_grid.csv
       hash: md5
       md5: bed6d21fcc34713ec29c3860f005a88a
@@ -178,8 +178,8 @@ stages:
       size: 10743
     - path: data/08_reporting/simulation_pipeline/stage2_model_benchmark.json
       hash: md5
-      md5: b344d97f2cf183b780446d6e43dd377f
-      size: 26620
+      md5: cbdc8235cdb53cf124cd51c3cc1303a9
+      size: 38185
     - path: scripts/run_simulation_pipeline.py
       hash: md5
       md5: a063896f21e4a7a409c12f6ad779335f
@@ -187,8 +187,8 @@ stages:
       isexec: true
     - path: src/analysis/simulation_pipeline.py
       hash: md5
-      md5: 2b9d599ad4b6be6376cbe27c37b3f3b0
-      size: 94025
+      md5: 2429877aeb25c9e4eabc93f95be71e49
+      size: 114604
     params:
       conf/base/parameters.yml:
         simulation.betting:
@@ -255,8 +255,8 @@ stages:
       isexec: true
     - path: src/analysis/simulation_pipeline.py
       hash: md5
-      md5: 2b9d599ad4b6be6376cbe27c37b3f3b0
-      size: 94025
+      md5: 2429877aeb25c9e4eabc93f95be71e49
+      size: 114604
     params:
       conf/base/parameters.yml:
         simulation.econometrics:
@@ -302,8 +302,8 @@ stages:
       size: 2272
     - path: data/08_reporting/simulation_pipeline/stage2_model_benchmark.json
       hash: md5
-      md5: b344d97f2cf183b780446d6e43dd377f
-      size: 26620
+      md5: cbdc8235cdb53cf124cd51c3cc1303a9
+      size: 38185
     - path: data/08_reporting/simulation_pipeline/stage2_shrinkage_grid.csv
       hash: md5
       md5: bed6d21fcc34713ec29c3860f005a88a
@@ -331,14 +331,14 @@ stages:
       isexec: true
     - path: src/analysis/simulation_pipeline.py
       hash: md5
-      md5: 2b9d599ad4b6be6376cbe27c37b3f3b0
-      size: 94025
+      md5: 2429877aeb25c9e4eabc93f95be71e49
+      size: 114604
     outs:
     - path: data/08_reporting/simulation_pipeline/SIMULATION_REPORT.md
       hash: md5
-      md5: ef97d15989ceb9e95a0bd6574d7a5ae9
-      size: 13251
+      md5: b8d13415e5e0e8a78c03e6097d35e60a
+      size: 15439
     - path: data/08_reporting/simulation_pipeline/summary_metrics.json
       hash: md5
-      md5: 4892c5b24036fe6ad97f51f8d8376d72
-      size: 1633
+      md5: eb3bb4965d6cf4f05b5705a3b27796bd
+      size: 1892
