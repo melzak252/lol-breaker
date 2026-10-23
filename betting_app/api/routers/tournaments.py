@@ -26,7 +26,7 @@ router = APIRouter(prefix="/tournaments", tags=["tournaments"])
 class SimulateTournamentRequest(BaseModel):
     simulations: int = 10000
     manual_overrides: dict[str, str] | None = None  # match_id -> winner team name
-    engine: str = "advanced"  # "advanced" | "classic"
+    engine: str = "classic"  # "advanced" | "classic"
     use_fearless: bool = True
     use_bayesian_momentum: bool = True
     use_hybrid_knockout: bool = True
@@ -49,7 +49,7 @@ class SimulateWorldsRequest(BaseModel):
     direct_teams: list[WorldsTeamInput] | None = None
     play_in_teams: list[WorldsTeamInput] | None = None
     play_in_winner_pool: int = 4
-    engine: str = "advanced"  # "advanced" | "classic"
+    engine: str = "classic"  # "advanced" | "classic"
     use_fearless: bool = True
     use_bayesian_momentum: bool = True
     use_hybrid_knockout: bool = True
@@ -114,31 +114,34 @@ def list_tournaments() -> list[dict[str, Any]]:
 
 @router.post("/worlds/simulate")
 def simulate_worlds(body: SimulateWorldsRequest = SimulateWorldsRequest()) -> dict[str, Any]:
-    """Simulate Worlds 2026 Play-In, Swiss Stage, and Knockouts with advanced dynamic engine or classic."""
-    if body.engine == "advanced":
-        from src.models.advanced_tournament_simulator import AdvancedTournamentSimulator
-        sim = AdvancedTournamentSimulator(
-            use_fearless=body.use_fearless,
-            use_bayesian_momentum=body.use_bayesian_momentum,
-            use_hybrid_knockout=body.use_hybrid_knockout,
-            use_riot_lottery=body.use_riot_lottery,
-            shrinkage_lambda=0.25,
-            temperature=1.08,
-        )
-        teams = [t.team for t in body.direct_teams] if body.direct_teams else None
-        regions = {t.team: t.region for t in body.direct_teams} if body.direct_teams else None
-        n_sims = min(max(body.simulations, 100), 20000)
-        res = sim.simulate_worlds(
-            teams=teams,
-            team_regions=regions,
-            n_simulations=n_sims,
-            seed=body.seed,
-        )
-        return res.to_dict() if hasattr(res, "to_dict") else dict(res)
-
-    # Classic fallback
+    if body.engine != "classic":
+        raise HTTPException(status_code=422, detail="Worlds simulation currently supports only the validated classic engine.")
     if not body.direct_teams or not body.play_in_teams:
-        raise HTTPException(status_code=422, detail="Classic engine requires explicit direct_teams and play_in_teams.")
+        raise HTTPException(status_code=422, detail="Worlds simulation requires explicit direct_teams and play_in_teams.")
+    all_teams = [team.team.strip() for team in (*body.direct_teams, *body.play_in_teams)]
+    if any(not team for team in all_teams):
+        raise HTTPException(status_code=422, detail="Team names must not be empty.")
+    if len(set(all_teams)) != len(all_teams):
+        raise HTTPException(status_code=422, detail="Duplicate teams are not allowed across direct_teams and play_in_teams.")
+    simulator = WorldsSimulator(competition_context="worlds_2026")
+    direct_teams = [
+        WorldsTeam(name=team.team, region=team.region, pool=team.pool)
+        for team in body.direct_teams
+    ]
+    play_in_teams = [
+        WorldsTeam(name=team.team, region=team.region)
+        for team in body.play_in_teams
+    ]
+    n_simulations = min(max(body.simulations, 100), 20000)
+    try:
+        return simulator.simulate_worlds(
+            direct_teams=direct_teams,
+            play_in_teams=play_in_teams,
+            play_in_winner_pool=body.play_in_winner_pool,
+            n_simulations=n_simulations,
+        )
+    except (ValueError, KeyError) as error:
+        raise HTTPException(status_code=422, detail=f"Invalid Worlds participants: {error}") from error
     simulator = WorldsSimulator(competition_context="worlds_2026")
     direct_teams = [
         WorldsTeam(name=team.team, region=team.region, pool=team.pool)
@@ -339,12 +342,15 @@ def simulate_tournament(
             shrinkage_lambda=0.25,
             temperature=1.08,
         )
-        sim_res = sim.simulate_bracket(
-            bracket,
-            n_simulations=n_sims,
-            manual_overrides=body.manual_overrides,
-            seed=body.seed,
-        )
+        try:
+            sim_res = sim.simulate_bracket(
+                bracket,
+                n_simulations=n_sims,
+                manual_overrides=body.manual_overrides,
+                seed=body.seed,
+            )
+        except (ValueError, RuntimeError) as error:
+            raise _invalid_bracket(error) from error
         if hasattr(sim_res, "to_dict"):
             sim_dict = sim_res.to_dict()
         elif isinstance(sim_res, dict):
@@ -363,8 +369,8 @@ def simulate_tournament(
     simulator.competition_context = tournament_id
     try:
         sim_res = simulator.simulate(bracket, n_simulations=n_sims, manual_overrides=body.manual_overrides)
-    except Exception as error:
-        raise _native_c0_error(error) from error
+    except (ValueError, RuntimeError) as error:
+        raise _invalid_bracket(error) from error
     sim_res["source"] = sync_res.get("source", "curated")
     sim_res["status"] = sync_res.get("status", "ready")
     sim_res["synced_at"] = sync_res.get("synced_at")

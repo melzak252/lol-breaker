@@ -223,6 +223,7 @@ class TestMatchDetail:
         assert data["team_a_name"] == "Fnatic"
         assert len(data["odds"]) == 1
         assert data["odds"][0]["bookmaker"] == "manual"
+        assert data["recommendation"]["has_value"] is False
 
     def test_detail_ignores_odds_older_than_24h(self, client: TestClient):
         _seed_match_with_stale_best_odds()

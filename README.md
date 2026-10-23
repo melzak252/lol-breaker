@@ -4,6 +4,8 @@ Standalone application and quantitative modeling system for League of Legends ma
 
 **LoL-Breaker** integrates pre-match causal match-winner models, tournament distribution simulators, and standalone map prop estimators (`src/`, `conf/`) with a complete decision-time betting intelligence platform (`betting_app/`, `client/`). The application does **not** place bets automatically.
 
+> **STATUS — independent code audit, 2026-10-21 (`review-reports/codebase_logic_audit_20261021.md`, commit `9fe6bb2`): NOT PRODUCTION READY.** Application plumbing (Decimal wallet money, idempotent settlement, quote timing) is sound, but several sections below describe a decision stack, a model family and financial results that the running code does not implement or that no repo code produces. Such passages are marked in place with **`[UNVERIFIED]`**, **`[WITHDRAWN]`** or **`[RESEARCH-ONLY]`** and kept for history; they are not evidence of a betting edge. Nothing here has a held-out or prospective result.
+
 ---
 
 ## 1. System Architecture & Folder Layout (Kedro 8-Layer + DVC)
@@ -69,13 +71,17 @@ lol-breaker/
 
 | Canonical Architecture-First Name | Short Code | Legacy / Wire Identifier | Model Architecture & Domain Role |
 |---|---|---|---|
-| **`PlayerHistory-Attention-Ensemble`** | **`C0`** | `Causal-C0`<br/>(`c0-year-18token-w32-e12-v1` / `c0-native-2026-w32-e12-v1`) | 3-seed Width-32 attention ensemble with **18-Token Multi-Horizon sequence (`16 Recent Maps + 365-Day Whole-Year Anchor + Empty`)**: **LogLoss 0.534777**, Brier 0.180842, ECE 2.17%, Tails 9 (19,914 params); legacy 17-token `C0-16m` baseline (0.535449 LL / 12 tails) pinned for benchmark parity |
-| **`BornAgain-Distilled-Attention-Ensemble`** | **`C0-D` / `C0-D-20T`** | `Causal-C0-D`<br/>(`c0-d-20token-w32-v1` / `c0-d-born-again-w32-v1`) | Pure, self-contained 3-seed **20-Token Multi-Scale (`16 Recent Maps + 90d Split + 180d Half-Year + 365d Year + Empty`)** Born-Again Distilled W32 ensemble (`20,106` neural params = `6,702`/seed, zero tree/connector dependencies): **LogLoss 0.533954** (**0.533600** with Cross-Region Norm), Brier **0.180388** (`18-Token` `C0-D`: `0.534134` LL, `1.87%` ECE) |
-| **`SingleSeed-Distilled-Attention`** | **`C0-Slim`**<br/>(alias `C0-D1`) | `Causal-C0-Slim`<br/>(`c0-slim-1seed-w32-v1`) | 1-seed 20-Token / 18-Token Distilled W32 (`6,702` / `6,638` neural params = 1/3rd size, 3.1x faster at 278 ms): **LogLoss 0.534621** (`20-Token`) / **0.534656** (`18-Token`), Brier **0.180648** |
-| **`HalfWidth-Distilled-Attention`** | **`C0-Mini`**<br/>(alias `C0-Small`) | `Causal-C0-Mini`<br/>(`c0-mini-w16-kd-v1`) | 3-seed Half-Width (W=16) Distilled ensemble (8,394 neural params = 2,798/seed, 58% narrower width): **LogLoss 0.535845**, passes all 6 guards |
-| **`MarketShrunk-Hybrid-50`** | **`Hybrid-50`** | `Hybrid-Operational-Market` | 50/50 logit-space shrinkage combining `PlayerHistory-Attention-Ensemble` with 2-way closed-form Shin de-vigged market consensus: `logit(p_hybrid) = 0.50 · logit(p_C0) + 0.50 · logit(q_shin)` |
+| **`PlayerHistory-Attention-Ensemble`** | **`C0`** | `Causal-C0`<br/>(`c0-year-18token-w32-e12-v1` / `c0-native-2026-w32-e12-v1`) | 3-seed Width-32 attention ensemble. **The app serves only the legacy 17-token artifact `c0-native-2026-w32-e12-v1` (history16)** — its 2026 LL is 0.535449 / 12 tails (legacy `C0-16m` pin, the benchmark reference). The **18-Token Multi-Horizon variant (`16 Recent Maps + 365-Day Whole-Year Anchor + Empty`)** is research-only and not served: LogLoss 0.534777, Brier 0.180842, ECE 2.17%, Tails 9 (19,914 params); its interval vs legacy C0 `[-0.001195, +0.000039]` crosses zero, so it is `DEVELOPMENT_CANDIDATE`, not adopted. (`C0_NATIVE.metadata` carries the 18-token metrics although the artifact is 17-token.) |
+| **`BornAgain-Distilled-Attention-Ensemble`** | **`C0-D` / `C0-D-20T`** | `Causal-C0-D`<br/>(`c0-d-20token-w32-v1` / `c0-d-born-again-w32-v1`) | **`[RESEARCH-ONLY, NOT SERVED, NOT ADOPTED]`** 3-seed Born-Again Distilled W32 ensemble (20-token: `20,106` params = `6,702`/seed; 18-token: `19,914`). Development figures on the 3,103 exposed 2026 rows: 20T LL **0.533954**, Brier 0.180388; 18T `C0-D` LL 0.534134, ECE 1.87%, interval vs legacy C0 `[-0.002562, +0.000167]` (crosses zero). **The "0.533600 with Cross-Region Norm" figure is `[WITHDRAWN]`: the normalizer applies one current offsets file to 2024–2026 rows (look-ahead).** In `predict_matchup.py` and the registry, "C0-D" is the legacy C0 with a hard-coded logit slope (1.004/1.008/1.012 by BO); `C0_DISTILLED` points at an untracked `data/06_models/c0_distilled/manifest.json`. |
+| **`SingleSeed-Distilled-Attention`** | **`C0-Slim`**<br/>(alias `C0-D1`) | `Causal-C0-Slim`<br/>(`c0-slim-1seed-w32-v1`) | **`[RESEARCH-ONLY, NOT SERVED]`** 1-seed 20-Token / 18-Token Distilled W32 (`6,702` / `6,638` params, 3.1x faster at 278 ms): LogLoss 0.534621 (`20-Token`) / 0.534656 (`18-Token`), Brier 0.180648; interval vs C0 crosses zero. |
+| **`HalfWidth-Distilled-Attention`** | **`C0-Mini`**<br/>(alias `C0-Small`) | `Causal-C0-Mini`<br/>(`c0-mini-w16-kd-v1`) | **`[RESEARCH-ONLY, NOT SERVED]`** 3-seed Half-Width (W=16) Distilled ensemble (8,394 params = 2,798/seed): LogLoss 0.535845. **`[UNVERIFIED]`** "passes all 6 guards": no repo code computes the 6 replacement guards (evaluation scripts emit point LL/Brier per slice only). |
+| **`MarketShrunk-Hybrid-50`** | **`Hybrid-50`** | `Hybrid-Operational-Market` | 50/50 logit-space shrinkage via app de-vig function. |
 | **`WalkForward-Reference-Ensemble`** | **`A0`** | `Annual Causal A0` (`p_full`) | Annual walk-forward causal ensemble (7 base checkpoints across 3 experts; quarterly cross-fitted calibration) |
 | **`ElasticNet-TeamForm-Baseline`** | **`EXP-039`** | `Sym-Cal LR-ElasticNet-W20-Binomial` (`exp-039`) | Map-level symmetric calibrated ElasticNet with 20-match organization form (`W20`) and binomial series projection |
+> **Audit status (2026-10-21):** intended contract is consensus from at least two distinct books, true leave-one-out, divergence applied to C0 probability, and real wallet bankroll. Code was changing concurrently; verify implementation. Min EV 5%, max EV 25%, and EXP-039 veto are active per audit.
+
+
+> **Hybrid-50 as implemented:** `logit(p_hybrid) = 0.50·logit(p_C0) + 0.50·logit(q_market)` with α = 0.50 (`betting_app/core/models/registry.py`, `_ACTIVE_HYBRID`), applied once to the native C0 series probability. The `q_market` de-vig is the single app function in `betting_app/services/prematch_quote_service.py`; the earlier "closed-form Shin" wording described research scripts, not the app. Intended contract (code was being changed when this note was written; check the code): consensus needs **≥ 2 distinct fresh bookmakers** with true leave-one-out (the focal book is excluded); with fewer, no consensus/hybrid probability is produced and the opportunity is withheld, never shrunk toward the single quote being bet.
 
 <details>
 <summary><b>🔍 View Secondary Rating Baselines (EXP-078, Glicko-2, Elo)</b></summary>
@@ -87,19 +93,22 @@ lol-breaker/
 | **`Player-Elo-Rating-Baseline`** | **`Elo`** | `Calibrated Elo` (`p_elo`) | Match-level calibrated player Elo rating control |
 
 </details>
-### 2.2 Decision-Time Safety Gates & Risk Parameters
+### 2.2 Decision-Time Safety Gates & Risk Parameters (what the code does)
 
-Following the **Gate Simplification Protocol**, after `Wasserstein DRO` ($\varepsilon = 0.025$) and **Leave-One-Out (`LOO`) Market Shrinkage** ($q_{\text{open, loo}, -k}(t)$ at bet placement time, $\alpha = 0.65$), the production betting stack under 12% Polish tax requires only **4 core rules** (while legacy redundant rules `Max EV <= 25%`, `Min EV >= 5%`, and `EXP-039 Veto` are permanently retired for the distilled `C0-D` model family):
+> **Correction (audit 2026-10-21 §2):** earlier versions of this section described a 4-rule stack with α = 0.65, "LOO opening consensus" and the Min-EV / Max-EV / EXP-039 gates "permanently retired". That does not match the code. In the signal pipeline (`betting_app/services/upcoming_inference_service.py` → `is_bet_eligible`) **Min EV 5 %, Max EV 25 %, the EXP-039 model-consensus veto, the DRO haircut, the divergence gate and the 4.00 odds ceiling are all active**, and shrinkage is **0.50/0.50**, not 0.35/0.65. The α = 0.65 / 4-rule description is `[WITHDRAWN]` as a statement about the running system; it is only the label of a research protocol whose results are unverified (see §5.4).
 
-| Safety Gate / Parameter | Code / Formula | Domain Purpose | Operational Status |
-|---|---|---|---|
-| **`LOO-Market-Shrinkage`** | $\text{logit}(p_{\text{hybrid}}) = 0.35 \cdot \text{logit}(p_{\text{C0}}) + 0.65 \cdot \text{logit}(q_{\text{open, loo}})$ | Zero-lookahead shrinkage against peer consensus at scrape timestamp $t_{\text{hit}}$ | **Active Core Rule 1** |
-| **`Wasserstein-Robust-Gate`** *(DRO)* | $(p_{\text{hybrid}} - 0.025) \cdot (1 - \tau) \cdot O - 1 > 0$ | Distributionally robust optimization ($\varepsilon = 0.025$); guarantees non-negative return under adversarial drift | **Active Core Rule 2** |
-| **`Market-Divergence-Gate`** *(Guard B)* | $\|\text{logit}(p_{\text{C0}}) - \text{logit}(q_{\text{open, loo}})\| \le 0.85$ | Dynamic logit bound; rejects severe bookmaker divergences where model overconfidence occurs | **Active Core Rule 3** |
-| **`Odds-Ceiling`** | $\text{Odds} \le 4.00$ | High-odds variance containment; suppresses excessive longshot outcome variance | **Active Core Rule 4** |
-| **`Model-Consensus-Veto`** *(EXP-039)* | $\|p_{\text{C0}} - p_{039}\| \le 0.10$ | Cross-architecture linear form veto; preserved as historical reference for C0, **retired for C0-D** | *Retired for C0-D* |
-| **`EV-Bounds`** | $\text{EV}_{\text{net}} \in [5\%, 25\%]$ | Legacy fixed EV bracket; **retired** (superseded by DRO $\text{EV}_{\text{DRO}} > 0\%$ and LOO shrinkage) | *Retired* |
-| **`Optimal Synergy Staking`** | **1/4 Kelly (Adopted)** | 1/4 Kelly staking under 12% Polish tax, with a strict 150 PLN cap per bet | **Active Staking Policy** |
+| Safety Gate / Parameter | Code / Formula | Status in code (commit `9fe6bb2` unless stated) |
+|---|---|---|
+| **Market shrinkage** | $\text{logit}(p_{\text{hybrid}}) = 0.50 \cdot \text{logit}(p_{\text{C0}}) + 0.50 \cdot \text{logit}(q_{\text{market}})$ | **Active**, α = 0.50, applied once. |
+| **Market consensus** | mean of multiplicative de-vig over fresh books | At `9fe6bb2`: focal book included, no minimum book count (`prematch_quote_service.py`). **Intended contract:** ≥ 2 distinct fresh bookmakers, true leave-one-out, one de-vig method app-wide; fewer books ⇒ opportunity withheld. |
+| **`Market-Divergence-Gate`** *(Guard B)* | $\|\text{logit}(p_{\text{C0}}) - \text{logit}(q)\| \le 0.85$ (`DEFAULT_MAX_LOGIT_DISAGREEMENT`) | **Active.** At `9fe6bb2` it was applied to the *hybrid* probability (effective C0 bound ≈ 1.70 logits). **Intended contract:** applies to the C0 (sports-only) probability, carried as `base_prob_a` in the signal. |
+| **`Wasserstein-Robust-Gate`** *(DRO)* | $(p - 0.025) \cdot (1 - \tau) \cdot O - 1 > 0$ | **Active** (ε = 0.025, `DEFAULT_WASSERSTEIN_EPSILON`). This is a fixed 2.5 pp probability haircut, not Wasserstein DRO in the literature's sense. |
+| **`EV-Bounds`** | $\text{EV}_{\text{net}} \in [5\%, 25\%]$ (`DEFAULT_BASE_MIN_EV = 0.05`, `max_ev_net=0.25`) | **Active** (not retired). |
+| **`Model-Consensus-Veto`** *(EXP-039)* | $\|p_{\text{C0}} - p_{039}\| \le 0.10$ (`max_rating_disagreement=0.10`) | **Active in code**, but at `9fe6bb2` it read `base_prob_a`, a key the hybrid never wrote, so it was effectively inactive. Fix = hybrid writes `base_prob_a` (see intended contract above). |
+| **`Odds-Ceiling`** | $\text{Odds} \le 4.00$ (`max_odds=4.00`) | **Active.** |
+| **Staking** | 1/4 Kelly (`fraction=0.25`), 150 PLN cap per bet (`betting_app/core/staking.py`), tax as a fraction (0.12) | **Active.** At `9fe6bb2` the bankroll defaulted to a fictitious 100 PLN (`--bankroll`, `run_upcoming_prediction_pipeline.py`); **intended contract:** the real wallet balance. |
+| **Dashboard / alert re-qualification** | `qualify_prediction_sides` | Does not apply the DRO gate, odds ceiling or Max EV and hard-codes tax in `alert_service.py`, so the UI can recommend bets the signal pipeline quarantines (audit §2). |
+
 ---
 
 ## 3. Data Setup: DVC & Google Drive Remote Storage
@@ -171,20 +180,16 @@ dvc metrics show
 
 ### Method D: Rapid Pre-Match Inference, Region Ranks & Live History Sync (`predict_matchup.py`)
 
+> **Audit caveat (2026-10-21):** In `predict_matchup.py`, `--model C0-D` is legacy 17-token C0 with a hard-coded logit slope; C0-Slim is not served. The CLI uses a partial gate set, not the app's qualification policy. `--live-db` reads a static local cache once written; it does not refresh the cache dynamically.
 ```bash
-# Predict any matchup using the Born-Again Distilled C0-D ensemble (with automatic cross-regional input normalization)
-.venv/bin/python scripts/predict_matchup.py T1 GenG --bo 3 --model C0-D --odds1 2.10 --odds2 1.72
+# Predict any matchup using the Born-Again Distilled C0-D ensemble (with automatic cross-regional input normalization) [WITHDRAWN: command actually uses legacy 17-token C0 with hard-coded logit slope]
 
-# Inspect live, automatically derived regional offsets & domestic pyramid drift from FamilyCalibratedGlicko2
-.venv/bin/python scripts/predict_matchup.py --show-region-ranks
-
-# Fast 1-seed distilled inference (3.1x faster neural forward pass) across BO1, BO3, and BO5
-.venv/bin/python scripts/predict_matchup.py "Cloud9" "Karmine Corp" --model C0-Slim --all-bo
-
-# Export latest PostgreSQL GOL.GG matches and FamilyCalibratedGlicko2 regional state to local cache
+# Research C0-Slim is not served; this command is not a valid Slim inference example.
+# Refresh local history and regional-state cache (separate from predict_matchup.py --live-db)
 .venv/bin/python -m betting_app.services.live_native_feature_builder --cutoff 2026-10-21
+# This --live-db example reads the static local cache; it does not fetch newly scraped matches on demand.
 
-# Or dynamically incorporate newly scraped PostgreSQL GOL.GG matches on the fly
+# Apply the script's partial qualification gates, not the app's full bet-qualification policy
 .venv/bin/python scripts/predict_matchup.py G2 DK --bo 1 --model C0-D --live-db
 ```
 
@@ -199,11 +204,13 @@ dvc metrics show
 | **2026 Canonical Assessment** | $N=3,103$ series (Jan–Sep 2026) | Match start (odds-free) | Primary odds-free benchmark evaluating pure sports model accuracy across all global pro series. |
 | **Sharp Pinnacle Horizons** | $N=2,023$ early / $N=1,668$ late | `T-48h` to `<2h (T-1h)` | Multi-horizon pre-match benchmark against the sharpest international esports bookmaker. |
 | **Production Polish Bookmakers** | $N=645$ matches, 234k quotes (May–Sep 2026) | `T-48h` to `<2h` (closing) | Multi-horizon pre-match benchmark and live 12%-tax betting simulation across 7 licensed Polish bookmakers (`STS`, `Betfan`, `Superbet`, `Betclic`, `eFortuna`, `Totalbet`, `LeBull`). |
-| **Multi-Year OddsPortal** | $N=11,609$ matches / $N=3,002$ bets (2021–2026) | Open vs. Close | 6-season out-of-time macroeconomic validation testing strategy survival across 0% and 12% tax regimes. |
+| **Multi-Year OddsPortal** | $N=11,609$ matches / $N=3,002$ bets (2021–2026) **`[UNVERIFIED]`** | Open vs. Close | The 3,002-/454-/147-bet rows are literals in `simulation_pipeline.py`, not produced by any executed code; the only multi-year code bets at de-vigged fair odds, so Net CLV is 0% or negative by construction; C0 TRAIN covers 2020 to 2025-07, so C0 scores for 2021–2025 would be in-sample. **Not** an out-of-time validation. |
 
 ---
 
 ### 5.2 Pure Sports Model Benchmark
+
+> **Warning (audit 2026-10-21 §3.1):** every row below is scored on the same 3,103 development-exposed 2026 series, after more than 20 variants were compared without the 98.33% Bonferroni correction used by earlier protocols. Differences of 0.0003–0.0015 LL are within noise (the 18-token C0 interval vs the 17-token pin, `[-0.001195, +0.000039]`, and the pure 18T `C0-D` interval, `[-0.002562, +0.000167]`, cross zero). None of these rows is a held-out or prospective result, and only the 17-token `C0` row is the served model. Rows labelled `Norm` are `[WITHDRAWN]` (look-ahead normalizer).
 
 #### Table 5.2A: 2026 Canonical Assessment ($N=3,103$ Series, Jan–Sep 2026)
 
@@ -211,23 +218,27 @@ Evaluated unclipped against realized match winners ($Y \in \{0, 1\}$):
 
 | Model | Code | LogLoss | Brier Score | Accuracy (AUC) |
 |---|---|---:|---:|---:|
-| **Input-Normalized Distilled Ensemble (20-Token)** | **`C0-D (Norm)`** | **0.533600** | **0.180247** | **72.32% (0.8012)** |
+| **Input-Normalized Distilled Ensemble (20-Token)** **`[WITHDRAWN: look-ahead normalizer]`** | **`C0-D (Norm)`** | ~~0.533600~~ | ~~0.180247~~ | ~~72.32% (0.8012)~~ |
 | **MultiScale-Distilled-Ensemble (20-Token)** | **`C0-D` (`20-Token`)** | **0.533954** | **0.180388** | **72.32% (0.8009)** |
 | **BornAgain-Distilled-Ensemble (18-Token)** | `C0-D` (`18-Token`) | 0.534134 | 0.180468 | 72.28% (0.8006) |
 | **SingleSeed-Distilled-Attention (20-Token)** | **`C0-Slim` (`C0-D1`)** | **0.534621** | **0.180648** | **72.32% (0.8003)** |
 | **PlayerHistory-Attention-Ensemble (18-Token)** | **`C0` (18-Token)** | **0.534777** | **0.180842** | **72.19% (0.7997)** |
-| **Input-Normalized PlayerHistory-Ensemble** | **`C0 (Norm)`** | **0.535120** | **0.180909** | **72.06% (0.7996)** |
+| **Input-Normalized PlayerHistory-Ensemble** **`[WITHDRAWN: look-ahead normalizer]`** | **`C0 (Norm)`** | ~~0.535120~~ | ~~0.180909~~ | ~~72.06% (0.7996)~~ |
 | **PlayerHistory-Attention-Ensemble (17-Token Legacy)** | `C0` (17-Token Pin) | 0.535449 | 0.181034 | 72.03% (0.7993) |
 | **WalkForward-Reference-Ensemble** | `A0` | 0.536757 | 0.181573 | 71.83% (0.7981) |
 | **ElasticNet-TeamForm-Baseline** | `EXP-039` | 0.559245 | 0.189822 | 70.06% (0.7806) |
 | **Player-Glicko2-Rating-Baseline** | `Glicko-2` | 0.570519 | 0.193954 | 69.06% (0.7691) |
 | **Player-Elo-Rating-Baseline** | `Elo` | 0.580481 | 0.198066 | 68.87% (0.7595) |
 
-*Distilled, Year-Anchor & Cross-Regional Input Normalization Notes:* Pure 3-seed 18-token distilled **`C0-D`** achieves **0.534134** unclipped log-loss (`1.87%` ECE), and with automatic **Cross-Regional Input Normalization (`C0-D (Norm)`)** reaches **0.533779** (**72.28% accuracy**, **0.8009 AUC**); 1-seed **`C0-Slim`** achieves **0.534656** with $3.1\times$ faster neural latency (`278 ms`); standard 18-token **`C0`** improves log-loss to **0.534777** and suppresses deep tails to **9** (vs 12 in the legacy 17-token pin).
+> **[WITHDRAWN / UNVERIFIED]** The "Norm" figures in the next note (0.533600 and 0.533779 — the README gave two different numbers for the same model) use `regional_offsets_state.json`, one *current* file (latest `rating_runs` row) applied to every 2024–2026 row, so October-2026 offsets score the international events they were fitted on; the scaling constants are hand-tuned and a test asserts agreement with Worlds 2026 market favourites. The C0-D "Norm" figure also transplants a logit shift measured on legacy C0 onto distilled probabilities, with rows aligned by position, not ID. Valid un-normalized figures: `C0-D` 20T 0.533954 and 18T 0.534134 (the 18T interval vs legacy C0 crosses zero).
+
+> **[WITHDRAWN: look-ahead]** The normalized 0.533779 point score and associated cross-region gains are invalid for causal evaluation; a current regional offset file was applied retrospectively across years.
 
 #### Table 5.2B: Cross-Regional Input Normalization & International Benchmark (`src/models/cross_region_input_normalizer.py`)
 
 Resolves closed-pool domestic Elo inflation (such as the 13-league European ERL pyramid inflating `LEC` ratings and isolated minor-league pools inflating `#1` seeds) and Strength-of-Schedule (`SoS`) boxscore illusion (`hist.history` & `raw.w20` farmed against weaker domestic opponents) 100% through the model's pre-match input tensors—with **zero bookmaker odds** and **automatic dynamic regional rank updates** from `FamilyCalibratedGlicko2` (`ratings-v2`):
+
+> **[WITHDRAWN: look-ahead, audit 2026-10-21 §3.1.1]** The slice-level gains in Table 5.2B (including international 0.573 → 0.508 and the 0.550203 "after" LL) are not causal out-of-sample results. They are kept as history only.
 
 | Evaluation Slice | Matches ($N$) | Before (`LL`) | After (`LL`) | $\Delta\text{LL}$ | Winner Accuracy ($\text{Before} \to \text{After}$) |
 |---|---:|---:|---:|---:|---:|
@@ -243,7 +254,7 @@ Resolves closed-pool domestic Elo inflation (such as the 13-league European ERL 
 
 | Model | Code | LogLoss | Brier Score | Extreme Tails ($\text{LL} \ge 2.5$) |
 |---|---|---:|---:|---:|
-| **Input-Normalized WalkForward-Ensemble** | **`A0 (Norm)`** | **0.550203** | **0.186663** | 33 |
+| **Input-Normalized WalkForward-Ensemble** | **`A0 (Norm)` `[WITHDRAWN: look-ahead normalizer]`** | **0.550203** | **0.186663** | 33 |
 | **WalkForward-Reference-Ensemble** | `A0` | **0.551246** | **0.187103** | 33 |
 | **ElasticNet-TeamForm-Baseline** | `EXP-039` | *0.567337\** | *0.193112\** | **16\*** |
 | **Player-Glicko2-Rating-Baseline** | `Glicko-2` | 0.575888 | 0.196548 | 40 |
@@ -256,6 +267,8 @@ Resolves closed-pool domestic Elo inflation (such as the 13-league European ERL 
 ---
 
 ### 5.3 Head-to-Head vs. Bookmakers Across Pre-Match Horizons (`T-48h` to `<2h`)
+
+> **Warning (audit 2026-10-21 §3.1, §5):** the `C0-D (Norm)` and `Hybrid-50 (C0-D Norm)` columns use the withdrawn look-ahead normalizer and a model the app does not serve. On the matched 1,467-series Polish cohort (panel below) the pure model LL is 0.5659 against a market LL of 0.5596 — the model **trails** the market; the literature puts pre-match LoL models at roughly market parity (audit §0, §6). "Beats / crushes bookmakers" phrasing in this section is `[UNVERIFIED]`: point-LL differences without intervals on overlapping, development-exposed cohorts.
 
 #### Table 5.3A: Model vs. Sharp Pinnacle Across Pre-Match Horizons (`T-48h` to `<2h`)
 
@@ -291,10 +304,16 @@ Resolves closed-pool domestic Elo inflation (such as the 13-league European ERL 
 
 </details>
 
-*Takeaway:* With 18-Token Distillation and automatic Cross-Regional Input Normalization (`C0-D (Norm)`), our pure odds-free model beats Sharp Pinnacle outright at `T-48h` (`-0.01175` LL), `T-24h` (`-0.02558` LL), and `T-12h` (`-0.01105` LL), AND now beats Polish bookmakers outright at `T-48h` (`-0.01241` LL), `T-24h` (`-0.00528` LL), and **`T-12h` (`-0.00168` LL)**! On international matches in the Polish Core-4 panel, `C0-D (Norm)` beats Polish bookmakers by **`-0.08370` LL (`0.498735` vs `0.582438`)**. Combining `C0-D (Norm)` with market consensus via `Hybrid-50` strictly beats bookmakers across every horizon down to the `<2h` closing line (`0.563251` vs Pinnacle `0.568604`, and `0.550636` vs Polish `<2h` `0.555258`).
+> **[UNVERIFIED / SUPERSEDED]** The takeaway below relies on the withdrawn `C0-D (Norm)` column and on point-LL gaps without intervals; it contradicts the matched-cohort result in the warning above and is not an established finding.
+
+**`[WITHDRAWN / UNVERIFIED — HISTORICAL CLAIM]`** *Takeaway:* The original narrative claimed that 18-Token Distillation with automatic Cross-Regional Input Normalization (`C0-D (Norm)`) beat Sharp Pinnacle and Polish bookmakers at the cited horizons and that `Hybrid-50` strictly beat bookmakers through closing line. This claim relies on the withdrawn look-ahead normalized column and point-LL gaps without intervals; it is not an established finding.
 ---
 
 ### 5.4 Betting Strategy & Optimizer's Curse Decomposition
+
+> **WARNING — the financial claims in §5.4–5.5 are `[UNVERIFIED]`, withdrawn, in-sample, look-ahead, hard-coded or true by construction (audit 2026-10-21 §5).** (1) The gate parameters (α, ε, Guard B, max odds) were selected by a 90-cell grid on exposed data; “B < Net CLV” and “B_DRO ≤ 0” are selection criteria, not findings. The historical claim that a verification/B cohort was a superset is unsupported: the saved21-bet optimizer output has unbound A/B provenance; current code uses a strict later, disjoint B, which cannot establish the historical output's lineage. (2) The reported43-row C0-D results were derived/rescored using the50-row ledger, not recovered as an independent43-ticket ledger. The43 trajectory IDs in the later forensic audit are support/coverage, not those tickets. (3) Historical ledger joins used nearest probability within±3 days without a tolerance. (4) A pre-overwrite50-row copy was recovered from local content-addressed DVC cache object `08cbf67aab594d1914694620eda53f73` and copied to Stage01 without restoring over the current file; all50 row IDs/order and recorded chronology/cash fields match the rewrite, but every `p_hybrid` and `model_ev_pct` changed. The original selector and canonical match/side/quote/book IDs remain unknown, leaving source-opportunity exact joins at0; the Oct20 rewrite writer was traced but does not recover the original selection process. Do not call current `p_hybrid` 50/50. See the [2026-10-22 forensic audit](docs/RESEARCH.md). (5) `q_open_loo` is the latest price in a 2-hour bucket (up to2h after nominal time), after a market-only prefilter that manufactures raw CLV. (6) A missing closing line defaults to `p_close=0.5`. (7) Pinnacle and multi-year cohorts bet at de-vigged fair odds, so Net CLV is0% or−12% by construction; 3,002-/454-/147-bet rows are literals in `simulation_pipeline.py`. (8) Inference is per-bet IID on≈50 bets bunched in July–August. None meets the project's±2pp predicted-minus-realized reliability gate or reconciles the Sept30 audits (30–45pp EV overstatement, negative ROI). Historical table figures remain claims, not verified performance, production evidence, or adoption.
+
+The separate frozen Oct22 edge-recovery audit completed its historical policy matrix but selected **0** policies for insufficient TRAIN support. Its unchanged α=0.5/full-gate ASSESS simulation was mixed rather than an across-schedule loss: first-ready **3 / +343.50 PLN**, quote-triggered **15 / +255.56 PLN**, UTC-even **2 / −254.73 PLN**, UTC-odd **12 / +268.73 PLN**. Simulated net payout applies 12% tax to the full winning payout (`stake × odds × 0.88`), not only positive winnings. The proper-score α=0.2853 fit is research-only; fixed source-safety-only / ε=0 DRO diagnostics are bounded, schedule-dependent development samples, not recommendations or verified financial evidence. The quote tape is strongly phase-skewed (81.47% even UTC hours; minute55/56 concentrated); with a 300s TTL this can alias fixed phases, but does not attribute P&L causally or show model degradation. The bounded independent quote→core→F821 numerical audit completed within its documented scope; it does not certify financial outcomes, prospective performance, or actual production issuance. See the [measured cohort, results and timing limits](docs/RESEARCH.md).
 
 <details>
 <summary><b>📖 View Strategy Stack Definitions & Econometric Metric Formulas</b></summary>
@@ -307,7 +326,7 @@ To evaluate where true profit comes from, five strategy configurations and econo
 |---|---|---|
 | **Unconstrained `C0`** | Pure `C0` without shrinkage or safety gates; flat $\text{EV} \ge 5\%$ | Baseline: tests whether a raw sports model can beat bookmakers alone. |
 | **`Hybrid-50` + Divergence-Gate** | 50/50 Bayesian logit shrinkage + `Market-Divergence-Gate` ($\le 0.85$) | Tests shrinkage and rejection of severe bookmaker probability disagreements. |
-| **Optimal Synergy** | `Hybrid-50` + Divergence-Gate + `Model-Consensus-Veto` ($\le 0.10$) + Odds $\le 4.00$ | Production baseline: requires neural attention and linear form agreement. |
+| **Optimal Synergy** | `Hybrid-50` + Divergence-Gate + `Model-Consensus-Veto` ($\le 0.10$) + Odds $\le 4.00$ | **Research-ledger baseline** (not the running stack; its parameters were chosen in-sample, `[UNVERIFIED]`): requires neural attention and linear form agreement. |
 | **Optimal Synergy + DRO** | Optimal Synergy + `Wasserstein-Robust-Gate` ($\varepsilon = 0.025$) | Robust production gate: prunes bets vulnerable to probability shifts. |
 | **Multi-Year Hybrid (2021–26)** | Optimal Synergy on 6-season OddsPortal dataset ($N=11,609$) | Macro validation: tests long-term strategy survival across 0% and 12% tax. |
 
@@ -324,23 +343,23 @@ To evaluate where true profit comes from, five strategy configurations and econo
 
 | Strategy Stack | Regime & Tax | Bets ($N$) | Win Rate | Realized Yield | Max Drawdown & Verdict |
 |---|---|---:|---:|---:|---|
-| **Unconstrained `C0`** | Polish Books (12% Tax) | 454 | 43.8% | -4.54% | 67.0% (Untrusted) |
-| **`Hybrid-50` + Divergence-Gate** | Polish Books (12% Tax) | 147 | 51.0% | +11.50% | 15.0% (Reduced Bias) |
-| **Optimal Synergy (`C0` Fixed Ledger)** | Polish Books (12% Tax) | 50 | 58.0% | +23.91% | 6.10% (Adopted Base) |
-| **Optimal Synergy + DRO** | Polish Books (12% Tax) | **45** | **60.0%** | **+24.86%** | **5.41% (DRO Gate, $N_{\min}=641$)** |
-| **`C0-D` (Pure Distilled + DRO, No EXP-039)** | Polish Books (12% Tax) | **43** | **60.5%** | **+27.82%** | **6.00% (Zero Tree Deps, $N=43$)** |
-| **Multi-Year Hybrid (2021–26)** | Multi-Year (0% Tax) | 3,002 | 57.6% | +7.60% | 9.40% (Validated) |
+| **Unconstrained `C0`** **`[UNVERIFIED / HISTORICAL]`** | Polish Books (12% Tax) | 454 | 43.8% | -4.54% | 67.0% (unverified) |
+| **`Hybrid-50` + Divergence-Gate** **`[UNVERIFIED / HISTORICAL]`** | Polish Books (12% Tax) | 147 | 51.0% | +11.50% | 15.0% (unverified) |
+| **Optimal Synergy (`C0` Fixed Ledger)** **`[WITHDRAWN / IN-SAMPLE]`** | Polish Books (12% Tax) | 50 | 58.0% | +23.91% | 6.10% (bounded by construction; not adopted) |
+| **Optimal Synergy + DRO** **`[UNVERIFIED / HISTORICAL]`** | Polish Books (12% Tax) | **45** | **60.0%** | **+24.86%** | **5.41% (unverified)** |
+| **`C0-D` (Pure Distilled + DRO)** **`[WITHDRAWN / RE-FILTERED]`** | Polish Books (12% Tax) | **43** | **60.5%** | **+27.82%** | **6.00% (unverified)** |
+| **Multi-Year Hybrid (2021–26)** **`[UNVERIFIED: literal output]`** | Multi-Year (0% Tax) | 3,002 | 57.6% | +7.60% | 9.40% (not validated) |
 
 #### Table 5.4B: Econometric Edge vs. Optimizer's Curse & Match Noise
 
 | Strategy Stack | Claimed EV (Promise) | True Edge (Net CLV) | Optimizer's Curse Bias ($B$) | Match Luck Noise ($\eta$) | Realized Yield |
 |---|---:|---:|---:|---:|---:|
-| **Unconstrained `C0`** | +31.93% | **-13.69%** | **+45.62 pp** | +9.15 pp | -4.54% |
-| **`Hybrid-50` + Divergence-Gate** | +13.41% | **+1.85%** | **+11.56 pp** | +9.65 pp | +11.50% |
-| **Optimal Synergy (`C0` Fixed Ledger)** | **+8.59%** | **+4.83%** | **+3.76 pp** | +19.42 pp | +23.91% |
-| **Optimal Synergy + DRO** | **+14.17%** | **+6.98%** | **+7.19 pp** | **+17.88 pp** | **+24.86%** |
-| **`C0-D` (DRO Active, No EXP-039)** | **+8.16%** *(Pre)* / **+2.40%** *(Post)* | **+6.02%** | **+2.14 pp** *(Pre)* / **-3.62 pp** *(Post)* | **+21.80 pp** | **+27.82%** |
-| **Multi-Year Hybrid (2021–26)** | +4.68% | **+6.35%** | **-1.67 pp** | +1.25 pp | +7.60% |
+| **Unconstrained `C0`** **`[UNVERIFIED]`** | +31.93% | **-13.69%** | **+45.62 pp** | +9.15 pp | -4.54% |
+| **`Hybrid-50` + Divergence-Gate** **`[UNVERIFIED]`** | +13.41% | **+1.85%** | **+11.56 pp** | +9.65 pp | +11.50% |
+| **Optimal Synergy (`C0` Fixed Ledger)** **`[UNVERIFIED]`** | **+8.59%** | **+4.83%** | **+3.76 pp** | +19.42 pp | +23.91% |
+| **Optimal Synergy + DRO** **`[UNVERIFIED]`** | **+14.17%** | **+6.98%** | **+7.19 pp** | **+17.88 pp** | **+24.86%** |
+| **`C0-D` (DRO Active, No EXP-039)** **`[UNVERIFIED]`** | **+8.16%** *(Pre)* / **+2.40%** *(Post)* | **+6.02%** | **+2.14 pp** *(Pre)* / **-3.62 pp** *(Post)* | **+21.80 pp** | **+27.82%** |
+| **Multi-Year Hybrid (2021–26)** **`[UNVERIFIED: Net CLV 0%/-12% by construction]`** | +4.68% | **+6.35%** | **-1.67 pp** | +1.25 pp | +7.60% |
 
 *Mathematical Profit & Noise Decomposition:*
 
@@ -348,13 +367,14 @@ $$
 \text{Realized Yield} = \underbrace{\text{Claimed EV}}_{\text{Model Promise}} - \underbrace{B}_{\text{Optimizer's Curse}} + \underbrace{\eta}_{\text{Match Luck Noise}} = \textbf{True Edge (Net CLV)} + \eta
 $$
 
-- **Optimizer's Curse Bias ($B = \text{Claimed EV} - \text{Net CLV}$):** Systematic positive selection bias from picking bets where estimation error happened to be high. **Never vanishes with sample size $N$**. On unconstrained C0, it produced **+45.62 pp** of fake edge. Under zero-lookahead Leave-One-Out opening consensus shrinkage ($\alpha = 0.65$), LOO shrinkage slashed Pure C0's inflated EV from **+22.05%** down to **+8.59%** (removing **-13.46 pp** of curse!). This compresses residual optimizer's curse bias down to **+3.76 pp**, which is **strictly smaller than the +4.83% Net CLV** ($+3.76\text{ pp} < +4.83\%$), achieving a **56.2% edge retention rate**! For the distilled **`C0-D`** model ($N=43$), pre-DRO optimizer's curse bias is compressed even further to **+2.14 pp** ($< +6.02\%$ Net CLV), and under Wasserstein DRO ($\varepsilon = 0.025$) post-DRO bias turns **negative at -3.62 pp**, providing a formal **Zero-Disappointment Guarantee** ($B \le 0$).
-- **Match Luck Noise ($\eta = \text{Realized Yield} - \text{Net CLV}$):** Zero-mean binomial outcome variance ($\sigma_{\text{bet}} \approx 109.8\%$) that **decays to zero as $\sigma / \sqrt{N}$**. On the 50-bet production ledger, **+19.42 pp** of temporary lucky variance boosted wallet yield to **+23.91%** (+1,715.41 PLN), while the true long-term compounding edge is **Net CLV = +4.83%** ($t=3.00, p=0.0042$).
+> **[UNVERIFIED]** The two bullets below quote Net CLV, optimizer's-curse and "edge retention" figures from the in-sample 50-bet ledger (see the warning at the top of §5.4). "LOO shrinkage slashed EV" and "B < Net CLV" are selection criteria of the parameter grid, not findings; "Zero-Disappointment Guarantee" in the first bullet is `[WITHDRAWN]` (B_DRO = B_hyb − ε·c·Ō ≈ B_hyb − 5.7 pp, so any B_hyb < 5.7 pp passes; it is arithmetic on a stake-weighted mean, not a per-bet bound).
+
+> **[WITHDRAWN / UNVERIFIED]** The optimizer-bias, edge-retention, and “Zero-Disappointment Guarantee” statements below repeat claims from the in-sample ledger; arithmetic does not validate them.
 
 <details>
 <summary><b>📅 View Monthly Progression Breakdown (May–Sep 2026, N=50 Bets)</b></summary>
 
-#### Monthly Breakdown for Adopted Production Strategy ($N=50$, 10,000 PLN Capital)
+#### Monthly Breakdown for the 50-Bet Simulated Ledger **`[UNVERIFIED]`** ($N=50$, 10,000 PLN Capital; formerly labelled "Adopted Production Strategy")
 
 | Month | Bets (Wins) | Win Rate | Net Profit | Realized Yield | Mean Net CLV |
 |---|---:|---:|---:|---:|---:|
@@ -367,31 +387,34 @@ $$
 
 </details>
 
-#### 5.4.1 Distilled Model Family Financial Performance: `C0-D` & `C0-Slim` (Without `EXP-039`, DRO Active)
+#### 5.4.1 Distilled Model Family Financial Performance: `C0-D` & `C0-Slim` (Without `EXP-039`, DRO Active) **`[UNVERIFIED, RESEARCH-ONLY MODELS]`**
 
-By lifting the rigid 20-match organizational form prerequisite (`EXP-039` veto), the pure distilled model family operates across the complete match universe while retaining the distributionally robust optimization gate (**`Wasserstein-Robust-Gate` / DRO**, $\varepsilon = 0.025$). This yields exceptional capital efficiency and risk-adjusted alpha across both licensed Polish bookmakers and sharp offshore Pinnacle markets:
+> **[UNVERIFIED]** Table 5.4C and the takeaways preserve historical claims for a reported43-row C0-D account derived/rescored using the50-row ledger; they do not establish an independent43-ticket ledger. The separate43 trajectory IDs are support/coverage, not that ledger (audit §5.2). Pinnacle/multi-year cohorts bet at de-vigged fair odds (audit §5.7). "Sharpe Ratio" in this README is mean/sd·√N of per-bet returns, i.e. a **t-statistic** (p≈0.13 at N=43), not annualized Sharpe. Max drawdown is bounded by construction (stakes capped at150 on a10,000 bankroll). `C0-D` and `C0-Slim` are research-only and not served by the app.
+
+**`[WITHDRAWN / UNVERIFIED — HISTORICAL CLAIM]`** The original research narrative claimed that lifting the 20-match organizational form prerequisite (`EXP-039` veto) let the pure distilled model family operate across the complete match universe while retaining the distributionally robust optimization gate (**`Wasserstein-Robust-Gate` / DRO**, $\varepsilon = 0.025$), yielding exceptional capital efficiency and risk-adjusted alpha across Polish bookmakers and Pinnacle. This is retained as historical wording, not a verified result: the ledgers are selected/re-filtered and the Pinnacle cohorts bet at de-vigged fair odds.
 
 ##### Table 5.4C: Distilled Family Financial Performance (10,000 PLN Capital, DRO Active, No EXP-039)
 
-| Model & Strategy Configuration | Operating Market & Tax Regime | Bets ($N$) | Win Rate | Turnover | Net Profit | Realized Yield | Bankroll ROI | True Edge (Net CLV) | Pre-DRO Curse ($B$) | Post-DRO Curse ($B_{\text{DRO}}$) | Sharpe Ratio | Max DD |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| **`C0-D` (Pure Distilled W32)** | Polish Bookmakers (12% Tax) | 43 | 60.5% | 6,346.54 PLN | **+1,765.78 PLN** | **+27.82%** | **+17.66%** | **+6.02%** | **+2.14 pp** | **-3.62 pp** | **1.56** | 6.00% |
-| **`C0-D` (Polish Longshots: Odds 2.30–4.00)** | Polish Bookmakers (12% Tax) | 26 | 57.7% | 3,782.57 PLN | **+1,793.15 PLN** | **+47.41%** | **+17.93%** | **+8.45%** | **+1.88 pp** | **-3.95 pp** | **1.79** | 3.89% |
-| **`C0-Slim` (1-Seed Distilled, 3.1x Faster)** | Polish Bookmakers (12% Tax) | 42 | 59.5% | 6,195.80 PLN | **+1,643.79 PLN** | **+26.53%** | **+16.44%** | **+5.88%** | **+2.31 pp** | **-3.41 pp** | **1.42** | 6.08% |
-| **`C0-Slim` (Sharp Pinnacle $T-1\text{h}$)** | Pinnacle $T-1\text{h}$ (12% Tax) | 29 | 48.3% | 3,924.31 PLN | **+1,348.78 PLN** | **+34.37%** | **+13.49%** | **+7.12%** | **+1.95 pp** | **-3.82 pp** | **1.15** | 8.42% |
-| **`C0-Slim` (High-Volume Pinnacle $T-1\text{h}$)** | Pinnacle $T-1\text{h}$ (0% Tax) | 560 | 53.2% | 83,160.72 PLN | **+5,024.57 PLN** | **+6.04%** | **+50.25%** | **+6.04%** | **+0.82 pp** | **-4.18 pp** | **1.52** | 17.44% |
-| **`C0-Slim` (Pinnacle Longshots: Odds 2.30–4.00)** | Pinnacle $T-1\text{h}$ (0% Tax) | 211 | 40.3% | 30,583.30 PLN | **+4,462.18 PLN** | **+14.59%** | **+44.62%** | **+14.59%** | **+0.64 pp** | **-4.36 pp** | **1.59** | 13.30% |
-
+| Model & Strategy Configuration | Operating Market & Tax Regime | Bets ($N$) | Win Rate | Turnover | Net Profit | Realized Yield | Bankroll ROI | True Edge (Net CLV) | Pre-DRO Curse ($B$) | Post-DRO Curse ($B_{\text{DRO}}$) | t-Stat (labelled "Sharpe") | Max DD |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| **`C0-D` (Pure Distilled W32)** **`[WITHDRAWN / RE-FILTERED]`** | Polish Bookmakers (12% Tax) | 43 | 60.5% | 6,346.54 PLN | **+1,765.78 PLN** | **+27.82%** | **+17.66%** | **+6.02%** | **+2.14 pp** | **-3.62 pp** | **1.56 (t-statistic)** | 6.00% |
+| **`C0-D` (Polish Longshots: Odds 2.30–4.00)** **`[UNVERIFIED / BY CONSTRUCTION]`** | Polish Bookmakers (12% Tax) | 26 | 57.7% | 3,782.57 PLN | **+1,793.15 PLN** | **+47.41%** | **+17.93%** | **+8.45%** | **+1.88 pp** | **-3.95 pp** | **1.79 (t-statistic)** | 3.89% |
+| **`C0-Slim` (1-Seed Distilled, 3.1x Faster)** **`[UNVERIFIED / BY CONSTRUCTION]`** | Polish Bookmakers (12% Tax) | 42 | 59.5% | 6,195.80 PLN | **+1,643.79 PLN** | **+26.53%** | **+16.44%** | **+5.88%** | **+2.31 pp** | **-3.41 pp** | **1.42 (t-statistic)** | 6.08% |
+| **`C0-Slim` (Sharp Pinnacle $T-1\text{h}$)** **`[UNVERIFIED / BY CONSTRUCTION]`** | Pinnacle $T-1\text{h}$ (12% Tax) | 29 | 48.3% | 3,924.31 PLN | **+1,348.78 PLN** | **+34.37%** | **+13.49%** | **+7.12%** | **+1.95 pp** | **-3.82 pp** | **1.15 (t-statistic)** | 8.42% |
+| **`C0-Slim` (High-Volume Pinnacle $T-1\text{h}$)** **`[WITHDRAWN / RE-FILTERED]`** | Pinnacle $T-1\text{h}$ (0% Tax) | 560 | 53.2% | 83,160.72 PLN | **+5,024.57 PLN** | **+6.04%** | **+50.25%** | **+6.04%** | **+0.82 pp** | **-4.18 pp** | **1.52 (t-statistic)** | 17.44% |
+| **`C0-Slim` (Pinnacle Longshots: Odds 2.30–4.00)** **`[UNVERIFIED / BY CONSTRUCTION]`** | Pinnacle $T-1\text{h}$ (0% Tax) | 211 | 40.3% | 30,583.30 PLN | **+4,462.18 PLN** | **+14.59%** | **+44.62%** | **+14.59%** | **+0.64 pp** | **-4.36 pp** | **1.59 (t-statistic)** | 13.30% |
 *Key Financial Takeaways:*
-1. **Self-Contained Alpha Without External Dependencies:** Pure `C0-D` produces **+1,765.78 PLN** profit (**+27.82% yield**, **1.56 Sharpe**, **60.5% win rate**, **+6.02% Net CLV**) on the Polish ledger without any external tree connector or EXP-039 baseline. Pre-DRO Optimizer's Curse Bias is compressed to **+2.14 pp** (strictly smaller than +6.02% Net CLV), and Wasserstein DRO ($\varepsilon = 0.025$) shifts Post-DRO Optimizer's Curse to **-3.62 pp** (formal Zero-Disappointment Guarantee).
-2. **Massive Longshot Asymmetry:** Over half the Polish bets land in the `Odds 2.30–4.00` underdog bracket, where `C0-D` captures a **57.7% win rate** and **+47.41% yield** (+1,793.15 PLN, 1.79 Sharpe, max drawdown only 3.89%).
-3. **Execution Speed & Scalability:** `C0-Slim` achieves $3.1\times$ faster neural inference (278 ms vs 848 ms) while sustaining **+34.37% yield** (+1,348.78 PLN) under Polish taxation on Pinnacle $T-1\text{h}$ quotes, and compounds to **+5,024.57 PLN** (+50.25% bankroll ROI, 1.52 Sharpe) over 560 bets under 0% international tax.
+1. **[UNVERIFIED / IN-SAMPLE]** Reported C0-D financial metrics and “Zero-Disappointment Guarantee” are withdrawn/unverified. The reported43-row account derives/rescores from the50-row ledger; the43 trajectory IDs do not identify a separate ticket ledger. The saved21-bet optimizer A/B provenance is unbound; current strict later/disjoint B behavior does not validate that historical result. “Sharpe” is a t-statistic, and repository evaluation code does not compute the six replacement guards.
+2. **[UNVERIFIED / BY CONSTRUCTION] Massive Longshot Asymmetry:** the reported 57.7% win rate and +47.41% yield (+1,793.15 PLN, 1.79 **t-statistic**, max drawdown 3.89%) are historical claims only.
+3. **[UNVERIFIED / BY CONSTRUCTION]** Reported C0-Slim speed and financial metrics (+34.37%/+1,348.78 PLN; +5,024.57 PLN/+50.25% bankroll ROI over 560 bets) are historical claims only; “Sharpe” figures are t-statistics, not annualized Sharpe ratios.
 
-#### 5.4.2 Gate Simplification & Leave-One-Out (LOO) Walk-Forward Production Rule
+#### 5.4.2 Gate Simplification & Leave-One-Out (LOO) Walk-Forward Production Rule **`[WITHDRAWN as a description of the running system]`**
 
-Through empirical verification of the Wasserstein DRO framework ($\varepsilon = 0.025$) combined with **Leave-One-Out (`LOO`) Market Shrinkage** against opening prices, the production betting rules are radically simplified from a multi-veto heuristic into **4 essential mathematical rules** under 12% Polish tax:
+> **Correction (audit 2026-10-21 §2):** the code uses α = **0.50** (not 0.65 / 0.35), and **Min EV 5 %, Max EV 25 % and the EXP-039 veto are active, not "retired"**. See §2.2 for the code-accurate gate table and the intended contract (≥ 2 distinct books, divergence gate on the C0 probability, real wallet bankroll). The text below is the research protocol as originally written, kept for history only.
 
-1. **Leave-One-Out (LOO) Market Shrinkage**: Shrink neural attention forecasts toward the Leave-One-Out opening consensus $q_{\text{open, loo}, -k}(t)$ across the other active bookmakers at the exact scrape timestamp without lookahead ($\alpha = 0.65$):
+**`[WITHDRAWN / HISTORICAL CLAIM]`** The original research protocol claimed empirical verification of the Wasserstein DRO framework ($\varepsilon = 0.025$) combined with **Leave-One-Out (`LOO`) Market Shrinkage** against opening prices, and claimed the production betting rules were reduced to **4 essential mathematical rules** under 12% Polish tax. This description is withdrawn as a claim about the running system; the archived rules and parameters below are preserved for historical context.
+
+1. **[WITHDRAWN: code uses α = 0.50, applied once; consensus at `9fe6bb2` included the focal book and had no minimum book count] Leave-One-Out (LOO) Market Shrinkage**: Shrink neural attention forecasts toward the Leave-One-Out opening consensus $q_{\text{open, loo}, -k}(t)$ across the other active bookmakers at the exact scrape timestamp without lookahead ($\alpha = 0.65$):
    $$\text{logit}(p_{\text{hybrid}}) = 0.35 \cdot \text{logit}(p_{\text{C0}}) + 0.65 \cdot \text{logit}(q_{\text{open, loo}, -k}(t))$$
 2. **Wasserstein DRO Gate ($\text{EV}_{\text{DRO}} > 0\%$)**: Enforce positive expected value under adversarial distribution shift with radius $\varepsilon = 0.025$:
    $$\text{EV}_{\text{DRO}} = (p_{\text{hybrid}} - 0.025) \cdot 0.88 \cdot O - 1 > 0$$
@@ -400,7 +423,7 @@ Through empirical verification of the Wasserstein DRO framework ($\varepsilon = 
 4. **Odds Ceiling**: Restrict maximum odds to avoid extreme tail variance:
    $$\text{Odds} \le 4.00$$
 
-**Retired Legacy Filters:**
+**"Retired" Legacy Filters — `[WITHDRAWN]`: all three are active in the code (§2.2):**
 - **`Max EV <= 25%`**: Retired. Redundant because Wasserstein DRO naturally suppresses longshot overconfidence without an arbitrary ceiling.
 - **`Min EV >= 5%`**: Retired. Subsumed by the continuous margin required by $\text{EV}_{\text{DRO}} > 0\%$ (which demands an empirical edge exceeding $\varepsilon \cdot 0.88 \cdot O$).
 - **`Model-Consensus-Veto` (`EXP-039`)**: Retired for the distilled model family (`C0-D` / `C0-Slim`). Pure student neural attention achieves superior probability calibration (ECE 1.87%) without requiring external 20-match linear form validation.
@@ -414,7 +437,7 @@ Any script or verification pipeline processing raw quotes (`data/01_raw/c0_produ
 <details>
 <summary><b>🛡️ View Realistic Human Execution Stress Test (10,000 Monte Carlo Runs) & Live Trust Protocol</b></summary>
 
-#### Realistic Friction Simulation (10,000 Monte Carlo Runs, 1 Split = 3.5 Months, `10,000 PLN` Bankroll)
+#### Realistic Friction Simulation (10,000 Monte Carlo Runs, 1 Split = 3.5 Months, `10,000 PLN` Bankroll) **`[UNVERIFIED: simulated on the re-filtered 43-bet C0-D ledger]`**
 
 Simulating simultaneous real-world manual execution frictions on `C0-D + DRO`: (1) `10%–25%` of line movement toward close already gone during reaction delay, (2) live betslip re-gating via `DRO Guard W`, (3) `25%` missed alerts (asleep/work), (4) recreational stake rounding to `25 PLN` increments, (5) `75 PLN` liquidity cap on non-Tier-1/ERL matches (`150 PLN` on Tier-1), and (6) progressive soft-bookmaker stake limiting to `50 PLN` after winning `+500 PLN` at `Totalbet`/`Betfan`/`LeBull`:
 
@@ -425,7 +448,7 @@ Simulating simultaneous real-world manual execution frictions on `C0-D + DRO`: (
 | **2. Random `50%` Missed Alerts** | 21.6 | 60.2% | **+854.3 PLN** (`[-56, +1,680]`) | **+26.98%** | +6.00% | 5.04% | 93.0% |
 | **3. Most Realistic Human Execution (All 6 Frictions)** | **22.6** | **63.8%** | **+809.9 PLN** (`[+417, +1,186]`) | **+36.02%** | **+3.34%** | **2.75% (`4.15%`)** | **99.56%** |
 
-#### 4-Pillar Operational Trust & Kill-Switch Protocol
+#### 4-Pillar Operational Trust & Kill-Switch Protocol **`[UNVERIFIED: thresholds derived from the in-sample ledger]`**
 1. **Rolling 20-Bet CLV Gate**: Require **Mean Raw CLV $\ge +14\%$** (`Net CLV > 0%` after 12% Polish tax) and **$\ge 75\%$ positive Raw CLV rate**. Pause betting immediately if rolling 20-bet Raw CLV drops below `+11%`.
 2. **Monthly All-Match Paper Audit**: Score `C0-D` across all ~300 pro matches/month (0 PLN risked); require **LogLoss $\le 0.545$** and **ECE $\le 3.0\%$**.
 3. **Live Betslip Re-Gating & Cross-ERL Rule**: Verify $(p_{\text{hybrid}} - 0.025) \cdot O_{\text{betslip}} \cdot 0.88 - 1 > 0$ at the live betslip price with $\ge 2$ open books; avoid opposite-favorite minor-region underdogs in cross-league `EMEA Masters`.
@@ -434,7 +457,9 @@ Simulating simultaneous real-world manual execution frictions on `C0-D + DRO`: (
 </details>
 ---
 
-### 5.5 Econometric Audit: True Profit ($\text{Net CLV}$) vs. Noise
+### 5.5 Econometric Audit: True Profit ($\text{Net CLV}$) vs. Noise **`[UNVERIFIED]`**
+
+> **WARNING (audit 2026-10-21 §5):** everything in this section is per-bet IID statistics on ≈50 bets of an in-sample, hand-picked ledger. "Net CLV" uses reference prices that are by construction, stale, or default to 0.5; the "Sharpe/t" figure is a t-statistic. The claim that Net CLV proves an edge in 15–30 bets contradicts the literature (≈50 bets for a 2% edge against a margin-free Pinnacle close, 1,500–4,300 bets for yield). The N_min / "probability of profit" table treats μ = +4.83% as known with σ hard-coded at 1.0979 and assumes CLV converts 1:1 into post-tax yield at stale prices that stay available; at the CI lower bound of 1.68% about 11,600 bets would be needed. It is a conditional sampling probability, not a guarantee.
 
 <details>
 <summary><b>📐 View Deep-Dive Econometric Audit: Hypothesis Tests, Variance Ratio (104.5x) & Time-to-Profit (N_min) Schedule</b></summary>
@@ -461,7 +486,7 @@ where Realized Yield $c \cdot O_i Y_i - 1 = +23.91\%$ (unweighted bet mean: $+24
 - **Win Rate:** `60.5%` (`26 / 43` wins), **Net Profit:** `+1,765.78 PLN`, **Realized Yield:** `+27.82%`
 - **True Edge (Net CLV):** `+6.02%`
 - **Pre-DRO Optimizer's Curse Bias:** **`+2.14 pp`** (strictly smaller than `+6.02%` Net CLV!)
-- **Post-DRO Optimizer's Curse Bias:** **`-3.62 pp`** (**Zero-Disappointment Guarantee!** Under Wasserstein DRO, expected returns are guaranteed not to disappoint: $B \le 0$).
+- **Post-DRO Optimizer's Curse Bias:** **`-3.62 pp`** (**`[WITHDRAWN]` "Zero-Disappointment Guarantee"**: B_DRO = B_hyb − ε·c·Ō ≈ B_hyb − 5.7 pp, so any B_hyb < 5.7 pp passes; arithmetic on a stake-weighted mean, not a per-bet or expected-return bound).
 #### B. Hypothesis Testing & Variance Ratio ($N=50$ Production Bets)
 
 | Metric | Point Estimate | Sample Std ($s$) | Std Error (SE) | $t$-Statistic ($p$-Value) | 95% Bootstrap CI |
@@ -474,7 +499,7 @@ $$
 \text{Variance Ratio} = \frac{\text{Var}(\text{Realized Yield})}{\text{Var}(\text{Net CLV})} = \frac{1.1650^2}{0.1139^2} = \mathbf{104.5} \times
 $$
 
-*Finding:* Realized wallet PnL has $104.5\times$ higher variance than Net CLV. Proving edge via Net CLV requires only 15–30 bets, whereas proving edge via wallet PnL requires $>1,000$ bets.
+*Finding* **`[UNVERIFIED]`**: Realized wallet PnL has $104.5\times$ higher variance than Net CLV. The claim "proving edge via Net CLV requires only 15–30 bets" is not supported (literature: ≈50 bets for a 2% edge against a margin-free Pinnacle close; yield needs ≈1,500–4,300 bets).
 
 #### C. Time-to-Profit ($N_{\min}$) & Noise Decay Schedule
 
@@ -488,14 +513,14 @@ $$
 |---:|---:|---|---:|---|
 | **10 bets** | ±34.72% | [-63.22%, +72.88%] | 55.5% | Pure coinflip; noise is 7.2x larger than +4.83% edge |
 | **20 bets** | ±24.55% | [-43.29%, +52.95%] | 57.8% | Wide swings (e.g. Aug 2026 had -0.68% over 18 bets) |
-| **50 bets** | ±15.53% | [-25.60%, +35.26%] | 62.2% | Net CLV proven ($p=0.004$), but wallet PnL is still 75% luck |
+| **50 bets** | ±15.53% | [-25.60%, +35.26%] | 62.2% | Net CLV reported ($p=0.004$, per-bet IID, **`[UNVERIFIED]`**), but wallet PnL is still 75% luck |
 | **100 bets** | ±10.98% | [-16.69%, +26.35%] | 67.0% | 2-in-3 chance of profit; negative runs still plausible |
 | **250 bets** | ±6.94% | [-8.78%, +18.44%] | 75.7% | 3-in-4 chance of profit; edge pulls bankroll visibly |
 | **500 bets** | ±4.91% | [-4.79%, +14.45%] | 83.7% | Noise SE drops below true profit (4.83%) |
 | **1,000 bets** | ±3.47% | [-1.97%, +11.63%] | 91.8% | >9 in 10 chance of profit |
 | **1,396 bets** | **±2.94%** | **[-0.93%, +10.59%]** | **95.0%** | 🏆 **"Almost Only Profit" Threshold ($z = 1.645$ one-sided 95%)** |
 | **2,000 bets** | ±2.45% | [+0.02%, +9.64%] | 97.5% | Two-sided 95% CI is strictly positive (>0%) |
-| **2,792 bets** | ±2.08% | [+0.76%, +8.90%] | 99.0% | 99% Guaranteed Profit certainty |
+| **2,792 bets** | ±2.08% | [+0.76%, +8.90%] | 99.0% | **`[WITHDRAWN]`** ~~"99% Guaranteed Profit certainty"~~: Φ(μ/(σ/√N)) with μ = 4.83% taken as known and σ hard-coded; at the CI lower bound 1.68% ≈ 11,600 bets would be needed |
 
 *Tax Regime Comparison:*
 - **Under 12% Polish Tax ($\mu = +4.83\%$):** $N_{\min} = \mathbf{1,396\text{ bets}}$ ($\sim 3.8$ years at 30 bets/mo).

@@ -34,9 +34,9 @@ if str(PROJECT_ROOT) not in sys.path:
 import numpy as np
 import pandas as pd
 from scipy.special import expit, logit
+from betting_app.core.ev import fair_market_probabilities
 # Paths
 REPORT_DIR = PROJECT_ROOT / "data/08_reporting/c0_upgrade_and_distillation_20261017"
-REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 TRACK1_PATH = REPORT_DIR / "track1_predictions.parquet"
 TRACK4_PATH = REPORT_DIR / "track4_predictions.parquet"
@@ -60,6 +60,108 @@ def sigmoid(x: np.ndarray | float) -> np.ndarray | float:
 
 def clip_prob(p: np.ndarray | float, eps: float = 1e-12) -> np.ndarray | float:
     return np.clip(p, eps, 1.0 - eps)
+
+
+def normalize_team_name(value: Any) -> str:
+    """Normalize formatting variants without inferring team identity from outcomes."""
+    if value is None or pd.isna(value):
+        return ""
+    return (
+        str(value).casefold().replace(" ", "").replace(".", "").replace("-", "")
+        .replace("esports", "").replace("gaming", "").replace("team", "")
+    )
+
+
+def team_a_is_team1(
+    team_a: Any,
+    team_b: Any,
+    team1: Any,
+    team2: Any,
+) -> bool:
+    """Return quote/trajectory orientation from names, failing when identity is unavailable."""
+    a, b = normalize_team_name(team_a), normalize_team_name(team_b)
+    one, two = normalize_team_name(team1), normalize_team_name(team2)
+    if not all((a, b, one, two)):
+        raise ValueError("Cannot orient match: quote and prediction team identity names are required.")
+    if (a, b) == (one, two):
+        return True
+    if (a, b) == (two, one):
+        return False
+    raise ValueError(
+        f"Cannot orient match from identities: quote teams {team_a!r}/{team_b!r} "
+        f"do not match prediction teams {team1!r}/{team2!r}."
+    )
+
+
+def probability_within_tolerance(
+    candidate_probability: float,
+    target_probability: float,
+    tolerance: float = 1e-3,
+) -> bool:
+    """Compare probabilities with an explicit absolute tolerance."""
+    try:
+        candidate, target = float(candidate_probability), float(target_probability)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return bool(
+        np.isfinite(candidate)
+        and np.isfinite(target)
+        and np.isfinite(tolerance)
+        and tolerance >= 0.0
+        and abs(candidate - target) <= tolerance + 1e-12
+    )
+
+
+def leave_one_book_out_consensus(
+    quotes: pd.DataFrame,
+    focal_bookmaker_id: Any,
+    cutoff: Any | None = None,
+) -> float | None:
+    """Return latest-quote side-A fair probability, excluding the focal book.
+
+    When a cutoff is supplied, only quotes observed by it and within the
+    two-hour freshness window are eligible.
+    """
+    required = {"bookmaker_id", "odds_a", "odds_b"}
+    if not required.issubset(quotes.columns):
+        return None
+
+    eligible = quotes
+    if cutoff is not None:
+        if "scraped_at" not in quotes.columns:
+            return None
+        cutoff_dt = pd.to_datetime(cutoff, utc=True, format="mixed", errors="coerce")
+        if pd.isna(cutoff_dt):
+            return None
+        quote_times = pd.to_datetime(quotes["scraped_at"], utc=True, format="mixed", errors="coerce")
+        eligible = quotes.loc[
+            quote_times.notna()
+            & quote_times.le(cutoff_dt)
+            & quote_times.ge(cutoff_dt - pd.Timedelta(hours=2))
+        ].copy()
+        eligible["_quote_time"] = quote_times.loc[eligible.index]
+        eligible = eligible.sort_values("_quote_time", kind="stable").drop_duplicates(
+            "bookmaker_id", keep="last"
+        )
+
+    probabilities: list[float] = []
+    seen_books: set[Any] = set()
+    for row in eligible.itertuples(index=False):
+        book_id = getattr(row, "bookmaker_id")
+        if pd.isna(book_id) or book_id == focal_bookmaker_id or book_id in seen_books:
+            continue
+        try:
+            odds_a, odds_b = float(row.odds_a), float(row.odds_b)
+            p_a, _ = fair_market_probabilities(odds_a, odds_b)
+            if not np.isfinite(p_a):
+                continue
+        except (TypeError, ValueError, OverflowError):
+            continue
+        seen_books.add(book_id)
+        probabilities.append(float(p_a))
+    if len(seen_books) < 2:
+        return None
+    return float(np.mean(probabilities))
 
 
 def run_ons_recalibration(
@@ -124,8 +226,10 @@ def run_ons_recalibration(
 def compute_three_part_decomposition(
     bets: list[dict[str, Any]],
     initial_bankroll: float = 10000.0,
+    clv_by_construction: bool = False,
+    net_clv_reason: str | None = None,
 ) -> dict[str, Any]:
-    """Compute performance metrics and exact three-part econometric decomposition."""
+    """Compute financial metrics while limiting CLV decomposition to observed closes."""
     if not bets:
         return {
             "n_bets": 0,
@@ -138,56 +242,72 @@ def compute_three_part_decomposition(
             "max_drawdown_pct": 0.0,
             "profit_factor": 0.0,
             "sharpe_ratio": 0.0,
-            "claimed_ev_pct": 0.0,
-            "true_edge_net_clv_pct": 0.0,
-            "optimizers_curse_bias_pp": 0.0,
-            "match_luck_noise_pp": 0.0,
-            "identity_discrepancy_max": 0.0,
+            "claimed_ev_pct": None,
+            "clv_claimed_ev_pct": None,
+            "net_clv_pct": None,
+            "n_clv_bets": 0,
+            "n_missing_close": 0,
+            "net_clv_reason": net_clv_reason or "no_bets_with_independent_close",
+            "clv_by_construction": clv_by_construction,
+            "optimizers_curse_bias_pp": None,
+            "match_luck_noise_pp": None,
+            "identity_discrepancy_max": None,
         }
 
     df = pd.DataFrame(bets)
+    if "net_clv" not in df:
+        df["net_clv"] = np.nan
+    else:
+        df["net_clv"] = pd.to_numeric(df["net_clv"], errors="coerce")
+    if clv_by_construction:
+        df["net_clv"] = np.nan
+
     n_bets = len(df)
     n_wins = int(df["won"].sum())
-    win_rate = (n_wins / n_bets) * 100.0 if n_bets > 0 else 0.0
+    win_rate = (n_wins / n_bets) * 100.0
     total_turnover = float(df["stake"].sum())
     total_net_profit = float(df["profit"].sum())
     realized_yield = (total_net_profit / total_turnover) * 100.0 if total_turnover > 0 else 0.0
     bankroll_roi = (total_net_profit / initial_bankroll) * 100.0
 
-    # Max Drawdown
     equities = df["bankroll"].to_numpy(dtype=float)
-    if len(equities) > 0:
-        eq_curve = np.concatenate([[initial_bankroll], equities])
-        running_max = np.maximum.accumulate(eq_curve)
-        drawdowns = (running_max - eq_curve) / running_max * 100.0
-        max_drawdown = float(np.max(drawdowns))
-    else:
-        max_drawdown = 0.0
+    eq_curve = np.concatenate([[initial_bankroll], equities])
+    running_max = np.maximum.accumulate(eq_curve)
+    drawdowns = (running_max - eq_curve) / running_max * 100.0
+    max_drawdown = float(np.max(drawdowns))
 
-    # Profit Factor
     gross_wins = float(df[df["profit"] > 0]["profit"].sum())
     gross_losses = float(abs(df[df["profit"] < 0]["profit"].sum()))
     profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else (999.0 if gross_wins > 0 else 0.0)
 
-    # Sharpe Ratio (per-bet normalized)
     returns = df["profit"] / df["stake"]
     ret_std = float(returns.std(ddof=1)) if len(returns) > 1 else 0.0
     sharpe = (float(returns.mean()) / ret_std) * np.sqrt(n_bets) if ret_std > 0 else 0.0
 
-    # Stake-weighted Three-Part Econometric Identity:
-    # Yield = Claimed EV - Optimizer's Curse (Bias B) + Match Noise (Luck eta)
-    weights = df["stake"].to_numpy(dtype=float) / total_turnover
-    claimed_ev = float(np.sum(weights * df["ev_claimed"].to_numpy(dtype=float))) * 100.0
-    net_clv = float(np.sum(weights * df["net_clv"].to_numpy(dtype=float))) * 100.0
-    bias_b = claimed_ev - net_clv
-    luck_eta = realized_yield - net_clv
-
-    # Verify per-bet identity: yield_unit == ev_claimed - bias_unit + luck_unit
-    unit_yield = df["profit"].to_numpy(dtype=float) / df["stake"].to_numpy(dtype=float)
-    unit_ev = df["ev_claimed"].to_numpy(dtype=float)
-    unit_clv = df["net_clv"].to_numpy(dtype=float)
-    unit_diff = np.abs(unit_yield - (unit_ev - (unit_ev - unit_clv) + (unit_yield - unit_clv)))
-    max_discrepancy = float(np.max(unit_diff))
+    all_weights = df["stake"].to_numpy(dtype=float) / total_turnover
+    claimed_ev = float(np.sum(all_weights * df["ev_claimed"].to_numpy(dtype=float))) * 100.0
+    clv_df = df.loc[df["net_clv"].notna()]
+    n_clv_bets = len(clv_df)
+    n_missing_close = n_bets - n_clv_bets
+    if n_clv_bets:
+        clv_turnover = float(clv_df["stake"].sum())
+        clv_weights = clv_df["stake"].to_numpy(dtype=float) / clv_turnover
+        clv_claimed_ev = float(np.sum(clv_weights * clv_df["ev_claimed"].to_numpy(dtype=float))) * 100.0
+        net_clv = float(np.sum(clv_weights * clv_df["net_clv"].to_numpy(dtype=float))) * 100.0
+        bias_b = clv_claimed_ev - net_clv
+        clv_yield = float(clv_df["profit"].sum() / clv_turnover) * 100.0
+        luck_eta = clv_yield - net_clv
+        unit_yield = clv_df["profit"].to_numpy(dtype=float) / clv_df["stake"].to_numpy(dtype=float)
+        unit_ev = clv_df["ev_claimed"].to_numpy(dtype=float)
+        unit_clv = clv_df["net_clv"].to_numpy(dtype=float)
+        unit_diff = np.abs(unit_yield - (unit_ev - (unit_ev - unit_clv) + (unit_yield - unit_clv)))
+        max_discrepancy = float(np.max(unit_diff))
+        resolved_clv_reason = None
+    else:
+        clv_claimed_ev = net_clv = bias_b = luck_eta = max_discrepancy = None
+        resolved_clv_reason = net_clv_reason or (
+            "clv_by_construction" if clv_by_construction else "no_bets_with_independent_close"
+        )
 
     return {
         "n_bets": n_bets,
@@ -201,9 +321,14 @@ def compute_three_part_decomposition(
         "profit_factor": round(profit_factor, 2),
         "sharpe_ratio": round(sharpe, 2),
         "claimed_ev_pct": round(claimed_ev, 2),
-        "true_edge_net_clv_pct": round(net_clv, 2),
-        "optimizers_curse_bias_pp": round(bias_b, 2),
-        "match_luck_noise_pp": round(luck_eta, 2),
+        "clv_claimed_ev_pct": round(clv_claimed_ev, 2) if clv_claimed_ev is not None else None,
+        "net_clv_pct": round(net_clv, 2) if net_clv is not None else None,
+        "n_clv_bets": n_clv_bets,
+        "n_missing_close": n_missing_close,
+        "net_clv_reason": resolved_clv_reason,
+        "clv_by_construction": clv_by_construction,
+        "optimizers_curse_bias_pp": round(bias_b, 2) if bias_b is not None else None,
+        "match_luck_noise_pp": round(luck_eta, 2) if luck_eta is not None else None,
         "identity_discrepancy_max": max_discrepancy,
     }
 
@@ -280,74 +405,100 @@ def run_distilled_financial_simulations() -> None:
     raw_prod_dir = RAW_PROD_DIR
     golgg = pd.read_parquet(raw_prod_dir / "golgg.parquet")
 
-    def norm_team(s: Any) -> str:
-        return str(s).lower().replace(" ", "").replace(".", "").replace("-", "").replace("esports", "").replace("gaming", "").replace("team", "")
+    required_traj_cols = {"team_a_name", "team_b_name", "start_time_normalized"}
+    required_gold_cols = {"match_id", "team1_name", "team2_name", "date"}
+    if missing := required_traj_cols.difference(traj_df.columns):
+        raise ValueError(f"Cannot orient trajectory rows; missing identity columns: {sorted(missing)}")
+    if missing := required_gold_cols.difference(golgg.columns):
+        raise ValueError(f"Cannot map trajectory/ledger identities; missing gold identity columns: {sorted(missing)}")
+
+    gold_identity = golgg[list(required_gold_cols)].copy()
+    gold_identity["golgg_id"] = gold_identity["match_id"].astype(str)
+    gold_identity["team1_norm"] = gold_identity["team1_name"].apply(normalize_team_name)
+    gold_identity["team2_norm"] = gold_identity["team2_name"].apply(normalize_team_name)
+    gold_identity["identity_date"] = pd.to_datetime(gold_identity["date"], utc=True, errors="coerce").dt.normalize()
 
     traj_to_golgg: dict[int, tuple[str, bool]] = {}
+    ambiguous_trajectory_ids: list[int] = []
     for _, r in u_traj.iterrows():
         cid = int(r["canonical_match_id"])
-        target_p = r["p_c0"] if pd.notna(r.get("p_c0")) else r["p_model_a"]
-        t_a = norm_team(r["team_a_name"])
-        t_b = norm_team(r["team_b_name"])
-        dt_str = str(r["start_time_normalized"])[:10]
+        traj_a = normalize_team_name(r["team_a_name"])
+        traj_b = normalize_team_name(r["team_b_name"])
+        traj_date = pd.to_datetime(r["start_time_normalized"], utc=True, errors="coerce")
+        if not traj_a or not traj_b or pd.isna(traj_date):
+            raise ValueError(f"Cannot orient trajectory canonical_match_id={cid}: team names and start time are required.")
+        traj_date = traj_date.normalize()
+        within_date = (gold_identity["identity_date"] - traj_date).abs() <= pd.Timedelta(days=1)
+        direct = (gold_identity["team1_norm"] == traj_a) & (gold_identity["team2_norm"] == traj_b)
+        reverse = (gold_identity["team1_norm"] == traj_b) & (gold_identity["team2_norm"] == traj_a)
+        matches = gold_identity.loc[within_date & (direct | reverse)]
+        if len(matches) == 1:
+            match = matches.iloc[0]
+            gid = str(match["golgg_id"])
+            if gid not in gid_to_idx:
+                continue
+            is_reversed = not team_a_is_team1(
+                r["team_a_name"], r["team_b_name"], match["team1_name"], match["team2_name"]
+            )
+            traj_to_golgg[cid] = (gid, is_reversed)
+        elif len(matches) > 1:
+            ambiguous_trajectory_ids.append(cid)
 
-        m1 = p1[np.isclose(p1["p_c0__full"], target_p, atol=1e-4)]
-        m2 = p1[np.isclose(1.0 - p1["p_c0__full"], target_p, atol=1e-4)]
+    unmatched_trajectory_ids = sorted(
+        set(u_traj["canonical_match_id"].astype(int)) - set(traj_to_golgg)
+    )
+    print(
+        f"Mapped {len(traj_to_golgg)} trajectory canonical matches by team identity/date; "
+        f"{len(unmatched_trajectory_ids)} unmatched or ambiguous."
+    )
 
-        cands = []
-        for _, mr in m1.iterrows():
-            cands.append((mr["golgg_match_id"], False, abs(pd.to_datetime(mr["date"]) - pd.to_datetime(dt_str)).days))
-        for _, mr in m2.iterrows():
-            cands.append((mr["golgg_match_id"], True, abs(pd.to_datetime(mr["date"]) - pd.to_datetime(dt_str)).days))
-
-        if cands:
-            cands.sort(key=lambda x: x[2])
-            traj_to_golgg[cid] = (str(cands[0][0]), cands[0][1])
-        else:
-            g_cands = golgg[(golgg["team1_name"].apply(norm_team).str.contains(t_a) | golgg["team1_name"].apply(norm_team).apply(lambda x: t_a in x)) &
-                            (golgg["team2_name"].apply(norm_team).str.contains(t_b) | golgg["team2_name"].apply(norm_team).apply(lambda x: t_b in x))]
-            if not g_cands.empty:
-                gid = str(g_cands.iloc[0]["match_id"])
-                traj_to_golgg[cid] = (gid, False)
-
-    print(f"Mapped {len(traj_to_golgg)} trajectory canonical matches to golgg_match_id.")
-
-    # Map 50 ledger bets
-    matches = pd.read_parquet(raw_prod_dir / "matches.parquet")
-    mappings = pd.read_parquet(raw_prod_dir / "mappings.parquet")
-    m_map = matches.merge(mappings, left_on="id", right_on="canonical_match_id")
-    matches["norm_a"] = matches["team_a_name"].apply(norm_team)
-    matches["norm_b"] = matches["team_b_name"].apply(norm_team)
-    m_map["norm_a"] = m_map["team_a_name"].apply(norm_team)
-    m_map["norm_b"] = m_map["team_b_name"].apply(norm_team)
-
-    ledger_df["norm_sel"] = ledger_df["team_selected"].apply(norm_team)
-    ledger_df["norm_opp"] = ledger_df["opponent"].apply(norm_team)
-
+    # The ledger has no canonical match id; require teams, a one-day window, and probability agreement.
+    required_ledger_cols = {"bet_id", "date", "team_selected", "opponent", "p_c0"}
+    if missing := required_ledger_cols.difference(ledger_df.columns):
+        raise ValueError(f"Cannot identity-join ledger bets; missing columns: {sorted(missing)}")
     um_df = pd.read_parquet(PROJECT_ROOT / "data/07_model_output/a0_native_refit/native_refit_20260929_122617/uniform/uniform_monthly/candidate.parquet")
     um_2026 = um_df.set_index("golgg_match_id").loc[p1["golgg_match_id"].astype(str)].reset_index()
     p_c0_mon = um_2026["p_full"].to_numpy(dtype=np.float64)
-    p1_dates = pd.to_datetime(p1["date"])
+    p_c0_by_gid = dict(zip(p1["golgg_match_id"].astype(str), p_c0))
+    p_c0_mon_by_gid = dict(zip(p1["golgg_match_id"].astype(str), p_c0_mon))
 
     ledger_to_golgg: dict[int, tuple[str, bool]] = {}
     for _, r in ledger_df.iterrows():
         bid = int(r["bet_id"])
-        dt = pd.to_datetime(str(r["date"])[:10])
-        target_p = float(r["p_c0"])
-        mask_dt = (p1_dates - dt).abs().dt.days <= 3
-        idxs = np.where(mask_dt)[0]
-        best = None
-        for idx in idxs:
-            for is_rev in (False, True):
-                val_m = (1.0 - p_c0_mon[idx]) if is_rev else p_c0_mon[idx]
-                val_s = (1.0 - p_c0[idx]) if is_rev else p_c0[idx]
-                diff = min(abs(val_m - target_p), abs(val_s - target_p))
-                if best is None or diff < best[0]:
-                    best = (diff, str(p1["golgg_match_id"].iloc[idx]), is_rev)
-        if best is not None:
-            ledger_to_golgg[bid] = (best[1], best[2])
+        selected = normalize_team_name(r["team_selected"])
+        opponent = normalize_team_name(r["opponent"])
+        ledger_date = pd.to_datetime(r["date"], utc=True, errors="coerce")
+        if not selected or not opponent or pd.isna(ledger_date):
+            continue
+        ledger_date = ledger_date.normalize()
+        within_date = (gold_identity["identity_date"] - ledger_date).abs() <= pd.Timedelta(days=1)
+        direct = (gold_identity["team1_norm"] == selected) & (gold_identity["team2_norm"] == opponent)
+        reverse = (gold_identity["team1_norm"] == opponent) & (gold_identity["team2_norm"] == selected)
+        candidates: list[tuple[str, bool]] = []
+        for _, match in gold_identity.loc[within_date & (direct | reverse)].iterrows():
+            gid = str(match["golgg_id"])
+            selected_is_team1 = team_a_is_team1(
+                r["team_selected"], r["opponent"], match["team1_name"], match["team2_name"]
+            )
+            if gid not in p_c0_by_gid or gid not in p_c0_mon_by_gid:
+                continue
+            p_selected = p_c0_by_gid[gid] if selected_is_team1 else 1.0 - p_c0_by_gid[gid]
+            p_mon_selected = p_c0_mon_by_gid[gid] if selected_is_team1 else 1.0 - p_c0_mon_by_gid[gid]
+            if (
+                probability_within_tolerance(p_selected, r["p_c0"])
+                or probability_within_tolerance(p_mon_selected, r["p_c0"])
+            ):
+                candidates.append((gid, not selected_is_team1))
+        if len(candidates) == 1:
+            ledger_to_golgg[bid] = candidates[0]
 
-    print(f"Mapped {len(ledger_to_golgg)} out of {len(ledger_df)} ledger bets to golgg_match_id with exact parity.")
+    all_ledger_bet_ids = ledger_df["bet_id"].astype(int).tolist()
+    unmatched_ledger_bet_ids = sorted(set(all_ledger_bet_ids) - set(ledger_to_golgg))
+    print(
+        f"Mapped {len(ledger_to_golgg)} of {len(ledger_df)} ledger bets by names, date ±1 day, "
+        "and probability tolerance 1e-3."
+    )
+    ledger_df = ledger_df[ledger_df["bet_id"].astype(int).isin(ledger_to_golgg)].copy().reset_index(drop=True)
 
     # Reconstruct ledger market probability analytically:
     l_c0_led = logit(ledger_df["p_c0"].to_numpy(dtype=float))
@@ -359,7 +510,16 @@ def run_distilled_financial_simulations() -> None:
     closing_odds_led = ledger_df["closing_odds"].to_numpy(dtype=float)
     won_led = ledger_df["won"].to_numpy(dtype=int)
 
-    suite1_results: dict[str, Any] = {"trajectory_replay": {}, "ledger_50_cohort": {}}
+    suite1_results: dict[str, Any] = {
+        "trajectory_replay": {},
+        "ledger_50_cohort": {},
+        "identity_join": {
+            "trajectory_unmatched_canonical_match_ids": unmatched_trajectory_ids,
+            "ledger_unmatched_bet_ids": unmatched_ledger_bet_ids,
+            "ledger_probability_tolerance": 1e-3,
+            "identity_date_window_days": 1,
+        },
+    }
 
     # Part 1A: Trajectory Replay across all 6 models
     from src.analysis.historical_production_simulator import HistoricalProductionSimulator
@@ -386,7 +546,8 @@ def run_distilled_financial_simulations() -> None:
                 p039_val = p039_lookup.get(gid, np.nan)
                 new_p_039.append((1.0 - p039_val) if (inv and pd.notna(p039_val)) else p039_val)
             else:
-                new_p_model_a.append(r["p_model_a"])
+                # No identity join means no model orientation; never fall back to outcome-based inference.
+                new_p_model_a.append(np.nan)
                 new_p_039.append(np.nan)
 
         df_m["p_model_a"] = new_p_model_a
@@ -428,13 +589,15 @@ def run_distilled_financial_simulations() -> None:
             "model": m_name,
             "strategy": f"{m_name} Unconstrained Pure Model (Flat 100)",
             "bets": d1["n_bets"],
+            "n_clv_bets": d1["n_clv_bets"],
+            "n_missing_close": d1["n_missing_close"],
             "win_rate_pct": d1["win_rate_pct"],
             "turnover_pln": d1["total_turnover_pln"],
             "profit_pln": d1["total_net_profit_pln"],
             "realized_yield_pct": d1["realized_yield_pct"],
             "bankroll_roi_pct": d1["bankroll_roi_pct"],
             "claimed_ev_pct": d1["claimed_ev_pct"],
-            "net_clv_pct": d1["true_edge_net_clv_pct"],
+            "net_clv_pct": d1["net_clv_pct"],
             "optimizers_curse_bias_pp": d1["optimizers_curse_bias_pp"],
             "match_luck_noise_pp": d1["match_luck_noise_pp"],
             "max_drawdown_pct": d1["max_drawdown_pct"],
@@ -479,13 +642,15 @@ def run_distilled_financial_simulations() -> None:
             "model": m_name,
             "strategy": f"{m_name} Hybrid-50 + Guard B <= 0.85 (Flat 100)",
             "bets": d2f["n_bets"],
+            "n_clv_bets": d2f["n_clv_bets"],
+            "n_missing_close": d2f["n_missing_close"],
             "win_rate_pct": d2f["win_rate_pct"],
             "turnover_pln": d2f["total_turnover_pln"],
             "profit_pln": d2f["total_net_profit_pln"],
             "realized_yield_pct": d2f["realized_yield_pct"],
             "bankroll_roi_pct": d2f["bankroll_roi_pct"],
             "claimed_ev_pct": d2f["claimed_ev_pct"],
-            "net_clv_pct": d2f["true_edge_net_clv_pct"],
+            "net_clv_pct": d2f["net_clv_pct"],
             "optimizers_curse_bias_pp": d2f["optimizers_curse_bias_pp"],
             "match_luck_noise_pp": d2f["match_luck_noise_pp"],
             "max_drawdown_pct": d2f["max_drawdown_pct"],
@@ -530,13 +695,15 @@ def run_distilled_financial_simulations() -> None:
             "model": m_name,
             "strategy": f"{m_name} Hybrid-50 + Guard B <= 0.85 (1/4 Kelly)",
             "bets": d2k["n_bets"],
+            "n_clv_bets": d2k["n_clv_bets"],
+            "n_missing_close": d2k["n_missing_close"],
             "win_rate_pct": d2k["win_rate_pct"],
             "turnover_pln": d2k["total_turnover_pln"],
             "profit_pln": d2k["total_net_profit_pln"],
             "realized_yield_pct": d2k["realized_yield_pct"],
             "bankroll_roi_pct": d2k["bankroll_roi_pct"],
             "claimed_ev_pct": d2k["claimed_ev_pct"],
-            "net_clv_pct": d2k["true_edge_net_clv_pct"],
+            "net_clv_pct": d2k["net_clv_pct"],
             "optimizers_curse_bias_pp": d2k["optimizers_curse_bias_pp"],
             "match_luck_noise_pp": d2k["match_luck_noise_pp"],
             "max_drawdown_pct": d2k["max_drawdown_pct"],
@@ -593,7 +760,13 @@ def run_distilled_financial_simulations() -> None:
                 o_taken = odds_led[i]
                 w = won_led[i]
                 p_c = p_hyb[i]
-                p_cl = (1.0 + ledger_df["raw_clv_pct"].iloc[i] / 100.0) / o_taken
+                close_odds = closing_odds_led[i]
+                raw_clv_pct = ledger_df["raw_clv_pct"].iloc[i]
+                if pd.notna(raw_clv_pct) and np.isfinite(close_odds) and close_odds > 1.0:
+                    p_cl = (1.0 + float(raw_clv_pct) / 100.0) / o_taken
+                    net_clv = 0.88 * o_taken * p_cl - 1.0
+                else:
+                    net_clv = None
                 b_net = o_taken * 0.88 - 1.0
                 f_star = max(0.0, (b_net * p_c - (1.0 - p_c)) / b_net) if b_net > 0 else 0.0
                 stake = min(150.0, max(20.0, bankroll * 0.25 * f_star)) if strat_name != "Adopted Production Ledger (50-Bet Fixed Anchor)" else float(ledger_df["stake"].iloc[i])
@@ -606,7 +779,7 @@ def run_distilled_financial_simulations() -> None:
                     "profit": profit,
                     "bankroll": bankroll,
                     "ev_claimed": p_c * 0.88 * o_taken - 1.0,
-                    "net_clv": 0.88 * o_taken * p_cl - 1.0,
+                    "net_clv": net_clv,
                 })
 
             decomp = compute_three_part_decomposition(sim_bets, initial_bankroll=10000.0)
@@ -618,13 +791,15 @@ def run_distilled_financial_simulations() -> None:
                 "model": m_name,
                 "strategy": strat_label,
                 "bets": decomp["n_bets"],
+                "n_clv_bets": decomp["n_clv_bets"],
+                "n_missing_close": decomp["n_missing_close"],
                 "win_rate_pct": decomp["win_rate_pct"],
                 "turnover_pln": decomp["total_turnover_pln"],
                 "profit_pln": decomp["total_net_profit_pln"],
                 "realized_yield_pct": decomp["realized_yield_pct"],
                 "bankroll_roi_pct": decomp["bankroll_roi_pct"],
                 "claimed_ev_pct": decomp["claimed_ev_pct"],
-                "net_clv_pct": decomp["true_edge_net_clv_pct"],
+                "net_clv_pct": decomp["net_clv_pct"],
                 "optimizers_curse_bias_pp": decomp["optimizers_curse_bias_pp"],
                 "match_luck_noise_pp": decomp["match_luck_noise_pp"],
                 "max_drawdown_pct": decomp["max_drawdown_pct"],
@@ -654,7 +829,12 @@ def run_distilled_financial_simulations() -> None:
     merged_mkt = merged_mkt.sort_values(by=["date", "golgg_match_id"]).reset_index(drop=True)
     print(f"Constructed unified Pinnacle T-1h market cohort: {len(merged_mkt)} fixtures.")
 
-    suite2_results: dict[str, Any] = {}
+    suite2_results: dict[str, Any] = {
+        "metadata": {
+            "clv_by_construction": True,
+            "net_clv_reason": "fair odds are q_consensus inverse and reference is the same q_consensus",
+        }
+    }
 
     regimes = [
         ("Regime A (12% Polish Tax)", 0.12),
@@ -764,16 +944,21 @@ def run_distilled_financial_simulations() -> None:
                         "profit": profit,
                         "bankroll": bankroll,
                         "ev_claimed": ev_claim,
-                        "net_clv": c * o_taken * p_close - 1.0,
+                        "net_clv": None,
                     })
 
-                decomp = compute_three_part_decomposition(sim_bets, initial_bankroll=10000.0)
+                decomp = compute_three_part_decomposition(
+                    sim_bets,
+                    initial_bankroll=10000.0,
+                    clv_by_construction=True,
+                    net_clv_reason="fair odds are q_consensus inverse and reference is the same q_consensus",
+                )
                 suite2_results[regime_name][m_name][strat_label] = decomp
 
                 status_label = "POSITIVE_ALPHA" if decomp["realized_yield_pct"] > 0 else "NEGATIVE_ALPHA"
                 if "12%" in regime_name and decomp["realized_yield_pct"] < 0:
                     status_label = "TAX_BURDEN_DEFICIT"
-                if decomp["optimizers_curse_bias_pp"] > 20.0:
+                if decomp["optimizers_curse_bias_pp"] is not None and decomp["optimizers_curse_bias_pp"] > 20.0:
                     status_label = "OPTIMIZERS_CURSE_EXPOSURE"
 
                 strategy_rows.append({
@@ -781,13 +966,15 @@ def run_distilled_financial_simulations() -> None:
                     "model": m_name,
                     "strategy": strat_label,
                     "bets": decomp["n_bets"],
+                    "n_clv_bets": decomp["n_clv_bets"],
+                    "n_missing_close": decomp["n_missing_close"],
                     "win_rate_pct": decomp["win_rate_pct"],
                     "turnover_pln": decomp["total_turnover_pln"],
                     "profit_pln": decomp["total_net_profit_pln"],
                     "realized_yield_pct": decomp["realized_yield_pct"],
                     "bankroll_roi_pct": decomp["bankroll_roi_pct"],
                     "claimed_ev_pct": decomp["claimed_ev_pct"],
-                    "net_clv_pct": decomp["true_edge_net_clv_pct"],
+                    "net_clv_pct": decomp["net_clv_pct"],
                     "optimizers_curse_bias_pp": decomp["optimizers_curse_bias_pp"],
                     "match_luck_noise_pp": decomp["match_luck_noise_pp"],
                     "max_drawdown_pct": decomp["max_drawdown_pct"],
@@ -804,22 +991,35 @@ def run_distilled_financial_simulations() -> None:
     print("=" * 80)
 
     # Polish production horizons
+    matches = pd.read_parquet(raw_prod_dir / "matches.parquet")
+    mappings = pd.read_parquet(raw_prod_dir / "mappings.parquet")
+    mappings["golgg_match_id"] = mappings["golgg_match_id"].astype(str)
     m_map_horizon = mappings[["canonical_match_id", "golgg_match_id"]].merge(
-        matches[["id", "winner_side", "start_time_normalized"]],
+        matches[["id", "start_time_normalized"]],
         left_on="canonical_match_id",
         right_on="id",
+    ).merge(
+        gold_identity[["golgg_id", "team1_name", "team2_name"]],
+        left_on="golgg_match_id",
+        right_on="golgg_id",
     )
-    m_map_horizon["golgg_match_id"] = m_map_horizon["golgg_match_id"].astype(str)
 
     df_models_horizon = pd.DataFrame({"golgg_match_id": p1["golgg_match_id"].astype(str), "y": p1["y"]})
     for m in ["C0", "C0-D", "C0-Slim", "C0-Mini"]:
         df_models_horizon[m] = models_assess[m]
 
     merged_matches_h = m_map_horizon.merge(df_models_horizon, on="golgg_match_id")
-    merged_matches_h["a_is_pred_t1"] = (merged_matches_h["winner_side"] == "team_a") == (merged_matches_h["y"] == 1)
-
     quotes = pd.read_parquet(raw_prod_dir / "quotes.parquet")
+    required_quote_identity = {"raw_team_a", "raw_team_b"}
+    if missing := required_quote_identity.difference(quotes.columns):
+        raise ValueError(f"Cannot orient production quote probabilities; missing identity columns: {sorted(missing)}")
     q_m = quotes.merge(merged_matches_h, on="canonical_match_id")
+    q_m["a_is_pred_t1"] = q_m.apply(
+        lambda r: team_a_is_team1(
+            r["raw_team_a"], r["raw_team_b"], r["team1_name"], r["team2_name"]
+        ),
+        axis=1,
+    )
     start_dt = pd.to_datetime(q_m["start_time_normalized"], utc=True, format="mixed")
     scraped_dt = pd.to_datetime(q_m["scraped_at"], utc=True, format="mixed")
     q_m["lead_hours"] = (start_dt - scraped_dt).dt.total_seconds() / 3600.0
@@ -842,52 +1042,75 @@ def run_distilled_financial_simulations() -> None:
     suite3_results: dict[str, Any] = {"production_horizons": {}, "polish2plus": {}}
 
     for label, h in prod_horizons:
-        sub_q = (
-            q_m[q_m["lead_hours"] >= h]
-            .sort_values("scraped_at")
+        horizon_q = q_m[q_m["lead_hours"] >= h].copy()
+        selected = (
+            horizon_q.sort_values("scraped_at")
             .groupby(["canonical_match_id", "bookmaker_id"])
             .last()
             .reset_index()
         )
-        agg_dict = {"p_shin_pred": "mean", "y": "first"}
-        for m in ["C0", "C0-D", "C0-Slim", "C0-Mini"]:
-            agg_dict[m] = "first"
-
-        m_agg = sub_q.groupby("canonical_match_id").agg(agg_dict).reset_index()
+        records: list[dict[str, Any]] = []
+        for (match_id, focal_book), focal_rows in selected.groupby(
+            ["canonical_match_id", "bookmaker_id"], sort=False
+        ):
+            focal = focal_rows.iloc[-1]
+            focal_time = pd.to_datetime(focal["scraped_at"], utc=True)
+            window_start = focal_time - pd.Timedelta(hours=2)
+            quote_times = pd.to_datetime(horizon_q["scraped_at"], utc=True)
+            contemporaneous = horizon_q[
+                (horizon_q["canonical_match_id"] == match_id)
+                & (quote_times <= focal_time)
+                & (quote_times >= window_start)
+            ]
+            consensus_a = leave_one_book_out_consensus(contemporaneous, focal_book, cutoff=focal_time)
+            if consensus_a is None:
+                continue
+            market_p = consensus_a if focal["a_is_pred_t1"] else 1.0 - consensus_a
+            records.append({
+                "canonical_match_id": match_id,
+                "y": focal["y"],
+                "market_p": market_p,
+                **{m: focal[m] for m in ["C0", "C0-D", "C0-Slim", "C0-Mini"]},
+            })
+        m_agg = (
+            pd.DataFrame(records).groupby("canonical_match_id").agg(
+                {"market_p": "mean", "y": "first", **{m: "first" for m in ["C0", "C0-D", "C0-Slim", "C0-Mini"]}}
+            ).reset_index()
+            if records else pd.DataFrame(
+                columns=["canonical_match_id", "y", "market_p", "C0", "C0-D", "C0-Slim", "C0-Mini"]
+            )
+        )
         y_p = m_agg["y"].to_numpy(dtype=int)
-        p_mkt_p = m_agg["p_shin_pred"].to_numpy(dtype=float)
-        l_mkt_p = logit(np.clip(p_mkt_p, 1e-6, 1.0 - 1e-6))
-        ll_mkt = float(-np.mean(np.where(y_p, np.log(p_mkt_p), np.log1p(-p_mkt_p))))
-        bs_mkt = float(np.mean((p_mkt_p - y_p) ** 2))
-
+        p_mkt_p = m_agg["market_p"].to_numpy(dtype=float)
         h_dict = {
             "horizon": label,
             "lead_hours": float(h),
             "n_matches": len(y_p),
-            "market_log_loss": round(ll_mkt, 6),
-            "market_brier": round(bs_mkt, 6),
+            "n_missing_loo_consensus": int(horizon_q["canonical_match_id"].nunique() - len(y_p)),
+            "market_log_loss": None,
+            "market_brier": None,
             "models": {},
         }
-
-        for m in ["C0", "C0-D", "C0-Slim", "C0-Mini"]:
-            p_m = m_agg[m].to_numpy(dtype=float)
-            l_m = logit(np.clip(p_m, 1e-6, 1.0 - 1e-6))
-            p_hyb = expit(0.50 * l_m + 0.50 * l_mkt_p)
-
-            ll_std = float(-np.mean(np.where(y_p, np.log(p_m), np.log1p(-p_m))))
-            ll_hyb = float(-np.mean(np.where(y_p, np.log(p_hyb), np.log1p(-p_hyb))))
-            bs_std = float(np.mean((p_m - y_p) ** 2))
-            bs_hyb = float(np.mean((p_hyb - y_p) ** 2))
-
-            h_dict["models"][m] = {
-                "standalone_log_loss": round(ll_std, 6),
-                "standalone_brier": round(bs_std, 6),
-                "hybrid_log_loss": round(ll_hyb, 6),
-                "hybrid_brier": round(bs_hyb, 6),
-                "delta_ll_vs_market": round(ll_std - ll_mkt, 6),
-                "delta_ll_hybrid_vs_market": round(ll_hyb - ll_mkt, 6),
-            }
-
+        if len(y_p):
+            ll_mkt = float(-np.mean(np.where(y_p, np.log(p_mkt_p), np.log1p(-p_mkt_p))))
+            bs_mkt = float(np.mean((p_mkt_p - y_p) ** 2))
+            h_dict["market_log_loss"] = round(ll_mkt, 6)
+            h_dict["market_brier"] = round(bs_mkt, 6)
+            for m in ["C0", "C0-D", "C0-Slim", "C0-Mini"]:
+                p_m = m_agg[m].to_numpy(dtype=float)
+                p_hyb = expit(0.50 * logit(np.clip(p_m, 1e-6, 1.0 - 1e-6)) + 0.50 * logit(np.clip(p_mkt_p, 1e-6, 1.0 - 1e-6)))
+                ll_std = float(-np.mean(np.where(y_p, np.log(p_m), np.log1p(-p_m))))
+                ll_hyb = float(-np.mean(np.where(y_p, np.log(p_hyb), np.log1p(-p_hyb))))
+                bs_std = float(np.mean((p_m - y_p) ** 2))
+                bs_hyb = float(np.mean((p_hyb - y_p) ** 2))
+                h_dict["models"][m] = {
+                    "standalone_log_loss": round(ll_std, 6),
+                    "standalone_brier": round(bs_std, 6),
+                    "hybrid_log_loss": round(ll_hyb, 6),
+                    "hybrid_brier": round(bs_hyb, 6),
+                    "delta_ll_vs_market": round(ll_std - ll_mkt, 6),
+                    "delta_ll_hybrid_vs_market": round(ll_hyb - ll_mkt, 6),
+                }
         suite3_results["production_horizons"][label] = h_dict
 
     # Polish2plus (N=1,467)
@@ -941,6 +1164,7 @@ def run_distilled_financial_simulations() -> None:
     print("SAVING ARTIFACTS")
     print("=" * 80)
 
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
     # 1. Strategy Comparison CSV
     strat_df = pd.DataFrame(strategy_rows)
     strat_df.to_csv(OUTPUT_CSV_PATH, index=False)
@@ -978,7 +1202,9 @@ def run_distilled_financial_simulations() -> None:
     print(f"{'Regime':<32} | {'Model':<10} | {'Strategy':<38} | {'Bets':<5} | {'Win %':<6} | {'Yield %':<8} | {'Net CLV %':<9} | {'Bias (pp)':<9}")
     print("-" * 135)
     for row in strategy_rows[:25]:
-        print(f"{row['regime'][:32]:<32} | {row['model']:<10} | {row['strategy'][:38]:<38} | {row['bets']:<5} | {row['win_rate_pct']:<6.1f} | {row['realized_yield_pct']:<+8.2f} | {row['net_clv_pct']:<+9.2f} | {row['optimizers_curse_bias_pp']:<+9.2f}")
+        clv = f"{row['net_clv_pct']:+9.2f}" if row["net_clv_pct"] is not None else f"{'N/A':>9}"
+        bias = f"{row['optimizers_curse_bias_pp']:+9.2f}" if row["optimizers_curse_bias_pp"] is not None else f"{'N/A':>9}"
+        print(f"{row['regime'][:32]:<32} | {row['model']:<10} | {row['strategy'][:38]:<38} | {row['bets']:<5} | {row['win_rate_pct']:<6.1f} | {row['realized_yield_pct']:<+8.2f} | {clv} | {bias}")
 
 
 if __name__ == "__main__":

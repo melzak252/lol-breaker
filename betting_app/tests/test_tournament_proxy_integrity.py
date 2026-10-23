@@ -542,6 +542,7 @@ def test_mathematical_flow_alone_cannot_complete_missing_predictive_evidence():
     assert decision["decision"] == "PROXY_DIAGNOSTIC_FAILED"
 
 
+@pytest.mark.requires_artifacts(ROOT / "data/artifacts/leaguepedia-tournament-rules-20260908/series_results.csv")
 def test_new_benchmark_persists_proxy_receipts_and_leaves_archive_unchanged(tmp_path, monkeypatch, source):
     archive_dirs = [ROOT / "data" / stage / "tournament_distribution" / "tournament_dist_20261005_01"
                     for stage in ("07_model_output", "08_reporting")]

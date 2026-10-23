@@ -1,6 +1,7 @@
 """Observable qualification, historical EV heuristic and simulation contracts."""
 
 import math
+import pandas as pd
 import pytest
 from src.analysis.unified_evaluation_engine import (
     EvaluatedBet,
@@ -8,6 +9,7 @@ from src.analysis.unified_evaluation_engine import (
     calculate_quarter_kelly_stake,
     compute_p_low,
     compute_shrunk_p_low,
+    simulate_operational_portfolio,
 )
 
 
@@ -265,4 +267,103 @@ def test_shin_devigging_favorite_longshot_bias() -> None:
     with pytest.raises(ValueError):
         fair_market_probabilities(0.95, 2.10)
 
+
+
+
+def _portfolio_inputs(decisions):
+    opportunities = pd.DataFrame()
+    candidates = pd.DataFrame([
+        {
+            "opportunity_id": f"opp-{index}",
+            "canonical_match_id": f"match-{index}",
+            "side": "team_a",
+            "bookmaker": "book",
+            "odds": 3.0,
+            "prob_for_ev": 0.99,
+            "ev_net": 1.0,
+            "decision_at": decision_at,
+            "settle_at": settle_at,
+            "y": outcome,
+        }
+        for index, (decision_at, settle_at, outcome) in enumerate(decisions)
+    ])
+    return candidates, opportunities
+
+
+def test_operational_portfolio_limits_overlapping_admissions_to_quarter_equity():
+    start = pd.Timestamp("2026-01-01T12:00:00Z")
+    later = start + pd.Timedelta(hours=1)
+    candidates, opportunities = _portfolio_inputs(
+        [(start, later, None)] * 12,
+    )
+
+    result = simulate_operational_portfolio(
+        candidates, opportunities, initial_bankroll=1000.0,
+        tax_rate=0.0, fraction=1.0, max_stake=150.0,
+    )
+
+    assert result["ledger"]["stake"].iloc[:2].tolist() == [150.0, 100.0]
+    assert result["summary"]["peak_reserved"] == 250.0
+    assert result["summary"]["final_reserved"] == 250.0
+    assert result["summary"]["pending_bets_count"] > 0
+    assert result["summary"]["final_reserved"] == sum(result["ledger"]["stake"])
+
+
+def test_operational_portfolio_settles_same_clock_before_next_admission():
+    first_decision = pd.Timestamp("2026-01-01T12:00:00Z")
+    shared_clock = first_decision + pd.Timedelta(hours=1)
+    candidates, opportunities = _portfolio_inputs([
+        (first_decision, shared_clock, False),
+        (first_decision, shared_clock, None),
+        (shared_clock, shared_clock + pd.Timedelta(hours=1), None),
+    ])
+
+    result = simulate_operational_portfolio(
+        candidates, opportunities, initial_bankroll=1000.0,
+        tax_rate=0.0, fraction=1.0, max_stake=150.0,
+    )
+
+    assert result["ledger"]["stake"].iloc[:2].tolist() == [150.0, 100.0]
+    assert result["ledger"].iloc[0]["settled"]
+    assert result["ledger"]["stake"].iloc[2] == 112.5
+    assert result["summary"]["settled_bets_count"] == 1
+    assert result["summary"]["settled_turnover"] == 150.0
+    settlement = result["capital_path"].query(
+        "event == 'settlement' and timestamp == @shared_clock"
+    )
+    assert len(settlement) == 1
+
+
+def test_operational_portfolio_keeps_unknown_positions_reserved_after_loss():
+    start = pd.Timestamp("2026-01-01T12:00:00Z")
+    loss_clock = start + pd.Timedelta(hours=1)
+    later = loss_clock + pd.Timedelta(hours=1)
+    candidates, opportunities = _portfolio_inputs([
+        (start, loss_clock, False),
+        (start, later, None),
+        (loss_clock, later, None),
+        (loss_clock, later, None),
+    ])
+
+    result = simulate_operational_portfolio(
+        candidates, opportunities, initial_bankroll=1000.0,
+        tax_rate=0.0, fraction=1.0, max_stake=150.0,
+    )
+
+    assert result["ledger"]["prob_for_ev"].iloc[:2].tolist() == [0.99, 0.99]
+    assert result["ledger"]["stake"].iloc[:2].tolist() == [150.0, 100.0]
+    assert result["ledger"].iloc[0]["settled"]
+    assert result["ledger"].iloc[0]["realized_pnl"] == -150.0
+    assert not result["ledger"].iloc[1]["settled"]
+    assert result["ledger"]["stake"].iloc[2:].tolist() == [112.5]
+    assert "opp-3" not in result["ledger"]["opportunity_id"].tolist()
+    rejected = result["execution_rejections"].set_index("opportunity_id").loc["opp-3"]
+    assert rejected["reason"] == "insufficient_portfolio_headroom"
+    assert rejected["proposed_stake"] == 0
+    assert rejected["portfolio_headroom"] == 0
+    assert result["summary"]["final_equity"] == 850.0
+    assert result["summary"]["final_reserved"] == 212.5
+    assert result["summary"]["final_reserved"] == sum(
+        result["ledger"].loc[~result["ledger"]["settled"], "stake"]
+    )
 

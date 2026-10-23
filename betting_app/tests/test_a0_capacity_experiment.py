@@ -13,8 +13,23 @@ from src.models.a0_capacity_experiment import (
 
 @pytest.fixture(scope="module")
 def backend():
+    import os
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parents[2]
+    configured_root = os.environ.get("RESEARCH_ROOT")
+    pointer = project_root / "data/research_root.txt"
+    if configured_root:
+        research_root = Path(configured_root).expanduser()
+    elif pointer.is_file():
+        research_root = Path(pointer.read_text().strip()).expanduser()
+    else:
+        pytest.skip(f"missing optional research root pointer: {pointer}")
+    code_folder = research_root / "nonlinear-history-20260912/code/src/models"
+    if not code_folder.is_dir():
+        pytest.skip(f"missing optional archive code folder: {code_folder}")
     from src.models.a0_uncertainty import _activate_archive_backend, _resolve_research_root
-    return _activate_archive_backend(_resolve_research_root(None))[0]
+    return _activate_archive_backend(_resolve_research_root(research_root))[0]
 
 
 def inputs(rows=4):

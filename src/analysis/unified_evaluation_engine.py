@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, field
+from decimal import Decimal
 from typing import Any, Callable, Sequence
 
 import numpy as np
 import pandas as pd
+
+from betting_app.core.staking import fractional_kelly_stake
 
 from betting_app.services.bet_qualification_service import (
     DEFAULT_BASE_MIN_EV,
@@ -228,6 +231,206 @@ def calculate_quarter_kelly_stake(
         return 0.0
     stake_fraction = min(cap_fraction, fraction * f_star)
     return float(bankroll * stake_fraction)
+
+
+def simulate_operational_portfolio(
+    candidates: pd.DataFrame,
+    opportunities: pd.DataFrame,
+    *,
+    initial_bankroll: float = 10_000,
+    tax_rate: float = 0.12,
+    fraction: float = 0.25,
+    max_stake: float = 150,
+    min_stake: float = 2,
+    max_portfolio_exposure: float = 0.25,
+) -> dict[str, Any]:
+    """Replay a deterministic, cash-reserved operational portfolio.
+
+    The bankroll is explicit simulated capital. Unknown outcomes remain reserved,
+    and are not included in settled turnover or realized ROI.
+    """
+    def dec(value: Any) -> Decimal:
+        return Decimal(str(value))
+
+    def key(value: Any) -> str:
+        return "" if value is None or pd.isna(value) else str(value)
+
+    initial = dec(initial_bankroll)
+    cash = initial
+    reserved = Decimal("0")
+    profit = Decimal("0")
+    turnover = Decimal("0")
+    settled_turnover = Decimal("0")
+    ledger_rows: list[dict[str, Any]] = []
+    path_rows: list[dict[str, Any]] = []
+
+    opp_by_id = {}
+    for row in opportunities.to_dict("records"):
+        opp_by_id[key(row.get("opportunity_id"))] = row
+
+    # Choose the best qualifying price for each fixture/side before ordering decisions.
+    best_quotes: dict[tuple[str, str], dict[str, Any]] = {}
+    for candidate in candidates.to_dict("records"):
+        opp = opp_by_id.get(key(candidate.get("opportunity_id")), {})
+        merged = {**opp, **candidate}
+        if merged.get("decision_at") is None or pd.isna(merged.get("decision_at")):
+            continue
+        fixture_side = (key(merged.get("canonical_match_id")), key(merged.get("side")))
+        current = best_quotes.get(fixture_side)
+        price = dec(merged.get("odds") or 0)
+        if current is None or price > dec(current.get("odds") or 0) or (
+            price == dec(current.get("odds") or 0)
+            and key(merged.get("opportunity_id")) < key(current.get("opportunity_id"))
+        ):
+            best_quotes[fixture_side] = merged
+    selected = list(best_quotes.values())
+    for row in selected:
+        row["_ev_sort"] = (
+            float(row["ev_net"]) if row.get("ev_net") is not None
+            and not pd.isna(row.get("ev_net")) else
+            float(row.get("prob_for_ev") or 0.0) * float(row.get("odds") or 0.0)
+            * (1.0 - tax_rate) - 1.0
+        )
+    decisions = sorted(selected, key=lambda r: (
+        pd.Timestamp(r["decision_at"]), -r["_ev_sort"],
+        key(r.get("opportunity_id")), key(r.get("bookmaker")),
+    ))
+    settlements: list[tuple[pd.Timestamp, int]] = []
+    settled_indexes: set[int] = set()
+    peak_equity = initial
+    peak_reserved = Decimal("0")
+    peak_exposure = Decimal("0")
+    capital_exhausted_ever = False
+    max_drawdown = 0.0
+    execution_rows: list[dict[str, Any]] = []
+
+    def snapshot(at: Any, event: str) -> None:
+        nonlocal peak_equity, max_drawdown, peak_reserved, peak_exposure
+        equity = cash + reserved
+        peak_equity = max(peak_equity, equity)
+        peak_reserved = max(peak_reserved, reserved)
+        peak_exposure = max(peak_exposure, reserved / equity if equity else Decimal("0"))
+        if peak_equity > 0:
+            max_drawdown = max(max_drawdown, float((peak_equity - equity) / peak_equity))
+        path_rows.append({"timestamp": at, "event": event, "cash": cash,
+                          "reserved": reserved, "equity": equity})
+
+    snapshot(None, "initial")
+
+    def settle_through(clock: pd.Timestamp) -> None:
+        nonlocal cash, reserved, profit, settled_turnover
+        due = sorted((item for item in settlements if item[0] <= clock),
+                     key=lambda item: (item[0], item[1]))
+        for settle_at, index in due:
+            if index in settled_indexes:
+                continue
+            row = ledger_rows[index]
+            outcome = row["y"]
+            if outcome not in (0, 1, False, True):
+                continue
+            stake = row["stake"]
+            reserved -= stake
+            settled_turnover += stake
+            pnl = (stake * row["odds"] * dec(1.0 - tax_rate) - stake
+                   if bool(outcome) else -stake)
+            cash += stake + pnl
+            profit += pnl
+            row["realized_pnl"] = pnl
+            row["realized_return"] = pnl / stake
+            row["settled"] = True
+            settled_indexes.add(index)
+            snapshot(settle_at, "settlement")
+
+    for row in decisions:
+        decision_at = pd.Timestamp(row["decision_at"])
+        settle_through(decision_at)
+        prob, odds = row.get("prob_for_ev"), row.get("odds")
+        if prob is None or odds is None or pd.isna(prob) or pd.isna(odds):
+            execution_rows.append({"opportunity_id": row.get("opportunity_id"),
+                                   "reason": "invalid_probability_or_odds"})
+            continue
+        settle_at = row.get("settle_at")
+        if settle_at is not None and not pd.isna(settle_at) and pd.Timestamp(settle_at) <= decision_at:
+            execution_rows.append({"opportunity_id": row.get("opportunity_id"),
+                                   "reason": "settlement_before_decision"})
+            continue
+        total_bankroll = max(Decimal("0"), cash + reserved)
+        exposure_limit = max(Decimal("0"), dec(max_portfolio_exposure))
+        headroom = max(Decimal("0"), total_bankroll * exposure_limit - reserved)
+        proposed = dec(fractional_kelly_stake(
+            float(total_bankroll), float(prob), float(odds), fraction=fraction,
+            tax_rate=tax_rate, min_stake=min_stake, max_stake=max_stake,
+            reserved_bankroll=float(reserved),
+            max_portfolio_exposure=max_portfolio_exposure,
+        ))
+        stake = min(proposed, cash, headroom)
+        if stake < dec(min_stake) or stake <= 0:
+            capital_exhausted_ever = capital_exhausted_ever or cash <= 0
+            reason = ("insufficient_portfolio_headroom" if headroom < dec(min_stake)
+                      or proposed > headroom else "insufficient_free_capital")
+            execution_rows.append({"opportunity_id": row.get("opportunity_id"),
+                                   "reason": reason, "proposed_stake": proposed,
+                                   "available_cash": cash, "portfolio_headroom": headroom})
+            continue
+        cash -= stake
+        reserved += stake
+        turnover += stake
+        outcome = row.get("y")
+        if outcome is None or pd.isna(outcome):
+            outcome = opp_by_id.get(key(row.get("opportunity_id")), {}).get("y")
+        if outcome is not None and not pd.isna(outcome):
+            outcome = int(bool(outcome)) if key(row.get("side")).lower() in (
+                "team_a", "a", "home"
+            ) else int(not bool(outcome))
+        ledger_rows.append({
+            "opportunity_id": row.get("opportunity_id"),
+            "canonical_match_id": row.get("canonical_match_id"),
+            "decision_at": row["decision_at"], "settle_at": settle_at,
+            "side": row.get("side"), "bookmaker": row.get("bookmaker"),
+            "odds": dec(odds), "prob_for_ev": float(prob),
+            "model_ev": (dec(row["model_ev"] if row.get("model_ev") is not None
+                             and not pd.isna(row.get("model_ev")) else row["ev_net"])
+                         if ((row.get("model_ev") is not None
+                              and not pd.isna(row.get("model_ev")))
+                             or (row.get("ev_net") is not None
+                                 and not pd.isna(row.get("ev_net")))) else None),
+            "y": outcome, "stake": stake, "realized_pnl": None,
+            "realized_return": None, "settled": False,
+        })
+        index = len(ledger_rows) - 1
+        if settle_at is not None and not pd.isna(settle_at):
+            settlements.append((pd.Timestamp(settle_at), index))
+        snapshot(decision_at, "decision")
+
+    for settle_at, index in sorted(settlements):
+        if decisions and settle_at > pd.Timestamp(decisions[-1]["decision_at"]):
+            settle_through(settle_at)
+    settled_roi = (profit / settled_turnover if settled_turnover else None)
+    return {
+        "ledger": pd.DataFrame(ledger_rows),
+        "execution_rejections": pd.DataFrame(execution_rows),
+        "capital_path": pd.DataFrame(path_rows, columns=[
+            "timestamp", "event", "cash", "reserved", "equity"
+        ]),
+        "summary": {
+            "initial_bankroll": initial, "final_cash": cash,
+            "candidate_count": len(candidates),
+            "opportunity_count": len(opportunities),
+            "unselected_distinct_opportunity_count": len(set(opp_by_id) - {
+                key(row.get("opportunity_id")) for row in selected
+            }),
+            "final_reserved": reserved, "final_equity": cash + reserved,
+            "profit": profit, "turnover": turnover,
+            "settled_turnover": settled_turnover, "roi": settled_roi,
+            "settled_roi": settled_roi, "max_drawdown": max_drawdown,
+            "bets_count": len(ledger_rows),
+            "settled_bets_count": len(settled_indexes),
+            "pending_bets_count": len(ledger_rows) - len(settled_indexes),
+            "capital_exhausted": capital_exhausted_ever or cash == 0,
+            "peak_reserved": peak_reserved,
+            "peak_reserved_fraction": peak_exposure,
+        },
+    }
 
 
 class UnifiedBettingEngine:

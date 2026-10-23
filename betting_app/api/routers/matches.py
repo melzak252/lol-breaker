@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from betting_app.api.deps import get_db, query_df, query_one
+from betting_app.core.config import load_config
 from betting_app.services.canonical_match_service import canonical_team_key
 from betting_app.services.current_roster_service import clean_player_name
 from betting_app.api.schemas import (
@@ -100,9 +101,9 @@ from betting_app.services.upcoming_inference_service import (
 )
 from betting_app.core.models.engine import blend_market_probability
 from betting_app.services.prematch_quote_service import (
-    load_prematch_quotes, parse_aware_utc, latest_predictions,
+    PrematchMarketContext, load_prematch_quotes, parse_aware_utc, latest_predictions,
     prediction_time_is_actionable, stored_market_context_is_current,
-    hybrid_prediction_contract_is_current,
+    hybrid_prediction_contract_is_current, qualify_prediction_for_quote,
 )
 
 router = APIRouter(prefix="/matches", tags=["matches"])
@@ -198,12 +199,32 @@ def _serving_predictions(db, rows, context) -> dict[str, Any]:
                               hybrid_prob_b=none_or_float(row.get("prob_b")),
                               hybrid_diagnostics=row.get("diagnostics_json"))
     if result.get("hybrid_prob_a") is None and result.get("model_prob_a") is not None and context.prob_a is not None:
+        base_diag = _json_object(result.get("model_diagnostics"))
+        base_prob = result["model_prob_a"]
         p = blend_market_probability(
-            result["model_prob_a"], context.prob_a, alpha=hybrid.alpha,
+            base_prob, context.prob_a, alpha=hybrid.alpha,
             temperature=hybrid.temperature, blending_mode=hybrid.blending_mode,
         )
-        result.update(hybrid_prob_a=p, hybrid_prob_b=1-p,
-                      hybrid_diagnostics=result.get("model_diagnostics"))
+        low_a = low_b = None
+        bounds_a = conformal_bounds_for_side(base_diag, "a")
+        bounds_b = conformal_bounds_for_side(base_diag, "b")
+        if bounds_a is not None and bounds_b is not None:
+            low_a = blend_market_probability(
+                bounds_a[0], context.prob_a, alpha=hybrid.alpha,
+                temperature=hybrid.temperature, blending_mode=hybrid.blending_mode,
+            )
+            low_b = min(1-p, blend_market_probability(
+                bounds_b[0], 1-context.prob_a, alpha=hybrid.alpha,
+                temperature=hybrid.temperature, blending_mode=hybrid.blending_mode,
+            ))
+        result.update(
+            hybrid_prob_a=p, hybrid_prob_b=1-p,
+            hybrid_diagnostics={
+                **base_diag, "base_prob_a": base_prob, "base_diagnostics": base_diag,
+                "alpha": hybrid.alpha, "temperature": hybrid.temperature,
+                "blending_mode": hybrid.blending_mode, "p_low_a": low_a, "p_low_b": low_b,
+            },
+        )
     return result
 
 
@@ -360,13 +381,14 @@ def _display_matches_quote(row, quote, aligned):
 def list_matches(
     min_books: int = 1,
     days_ahead: int = 14,
-    tax_rate: float = TAX_RATE,
+    tax_rate: float | None = None,
     stale_hours: float = 6,
     max_odds_age_hours: float = DEFAULT_MAX_ODDS_AGE_HOURS,
     bookmaker: str | None = None,
     db=Depends(get_db),
 ):
     now = datetime.now(UTC)
+    tax_rate = float(load_config().tax_rate) if tax_rate is None else tax_rate
     max_dt = (now + timedelta(days=days_ahead)).isoformat(timespec="seconds")
     now_iso = now.isoformat(timespec="seconds")
     stale_cutoff = now - timedelta(hours=stale_hours)
@@ -532,25 +554,33 @@ def list_matches(
         # mapped to a GOL.GG team. Those predictions may have been computed
         # before mapping changed and would be misleading.
         p = {} if has_unmapped_teams else pred_map.get(mid, {})
-        market_a = context.prob_a
-        prob_a = p.get("hybrid_prob_a") if actionable else None
-        prob_b = p.get("hybrid_prob_b") if actionable else None
-
-        decisions = qualify_prediction_sides(
-            prob_a=prob_a,
-            prob_b=prob_b,
-            diagnostics=p.get("hybrid_diagnostics") or p.get("model_diagnostics"),
-            model_name=HYBRID_MODEL_NAME,
-            odds_a=action_record["best_odds_a"],
-            odds_b=action_record["best_odds_b"],
-            market_prob_a=market_a,
-            tax_rate=tax_rate,
-            league=group[0].get("league"),
-            match_date=group[0].get("start_time_normalized"),
-            max_ev_net=None,
-        )
-        hybrid_ev_a = decisions["a"][2].get("ev_net")
-        hybrid_ev_b = decisions["b"][2].get("ev_net")
+        candidates_a = []
+        candidates_b = []
+        if actionable and not has_unmapped_teams:
+            for candidate in actionable:
+                quote = quotes.get(candidate["odds_snapshot_id"])
+                if quote is None:
+                    continue
+                assessed = qualify_prediction_for_quote(
+                    context=context, quote=quote,
+                    prob_a=p.get("hybrid_prob_a"), prob_b=p.get("hybrid_prob_b"),
+                    diagnostics=p.get("hybrid_diagnostics") or p.get("model_diagnostics"),
+                    model_name=HYBRID_MODEL_NAME, league=group[0].get("league"),
+                    match_date=group[0].get("start_time_normalized"),
+                    best_of=group[0].get("best_of"), tax_rate=tax_rate,
+                )
+                for side, candidates in (("a", candidates_a), ("b", candidates_b)):
+                    qualified, _, details = assessed["qualified"][side]
+                    if qualified:
+                        candidates.append((details.get("ev_net"), candidate, assessed, details))
+        best_qualified_a = max(candidates_a, key=lambda item: item[0]) if candidates_a else None
+        best_qualified_b = max(candidates_b, key=lambda item: item[0]) if candidates_b else None
+        hybrid_ev_a = best_qualified_a[0] if best_qualified_a else None
+        hybrid_ev_b = best_qualified_b[0] if best_qualified_b else None
+        decisions = {
+            "a": (bool(best_qualified_a), None, best_qualified_a[3] if best_qualified_a else {}),
+            "b": (bool(best_qualified_b), None, best_qualified_b[3] if best_qualified_b else {}),
+        }
         fusion_symaug_ev_a = (
             expected_value(
                 float(p["fusion_symaug_prob_a"]), float(record["best_odds_a"]), tax_rate
@@ -571,21 +601,15 @@ def list_matches(
         rec_odds = None
         rec_ev = None
         if not has_unmapped_teams:
-            val_a = decisions["a"][0]
-            val_b = decisions["b"][0]
+            val_a = best_qualified_a is not None
+            val_b = best_qualified_b is not None
             if val_a or val_b:
-                if val_a and (not val_b or hybrid_ev_a >= hybrid_ev_b):
-                    rec_side = "a"
-                    rec_team = team_a_name
-                    rec_bm = action_a["bookmaker"]
-                    rec_odds = action_a["_odds_a"]
-                    rec_ev = hybrid_ev_a
-                else:
-                    rec_side = "b"
-                    rec_team = team_b_name
-                    rec_bm = action_b["bookmaker"]
-                    rec_odds = action_b["_odds_b"]
-                    rec_ev = hybrid_ev_b
+                selected = best_qualified_a if val_a and (not val_b or hybrid_ev_a >= hybrid_ev_b) else best_qualified_b
+                rec_side = "a" if selected is best_qualified_a else "b"
+                rec_team = team_a_name if rec_side == "a" else team_b_name
+                rec_bm = selected[1]["bookmaker"]
+                rec_odds = selected[1]["_odds_a" if rec_side == "a" else "_odds_b"]
+                rec_ev = selected[0]
 
         # Only a direct model prediction with persisted Venn-Abers bounds can
         # be marked conformal. Hybrid probabilities mix a market quote after
@@ -650,8 +674,8 @@ def list_matches(
             arb_margin_after_tax=record.get("arb_margin_after_tax"),
             model_prob_a=p.get("model_prob_a"),
             model_prob_b=p.get("model_prob_b"),
-            hybrid_prob_a=prob_a,
-            hybrid_prob_b=prob_b,
+            hybrid_prob_a=p.get("hybrid_prob_a"),
+            hybrid_prob_b=p.get("hybrid_prob_b"),
             hybrid_ev_a=hybrid_ev_a,
             hybrid_ev_b=hybrid_ev_b,
             fusion_symaug_prob_a=p.get("fusion_symaug_prob_a"),
@@ -1872,240 +1896,81 @@ def _build_match_recommendation(
     odds_rows: list[BookmakerOddsRow],
     hybrid_prob_a: float | None,
     hybrid_prob_b: float | None,
-    pure_prob_a: float | None,
-    pure_prob_b: float | None,
-    diagnostics: Any = None,
     hybrid_diagnostics: Any = None,
     league: str | None = None,
     match_date: Any = None,
     best_of: int | None = None,
+    context: PrematchMarketContext | None = None,
 ) -> BettingRecommendation:
-    """Build a structured betting recommendation based on the latest model system."""
+    """Build a recommendation from the best qualified, independent quote."""
     name_a = team_a_name or "Drużyna A"
     name_b = team_b_name or "Drużyna B"
+    tax_rate = float(load_config().tax_rate)
 
-    odds_rows = [row for row in odds_rows if row.quote_status == "actionable"]
     if has_unmapped_teams:
-        return BettingRecommendation(
-            has_value=False,
-            verdict="unmapped",
+        return BettingRecommendation(has_value=False, verdict="unmapped",
             verdict_label="Wymagane mapowanie drużyn",
-            summary="Przynajmniej jedna drużyna nie jest jeszcze powiązana z bazą GOL.GG. Przypisz alias, aby system mógł wyliczyć ratingi i wygenerować rekomendację.",
-            reasons=[
-                "Brak jednoznacznego powiązania nazwy bukmacherskiej ze statystykami GOL.GG."
-            ],
-        )
-
-    valid_odds_a = [
-        o
-        for o in odds_rows
-        if o.canonical_odds_a
-        and math.isfinite(o.canonical_odds_a)
-        and o.canonical_odds_a > 1.0
-    ]
-    valid_odds_b = [
-        o
-        for o in odds_rows
-        if o.canonical_odds_b
-        and math.isfinite(o.canonical_odds_b)
-        and o.canonical_odds_b > 1.0
-    ]
-    if not valid_odds_a or not valid_odds_b:
-        return BettingRecommendation(
-            has_value=False,
-            verdict="no_odds",
-            verdict_label="Brak aktualnych kursów",
-            summary="Brak aktywnych kursów bukmacherskich dla tego spotkania. Rekomendacja pojawi się automatycznie po pobraniu oferty.",
-            reasons=[
-                "Brak jawnie przedmeczowych kwotowań nie starszych niż 300 sekund."
-            ],
-        )
-
-    best_row_a = max(valid_odds_a, key=lambda o: o.canonical_odds_a or 0.0)
-    best_row_b = max(valid_odds_b, key=lambda o: o.canonical_odds_b or 0.0)
-    best_odds_a = float(best_row_a.canonical_odds_a or 1.0)
-    best_odds_b = float(best_row_b.canonical_odds_b or 1.0)
-
-    market_pairs = [
-        fair_market_probabilities(o.canonical_odds_a, o.canonical_odds_b)
-        for o in odds_rows
-        if o in valid_odds_a and o in valid_odds_b
-    ]
-    m_prob_a = (
-        sum(pair[0] for pair in market_pairs) / len(market_pairs)
-        if market_pairs
-        else None
-    )
-    m_prob_b = 1.0 - m_prob_a if m_prob_a is not None else None
-
-    eff_prob_a = hybrid_prob_a if hybrid_prob_a is not None else pure_prob_a
-    eff_prob_b = hybrid_prob_b if hybrid_prob_b is not None else pure_prob_b
-
-    if eff_prob_a is None or eff_prob_b is None:
-        return BettingRecommendation(
-            has_value=False,
-            verdict="no_prediction",
+            summary="Przynajmniej jedna drużyna nie jest jeszcze powiązana z bazą GOL.GG.",
+            reasons=["Brak jednoznacznego powiązania nazwy bukmacherskiej ze statystykami GOL.GG."])
+    if context is None or hybrid_prob_a is None or not hybrid_diagnostics:
+        return BettingRecommendation(has_value=False, verdict="no_prediction",
             verdict_label="Oczekiwanie na predykcję",
-            summary="Brak wyliczonej predykcji dla tego meczu w systemie operacyjnym.",
-            reasons=[
-                "Model nie wygenerował jeszcze prawdopodobieństw dla tego zestawienia."
-            ],
+            summary="Brak kwalifikowalnej predykcji dla aktualnych kwotowań.",
+            reasons=["Wymagane są aktualne, niezależne kwotowania i predykcja hybrydowa."])
+
+    row_by_snapshot = {row.odds_snapshot_id: row for row in odds_rows if row.quote_status == "actionable"}
+    candidates = []
+    for quote in context.quotes:
+        row = row_by_snapshot.get(quote.odds_snapshot_id)
+        if row is None:
+            continue
+        assessed = qualify_prediction_for_quote(
+            context=context, quote=quote, prob_a=hybrid_prob_a, prob_b=hybrid_prob_b,
+            diagnostics=hybrid_diagnostics, model_name=HYBRID_MODEL_NAME,
+            league=league, match_date=match_date, best_of=best_of, tax_rate=tax_rate,
         )
-
-    bounds_a = conformal_bounds_for_side(diagnostics, "a")
-    bounds_b = conformal_bounds_for_side(diagnostics, "b")
-    p_low_a = bounds_a[0] if bounds_a is not None else None
-    p_low_b = bounds_b[0] if bounds_b is not None else None
-
-    uses_hybrid = hybrid_prob_a is not None
-    decisions = qualify_prediction_sides(
-        prob_a=eff_prob_a,
-        prob_b=eff_prob_b,
-        diagnostics=hybrid_diagnostics if uses_hybrid else diagnostics,
-        model_name=HYBRID_MODEL_NAME if uses_hybrid else DEFAULT_MODEL_NAME,
-        odds_a=best_odds_a,
-        odds_b=best_odds_b,
-        market_prob_a=m_prob_a,
-        league=league,
-        match_date=match_date,
-        best_of=best_of,
-    )
-    score_a = decisions["a"][2].get("prob_for_ev")
-    score_b = decisions["b"][2].get("prob_for_ev")
-    min_odds_a = (
-        round(1.0 / (score_a * (1.0 - TAX_RATE)), 2) if score_a else None
-    )
-    min_odds_b = (
-        round(1.0 / (score_b * (1.0 - TAX_RATE)), 2) if score_b else None
-    )
-    ev_a = decisions["a"][2].get("ev_net")
-    ev_b = decisions["b"][2].get("ev_net")
-    pure_ev_a = (
-        expected_value(pure_prob_a, best_odds_a, TAX_RATE)
-        if pure_prob_a is not None
-        else None
-    )
-    pure_ev_b = (
-        expected_value(pure_prob_b, best_odds_b, TAX_RATE)
-        if pure_prob_b is not None
-        else None
-    )
-
-    conf_ev_a = (
-        expected_value(p_low_a, best_odds_a, TAX_RATE) if p_low_a is not None else None
-    )
-    conf_ev_b = (
-        expected_value(p_low_b, best_odds_b, TAX_RATE) if p_low_b is not None else None
-    )
-
-    has_val_a = decisions["a"][0]
-    has_val_b = decisions["b"][0]
-
-    if not has_val_a and not has_val_b:
-        return BettingRecommendation(
-            has_value=False,
-            verdict="no_bet",
-            verdict_label="Brak zakwalifikowanego typu",
-            model_prob=pure_prob_a,
-            hybrid_prob=hybrid_prob_a,
-            market_prob=m_prob_a,
+        for side in ("a", "b"):
+            ok, _, details = assessed["qualified"][side]
+            if ok:
+                candidates.append((details.get("ev_net", -math.inf), side, row, quote, details, assessed))
+    if not candidates:
+        return BettingRecommendation(has_value=False, verdict="no_bet",
+            verdict_label="Brak zakwalifikowanego typu", hybrid_prob=hybrid_prob_a,
             summary="Żadna strona nie spełnia wspólnej polityki EV, niepewności i bezpieczeństwa.",
-            reasons=[
-                f"{name_a}: {decisions['a'][1]}",
-                f"{name_b}: {decisions['b'][1]}",
-            ],
-            threshold_info="Dodatnie średnie EV nie wystarcza do rekomendacji.",
-        )
+            reasons=["Brak kwalifikowanego zakładu dla kwotowania z niezależnym konsensusem."])
 
-    pick_side = "a" if has_val_a and (not has_val_b or ev_a >= ev_b) else "b"
-    team = name_a if pick_side == "a" else name_b
-    opp = name_b if pick_side == "a" else name_a
-    bm_row = best_row_a if pick_side == "a" else best_row_b
-    odds_val = best_odds_a if pick_side == "a" else best_odds_b
-    ev_val = ev_a if pick_side == "a" else ev_b
-    pure_ev_val = pure_ev_a if pick_side == "a" else pure_ev_b
-    h_prob = eff_prob_a if pick_side == "a" else eff_prob_b
-    p_prob = pure_prob_a if pick_side == "a" else pure_prob_b
-    m_prob = m_prob_a if pick_side == "a" else m_prob_b
-    min_odds = min_odds_a if pick_side == "a" else min_odds_b
-    p_low = p_low_a if pick_side == "a" else p_low_b
-    c_ev = conf_ev_a if pick_side == "a" else conf_ev_b
-
-    bounds = bounds_a if pick_side == "a" else bounds_b
-    is_conf = bool(bounds and (bounds[1] - bounds[0] <= 0.08) and c_ev and c_ev > 0)
-
-    qualification = decisions[pick_side][2]
+    ev_val, side, bm_row, quote, qualification, assessed = max(candidates, key=lambda item: item[0])
+    odds_val = quote.odds_a if side == "a" else quote.odds_b
+    h_prob = assessed["prob_a"] if side == "a" else assessed["prob_b"]
+    base_prob_a = assessed["diagnostics"]["base_prob_a"]
+    p_prob = base_prob_a if side == "a" else 1.0 - base_prob_a
     score = qualification["prob_for_ev"]
-    basis = qualification["uncertainty_basis"]
-    half_k = kelly_fraction(score, odds_val, TAX_RATE) / 2.0
-    quarter_k = (half_k / 2.0) if half_k else None
-    edge_pts = (
-        (h_prob - m_prob) * 100.0 if h_prob is not None and m_prob is not None else None
-    )
-    thesis_disag = qualification.get("rating_disagreement")
-    if thesis_disag is None and isinstance(diagnostics, dict):
-        thesis_disag = diagnostics.get("rating_disagreement")
-    thesis_guard_ok = (thesis_disag <= 0.10) if thesis_disag is not None else True
-    logit_disag = qualification.get("logit_disagreement")
-    guard_b_ok = (logit_disag <= 0.85) if logit_disag is not None else True
-    raw_clv_val = round((odds_val * m_prob) - 1.0, 4) if (odds_val and m_prob) else None
-
-
-    reasons = [
-        f"Kurs {odds_val:.2f} w {bm_row.bookmaker}: EV {ev_val:+.1%} po podatku 12%; ocena użyta do kwalifikacji {score:.1%}, podstawa niepewności: {basis} ({qualification['uncertainty_reason']}), bez gwarancji pokrycia.",
-        f"Model hybrydowy szacuje prawdopodobieństwo wygranej na {h_prob:.1%}, podczas gdy rynek bez marży implikuje {m_prob:.1%}"
-        + (
-            f" ({edge_pts:+.1f} p.p. przewagi nad rynkiem)."
-            if edge_pts is not None
-            else "."
-        ),
-    ]
-    if p_prob is not None and pure_ev_val is not None:
-        reasons.append(
-            f"Zapisany model sportowy ocenia szanse na {p_prob:.1%} (EV średniej: {pure_ev_val:+.1%}); nie jest to pomiar dolnej granicy niepewności."
-        )
-    if min_odds is not None:
-        reasons.append(
-            f"Kurs {odds_val:.2f} przewyższa wymagany próg opłacalności {min_odds:.2f} (kurs poniżej tej wartości byłby nieopłacalny)."
-        )
-    if quarter_k is not None and quarter_k > 0:
-        reasons.append(
-            f"Ułamek Kelly'ego wyliczony z oceny kwalifikacyjnej ({basis}): {quarter_k:.2%}; to nie gwarancja ochrony kapitału ani kwota uwzględniająca otwarte zakłady.",
-        )
-
-    summary = f"Rekomendacja: typ na {team} po kursie {odds_val:.2f} w {bm_row.bookmaker} ({ev_val:+.1%} EV po podatku 12%)."
-
+    stake = kelly_fraction(score, odds_val, tax_rate) / 4.0
+    market_prob = assessed["market_prob_a"]
+    if side == "b" and market_prob is not None:
+        market_prob = 1.0 - market_prob
+    min_odds = round(1.0 / (score * (1.0 - tax_rate)), 2) if score else None
+    team, opp = (name_a, name_b) if side == "a" else (name_b, name_a)
     return BettingRecommendation(
-        has_value=True,
-        verdict="value_bet",
-        verdict_label="Wartościowy typ (Value Bet)",
-        side=pick_side,
-        recommended_team=team,
-        opponent_team=opp,
-        bookmaker=bm_row.bookmaker,
-        best_odds=odds_val,
-        offer_url=bm_row.offer_url or bm_row.source_url,
+        has_value=True, verdict="value_bet", verdict_label="Wartościowy typ (Value Bet)",
+        side=side, recommended_team=team, opponent_team=opp, bookmaker=bm_row.bookmaker,
+        best_odds=odds_val, offer_url=bm_row.offer_url or bm_row.source_url,
         model_prob=round(p_prob, 4) if p_prob is not None else None,
         hybrid_prob=round(h_prob, 4) if h_prob is not None else None,
-        market_prob=round(m_prob, 4) if m_prob is not None else None,
+        market_prob=round(market_prob, 4) if market_prob is not None else None,
         ev=round(ev_val, 4) if ev_val is not None else None,
-        pure_model_ev=round(pure_ev_val, 4) if pure_ev_val is not None else None,
-        edge_percentage_points=round(edge_pts, 1) if edge_pts is not None else None,
-        min_odds_required=min_odds,
-        half_kelly=round(half_k, 4) if half_k is not None else None,
-        quarter_kelly=round(quarter_k, 4) if quarter_k is not None else None,
-        suggested_stake_pct=round(quarter_k, 4) if quarter_k is not None else None,
-        conformal_prob_low=round(p_low, 4) if p_low is not None else None,
-        conformal_ev=round(c_ev, 4) if c_ev is not None else None,
-        is_conformal_safe=is_conf,
-        thesis_disagreement=round(thesis_disag, 4) if thesis_disag is not None else None,
-        thesis_guard_passed=thesis_guard_ok,
-        guard_b_passed=guard_b_ok,
-        logit_disagreement=round(logit_disag, 4) if logit_disag is not None else None,
-        raw_clv=raw_clv_val,
-        summary=summary,
-        reasons=reasons,
-        threshold_info=f"Próg opłacalności kursu: ≥ {min_odds:.2f} | Najlepsza oferta: {odds_val:.2f} ({bm_row.bookmaker})",
+        pure_model_ev=expected_value(p_prob, odds_val, tax_rate),
+        min_odds_required=min_odds, half_kelly=round(stake * 2, 4),
+        quarter_kelly=round(stake, 4), suggested_stake_pct=round(stake, 4),
+        conformal_prob_low=None,
+        conformal_ev=None,
+        is_conformal_safe=False,
+        guard_b_passed=qualification.get("logit_disagreement") is None or qualification["logit_disagreement"] <= 0.85,
+        logit_disagreement=qualification.get("logit_disagreement"),
+        current_market_edge=round((odds_val * market_prob) - 1.0, 4) if market_prob is not None else None,
+        summary=f"Rekomendacja: typ na {team} po kursie {odds_val:.2f} w {bm_row.bookmaker} ({ev_val:+.1%} EV po podatku {tax_rate:.2%}).",
+        reasons=[f"Kurs {odds_val:.2f} w {bm_row.bookmaker}: EV {ev_val:+.1%} po podatku; kwalifikacja dla kursu tego bukmachera."],
+        threshold_info=f"Najlepsza zakwalifikowana oferta: {odds_val:.2f} ({bm_row.bookmaker})",
     )
 
 
@@ -2268,6 +2133,7 @@ def match_detail(
     has_unmapped_teams = not live_team_a[0] or not live_team_b[0]
 
     now = datetime.now(UTC)
+    tax_rate = float(load_config().tax_rate)
     stale_cutoff = now - timedelta(hours=stale_hours)
     odds_cutoff = now - timedelta(hours=max_odds_age_hours)
 
@@ -2309,12 +2175,13 @@ def match_detail(
             oa, ob = quote.odds_a, quote.odds_b
         clock = parse_aware_utc(row.get("scraped_at"))
         status = "actionable" if quote else ("diagnostic" if aligned is not None and row.get("is_live") == 0 else "unavailable")
-        pa = hybrid_prob_a if quote else None
-        pb = hybrid_prob_b if quote else None
-        qualified = qualify_prediction_sides(
-            prob_a=pa, prob_b=pb, diagnostics=hybrid_diagnostics, model_name=HYBRID_MODEL_NAME,
-            odds_a=quote.odds_a if quote else None, odds_b=quote.odds_b if quote else None,
-            market_prob_a=context.prob_a, league=m.get("league"), match_date=m.get("start_time_normalized"))
+        assessed = qualify_prediction_for_quote(
+            context=context, quote=quote, prob_a=hybrid_prob_a, prob_b=hybrid_prob_b,
+            diagnostics=hybrid_diagnostics, model_name=HYBRID_MODEL_NAME,
+            league=m.get("league"), match_date=m.get("start_time_normalized"),
+            best_of=m.get("best_of"), tax_rate=tax_rate,
+        )
+        qualified = assessed["qualified"]
         odds_rows.append(BookmakerOddsRow(
             bookmaker=row["bookmaker"], raw_team_a=row.get("raw_team_a"), raw_team_b=row.get("raw_team_b"),
             canonical_odds_a=oa, canonical_odds_b=ob, odds_snapshot_id=row["odds_snapshot_id"],
@@ -2322,33 +2189,47 @@ def match_detail(
             quote_status=status, source_url=row.get("source_url"), offer_url=row.get("offer_url"),
             ev_a=qualified["a"][2].get("ev_net"),
             ev_b=qualified["b"][2].get("ev_net"),
-            kelly_a=kelly_fraction(qualified["a"][2]["prob_for_ev"], oa, TAX_RATE) if qualified["a"][0] else None,
-            kelly_b=kelly_fraction(qualified["b"][2]["prob_for_ev"], ob, TAX_RATE) if qualified["b"][0] else None))
+            kelly_a=kelly_fraction(qualified["a"][2]["prob_for_ev"], oa, tax_rate) if qualified["a"][0] else None,
+            kelly_b=kelly_fraction(qualified["b"][2]["prob_for_ev"], ob, tax_rate) if qualified["b"][0] else None))
     preds = [p for p in latest_predictions(raw_preds) if prediction_time_is_actionable(
         p, decision_at=now, start_at=context.start_at, model_name=p["model_name"], model_version=p["model_version"])[0]]
-    best_a = max((q.odds_a for q in admitted.values()), default=None)
-    best_b = max((q.odds_b for q in admitted.values()), default=None)
     pred_rows = []
     for p in preds:
         is_hybrid = p["model_name"] == HYBRID_MODEL_NAME
         pa, pb = _probability(p.get("prob_a")), _probability(p.get("prob_b"))
         serving_pa = serving.get("hybrid_prob_a" if is_hybrid else "model_prob_a")
         serving_pb = 1-serving_pa if serving_pa is not None else None
-        decisions = qualify_prediction_sides(
-            prob_a=serving_pa, prob_b=serving_pb, diagnostics=p.get("diagnostics_json"),
-            model_name=p["model_name"], odds_a=best_a, odds_b=best_b,
-            market_prob_a=context.prob_a, league=m.get("league"),
-            match_date=m.get("start_time_normalized"), best_of=m.get("best_of"),
-        )
+        qualified_by_side = {"a": None, "b": None}
+        for quote in admitted.values():
+            diagnostics = serving.get("hybrid_diagnostics") if is_hybrid else p.get("diagnostics_json")
+            assessed = qualify_prediction_for_quote(
+                context=context, quote=quote, prob_a=serving_pa, prob_b=serving_pb,
+                diagnostics=diagnostics, model_name=p["model_name"], league=m.get("league"),
+                match_date=m.get("start_time_normalized"), best_of=m.get("best_of"), tax_rate=tax_rate,
+            )
+            for side in ("a", "b"):
+                ok, _, details = assessed["qualified"][side]
+                if ok and (qualified_by_side[side] is None or details.get("ev_net", -math.inf) > qualified_by_side[side][0]):
+                    odds_value = quote.odds_a if side == "a" else quote.odds_b
+                    probability = assessed["prob_a"] if side == "a" else assessed["prob_b"]
+                    qualified_by_side[side] = (details.get("ev_net"), details, odds_value, probability)
+        decisions = {
+            side: (value is not None, None, value[1] if value else {})
+            for side, value in qualified_by_side.items()
+        }
+        best_a = qualified_by_side["a"][2] if qualified_by_side["a"] else None
+        best_b = qualified_by_side["b"][2] if qualified_by_side["b"] else None
         clock = parse_aware_utc(p.get("predicted_at"))
         pred_rows.append(PredictionRow(
-            model_name=p["model_name"], model_version=p["model_version"], prob_a=pa, prob_b=pb,
+            model_name=p["model_name"], model_version=p["model_version"],
+            prob_a=qualified_by_side["a"][3] if qualified_by_side["a"] else pa,
+            prob_b=qualified_by_side["b"][3] if qualified_by_side["b"] else pb,
             predicted_at=clock.isoformat() if clock else None,
             raw_diagnostics=_raw_diagnostics(p.get("diagnostics_json")),
             ev_a=decisions["a"][2].get("ev_net"),
             ev_b=decisions["b"][2].get("ev_net"),
-            kelly_a=kelly_fraction(decisions["a"][2]["prob_for_ev"], best_a, TAX_RATE) if decisions["a"][0] else None,
-            kelly_b=kelly_fraction(decisions["b"][2]["prob_for_ev"], best_b, TAX_RATE) if decisions["b"][0] else None))
+            kelly_a=kelly_fraction(decisions["a"][2]["prob_for_ev"], best_a, tax_rate) if decisions["a"][0] else None,
+            kelly_b=kelly_fraction(decisions["b"][2]["prob_for_ev"], best_b, tax_rate) if decisions["b"][0] else None))
 
     # Rosters from features_json
     roster_a: RosterInfo | None = None
@@ -2658,7 +2539,7 @@ def match_detail(
             roster_b = hist_b
     operational_pred = next(
         (p for p in preds if p.get("model_name") == DEFAULT_MODEL_NAME), None
-    )
+    ) if serving else None
     pure_prob_a = (
         none_or_float(operational_pred.get("prob_a")) if operational_pred else None
     )
@@ -2672,17 +2553,15 @@ def match_detail(
     rec = _build_match_recommendation(
         team_a_name=m.get("team_a_name"),
         team_b_name=m.get("team_b_name"),
-        has_unmapped_teams=has_unmapped_teams,
+        has_unmapped_teams=has_unmapped_teams or not sources_unchanged,
         odds_rows=odds_rows,
         hybrid_prob_a=hybrid_prob_a,
         hybrid_prob_b=hybrid_prob_b,
-        pure_prob_a=pure_prob_a,
-        pure_prob_b=pure_prob_b,
-        diagnostics=op_diagnostics,
         hybrid_diagnostics=hybrid_diagnostics,
         league=m.get("league"),
         match_date=m.get("start_time_normalized"),
         best_of=m.get("best_of"),
+        context=context,
     )
 
     return MatchDetailResponse(

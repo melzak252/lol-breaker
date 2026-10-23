@@ -158,12 +158,12 @@ def resolve_golgg_player_id(
                 SELECT player_id, player_name, team_name FROM golgg_game_players
                 WHERE LOWER(player_name) = :pname AND player_id IS NOT NULL AND TRIM(player_id) != ''
                 ORDER BY
-                    CASE WHEN :expected_team IS NOT NULL AND LOWER(COALESCE(team_name, '')) = LOWER(:expected_team) THEN 0 ELSE 1 END,
+                    CASE WHEN CAST(:expected_team AS TEXT) IS NOT NULL AND LOWER(COALESCE(team_name, '')) = LOWER(CAST(:expected_team AS TEXT)) THEN 0 ELSE 1 END,
                     match_id DESC, game_id DESC
                 LIMIT 5
                 """
             ),
-            {"pname": cleaned.lower(), "expected_team": (expected_team or "").lower()},
+            {"pname": cleaned.lower(), "expected_team": expected_team.lower() if expected_team else None},
         ).mappings().fetchall()
 
         if rows:
@@ -178,12 +178,12 @@ def resolve_golgg_player_id(
                     WHERE REPLACE(LOWER(player_name), ' ', '') = :squashed
                       AND player_id IS NOT NULL AND TRIM(player_id) != ''
                     ORDER BY
-                        CASE WHEN :expected_team IS NOT NULL AND LOWER(COALESCE(team_name, '')) = LOWER(:expected_team) THEN 0 ELSE 1 END,
+                        CASE WHEN CAST(:expected_team AS TEXT) IS NOT NULL AND LOWER(COALESCE(team_name, '')) = LOWER(CAST(:expected_team AS TEXT)) THEN 0 ELSE 1 END,
                         match_id DESC, game_id DESC
                     LIMIT 5
                     """
                 ),
-                {"squashed": squashed, "expected_team": (expected_team or "").lower()},
+                {"squashed": squashed, "expected_team": expected_team.lower() if expected_team else None},
             ).mappings().fetchall()
             if rows:
                 return str(rows[0]["player_id"]), str(rows[0]["player_name"])

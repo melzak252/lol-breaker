@@ -94,7 +94,8 @@ def auto_map_new_matches(match_ids: list[str], candidate_statuses: list[str] | N
     ids_str = ",".join(f"'{mid}'" for mid in match_ids)
     status_filter = ""
     if candidate_statuses:
-        statuses = ",".join(f"'{str(status).replace("'", "''")}'" for status in candidate_statuses)
+        quoted_statuses = [str(status).replace("'", "''") for status in candidate_statuses]
+        statuses = ",".join(f"'{status}'" for status in quoted_statuses)
         status_filter = f"AND cm.status IN ({statuses})"
     
     # Fetch newly imported golgg matches with team names + date

@@ -257,7 +257,7 @@ class _Worker:
 
     def _history_adapter(self, root):
         if self.history is None:
-            from betting_app.core.models.native_c0 import NativeC0Adapter
+            from betting_app.core.models.native_c0 import NativeC0Adapter, _FEATURE_REPLAY_SHA256
             class ResearchHistory(NativeC0Adapter):
                 _validate_request = staticmethod(ResearchNativePairProvider.validate_request)
             history = ResearchHistory()
@@ -266,7 +266,7 @@ class _Worker:
             # is set separately and no serving artifact root is relaxed.
             history._contract = {'input_sha256': {'a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/release_days.json': 'e54914ba79c5620a819a48a03bf877c373c6e53bd019219e43ffdd7db47c2620'}}
             history._identity = {'raw_feature_replay_source': {'implementation_path': str(PROJECT_ROOT / 'src/analysis/ev_asof_replay.py'),
-                                  'implementation_sha256': 'f01fdc9eef9ff551cc1bc592628f44b0b17dacba84750dfb0328f21b9994e58d'}}
+                                  'implementation_sha256': _FEATURE_REPLAY_SHA256}}
             self.history = history
         return self.history
 

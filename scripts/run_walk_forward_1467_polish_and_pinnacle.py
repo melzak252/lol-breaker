@@ -95,6 +95,8 @@ def compute_metrics(y_true: np.ndarray, p_pred: np.ndarray) -> dict[str, float]:
 def compute_three_part_decomposition(
     bets: list[dict[str, Any]],
     initial_bankroll: float = 10000.0,
+    clv_by_construction: bool = False,
+    net_clv_reason: str | None = None,
 ) -> dict[str, Any]:
     """Compute performance metrics and exact three-part econometric decomposition."""
     if not bets:
@@ -109,13 +111,21 @@ def compute_three_part_decomposition(
             "max_drawdown_pct": 0.0,
             "profit_factor": 0.0,
             "sharpe_ratio": 0.0,
-            "claimed_ev_pct": 0.0,
-            "true_edge_net_clv_pct": 0.0,
-            "optimizers_curse_bias_pp": 0.0,
-            "match_luck_noise_pp": 0.0,
+            "claimed_ev_pct": None,
+            "net_clv_pct": None,
+            "n_clv_bets": 0,
+            "n_missing_close": 0,
+            "net_clv_reason": net_clv_reason or "no_bets_with_independent_close",
+            "clv_by_construction": clv_by_construction,
         }
 
     df = pd.DataFrame(bets)
+    if "net_clv" not in df:
+        df["net_clv"] = np.nan
+    else:
+        df["net_clv"] = pd.to_numeric(df["net_clv"], errors="coerce")
+    if clv_by_construction:
+        df["net_clv"] = np.nan
     n_bets = len(df)
     n_wins = int(df["won"].sum())
     win_rate = (n_wins / n_bets) * 100.0 if n_bets > 0 else 0.0
@@ -141,11 +151,23 @@ def compute_three_part_decomposition(
     ret_std = float(returns.std(ddof=1)) if len(returns) > 1 else 0.0
     sharpe = (float(returns.mean()) / ret_std) * np.sqrt(n_bets) if ret_std > 0 else 0.0
 
-    weights = df["stake"].to_numpy(dtype=float) / total_turnover
-    claimed_ev = float(np.sum(weights * df["ev_claimed"].to_numpy(dtype=float))) * 100.0
-    net_clv = float(np.sum(weights * df["net_clv"].to_numpy(dtype=float))) * 100.0
-    bias_b = claimed_ev - net_clv
-    luck_eta = realized_yield - net_clv
+    clv_df = df.loc[df["net_clv"].notna()]
+    n_clv_bets = len(clv_df)
+    n_missing_close = n_bets - n_clv_bets
+    if n_clv_bets:
+        clv_turnover = float(clv_df["stake"].sum())
+        clv_weights = clv_df["stake"].to_numpy(dtype=float) / clv_turnover
+        claimed_ev = float(np.sum(clv_weights * clv_df["ev_claimed"].to_numpy(dtype=float))) * 100.0
+        net_clv = float(np.sum(clv_weights * clv_df["net_clv"].to_numpy(dtype=float))) * 100.0
+        bias_b = claimed_ev - net_clv
+        clv_yield = float(clv_df["profit"].sum() / clv_turnover) * 100.0
+        luck_eta = clv_yield - net_clv
+        resolved_clv_reason = None
+    else:
+        claimed_ev = net_clv = bias_b = luck_eta = None
+        resolved_clv_reason = net_clv_reason or (
+            "clv_by_construction" if clv_by_construction else "no_bets_with_independent_close"
+        )
 
     return {
         "n_bets": n_bets,
@@ -158,10 +180,14 @@ def compute_three_part_decomposition(
         "max_drawdown_pct": round(max_drawdown, 2),
         "profit_factor": round(profit_factor, 2),
         "sharpe_ratio": round(sharpe, 2),
-        "claimed_ev_pct": round(claimed_ev, 2),
-        "true_edge_net_clv_pct": round(net_clv, 2),
-        "optimizers_curse_bias_pp": round(bias_b, 2),
-        "match_luck_noise_pp": round(luck_eta, 2),
+        "claimed_ev_pct": round(claimed_ev, 2) if claimed_ev is not None else None,
+        "net_clv_pct": round(net_clv, 2) if net_clv is not None else None,
+        "n_clv_bets": n_clv_bets,
+        "n_missing_close": n_missing_close,
+        "net_clv_reason": resolved_clv_reason,
+        "clv_by_construction": clv_by_construction,
+        "optimizers_curse_bias_pp": round(bias_b, 2) if bias_b is not None else None,
+        "match_luck_noise_pp": round(luck_eta, 2) if luck_eta is not None else None,
     }
 
 
@@ -170,8 +196,10 @@ def run_chronological_simulation(
     cfg: dict[str, Any],
     initial_capital: float = 10000.0,
     tax_rate: float = 0.12,
+    close_reference_available: bool = False,
+    clv_by_construction: bool = False,
+    net_clv_reason: str | None = None,
 ) -> dict[str, Any]:
-    """Execute strict chronological match-level walk-forward simulation with OperationalWallet capital locking."""
     c = 1.0 - tax_rate
     free_capital = float(initial_capital)
     reserved_capital = 0.0
@@ -245,9 +273,12 @@ def run_chronological_simulation(
     for i in range(len(df_matches)):
         side = 0
         if c1[i] and (not c2[i] or ev1[i] >= ev2[i]):
-            side, o_taken, p_claim, p_close, won, ev_claim = 1, o1[i], p1_eff[i], q1[i], int(y[i] == 1), ev1[i]
+            close_ref = q1[i] if close_reference_available else None
+            side, o_taken, p_claim, p_close, won, ev_claim = 1, o1[i], p1_eff[i], close_ref, int(y[i] == 1), ev1[i]
         elif c2[i]:
-            side, o_taken, p_claim, p_close, won, ev_claim = 2, o2[i], p2_eff[i], q2[i], int(y[i] == 0), ev2[i]
+            close_ref = q1[i] if close_reference_available else None
+            p_close = 1.0 - close_ref if close_ref is not None else None
+            side, o_taken, p_claim, won, ev_claim = 2, o2[i], p2_eff[i], int(y[i] == 0), ev2[i]
 
         if side != 0:
             t_dec = df_matches["t_dec"].iloc[i]
@@ -298,7 +329,10 @@ def run_chronological_simulation(
                 "p_close": data["p_close"],
                 "won": data["won"],
                 "ev_claimed": data["ev_claim"],
-                "net_clv": c * data["odds"] * data["p_close"] - 1.0,
+                "net_clv": (
+                    c * data["odds"] * data["p_close"] - 1.0
+                    if data["p_close"] is not None else None
+                ),
                 "stake": stake,
                 "profit": profit,
                 "bankroll": free_capital + reserved_capital,
@@ -329,7 +363,12 @@ def run_chronological_simulation(
                 else:
                     skipped_capital_count += 1
 
-    decomp = compute_three_part_decomposition(settled_bets, initial_bankroll=initial_capital)
+    decomp = compute_three_part_decomposition(
+        settled_bets,
+        initial_bankroll=initial_capital,
+        clv_by_construction=clv_by_construction,
+        net_clv_reason=net_clv_reason,
+    )
     decomp["operational_stats"] = {
         "max_concurrent_open_bets": max_concurrent_bets,
         "min_free_capital_pln": round(min_free_capital, 2),
@@ -545,13 +584,14 @@ def main() -> None:
         odds_prefix: str,
         tax_rate: float,
         cohort_name: str,
+        clv_by_construction: bool,
+        net_clv_reason: str,
     ) -> dict[str, Any]:
         suite_dict: dict[str, Any] = {}
         for m_col in models_list:
             m_name = model_labels[m_col]
             suite_dict[m_name] = {"static_pre_2026": {}, "expanding_monthly": {}}
 
-            # Run Static
             df_sim = df_base.copy()
             df_sim["p1"] = df_sim[m_col]
             if odds_prefix:
@@ -560,14 +600,25 @@ def main() -> None:
 
             for gname, cfg in GATE_CONFIGURATIONS.items():
                 suite_dict[m_name]["static_pre_2026"][gname] = run_chronological_simulation(
-                    df_sim, cfg, initial_capital=10000.0, tax_rate=tax_rate
+                    df_sim,
+                    cfg,
+                    initial_capital=10000.0,
+                    tax_rate=tax_rate,
+                    close_reference_available=False,
+                    clv_by_construction=clv_by_construction,
+                    net_clv_reason=net_clv_reason,
                 )
 
-            # Run Expanding
             df_sim["p1"] = df_sim[f"{m_col}__expanding"]
             for gname, cfg in GATE_CONFIGURATIONS.items():
                 suite_dict[m_name]["expanding_monthly"][gname] = run_chronological_simulation(
-                    df_sim, cfg, initial_capital=10000.0, tax_rate=tax_rate
+                    df_sim,
+                    cfg,
+                    initial_capital=10000.0,
+                    tax_rate=tax_rate,
+                    close_reference_available=False,
+                    clv_by_construction=clv_by_construction,
+                    net_clv_reason=net_clv_reason,
                 )
 
         return suite_dict
@@ -579,7 +630,12 @@ def main() -> None:
         "tax_rate": 0.12,
         "n_matches": 1467,
         "odds_mode": "raw_best_closing_odds_across_active_polish_books",
-        "models": execute_cohort_suite(pol_df, "raw", 0.12, "polish_1467_raw"),
+        "clv_by_construction": False,
+        "net_clv_reason": "independent closing reference unavailable; placed odds use closing quotes",
+        "models": execute_cohort_suite(
+            pol_df, "raw", 0.12, "polish_1467_raw", False,
+            "independent closing reference unavailable; placed odds use closing quotes",
+        ),
     }
 
     # B. Polish 1,467 matches - Implied Odds with 5.8% overround (12% tax)
@@ -589,7 +645,12 @@ def main() -> None:
         "tax_rate": 0.12,
         "n_matches": 1467,
         "odds_mode": "implied_odds_overround_5_8_pct",
-        "models": execute_cohort_suite(pol_df, "implied", 0.12, "polish_1467_implied"),
+        "clv_by_construction": False,
+        "net_clv_reason": "independent closing reference unavailable; implied odds derive from closing quotes",
+        "models": execute_cohort_suite(
+            pol_df, "implied", 0.12, "polish_1467_implied", False,
+            "independent closing reference unavailable; implied odds derive from closing quotes",
+        ),
     }
 
     # C. Pinnacle T-1h Matches (N=1,668) - 0% International Tax
@@ -599,7 +660,12 @@ def main() -> None:
         "tax_rate": 0.0,
         "n_matches": 1668,
         "odds_mode": "pinnacle_t1_consensus_odds",
-        "models": execute_cohort_suite(pin_df, "", 0.0, "pinnacle_1668_0tax"),
+        "clv_by_construction": True,
+        "net_clv_reason": "same consensus probability defines both fair odds and CLV reference",
+        "models": execute_cohort_suite(
+            pin_df, "", 0.0, "pinnacle_1668_0tax", True,
+            "same consensus probability defines both fair odds and CLV reference",
+        ),
     }
 
     # D. Pinnacle T-1h Matches (N=1,668) - 12% Polish Tax
@@ -609,7 +675,12 @@ def main() -> None:
         "tax_rate": 0.12,
         "n_matches": 1668,
         "odds_mode": "pinnacle_t1_consensus_odds",
-        "models": execute_cohort_suite(pin_df, "", 0.12, "pinnacle_1668_12tax"),
+        "clv_by_construction": True,
+        "net_clv_reason": "same consensus probability defines both fair odds and CLV reference",
+        "models": execute_cohort_suite(
+            pin_df, "", 0.12, "pinnacle_1668_12tax", True,
+            "same consensus probability defines both fair odds and CLV reference",
+        ),
     }
 
     # Save to JSON

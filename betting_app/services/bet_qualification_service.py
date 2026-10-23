@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from betting_app.core.models.registry import get_active_hybrid, get_model
 
@@ -24,6 +25,23 @@ DEFAULT_COINFLIP_MAX_ODDS: float = 2.50
 DEFAULT_BO1_MAX_ODDS: float | None = None
 DEFAULT_MAX_LOGIT_DISAGREEMENT: float | None = 0.85
 DEFAULT_WASSERSTEIN_EPSILON: float = 0.025
+DEFAULT_SIGNAL_MAX_ODDS: float = 4.00
+DEFAULT_SIGNAL_MAX_RATING_DISAGREEMENT: float = 0.10
+
+# Single source of truth for the gate set the EV-signal pipeline applies on top of the
+# `is_bet_eligible` defaults. `qualify_prediction_sides` (dashboard/alerts) and
+# `generate_model_ev_signals` MUST both use it so the UI never recommends a bet the
+# pipeline quarantines. Wasserstein DRO uses DEFAULT_WASSERSTEIN_EPSILON.
+SIGNAL_GATE_KWARGS: Mapping[str, Any] = MappingProxyType(
+    {
+        "max_ev_net": DEFAULT_MAX_EV_NET,
+        "max_rating_disagreement": DEFAULT_SIGNAL_MAX_RATING_DISAGREEMENT,
+        "universal_rating_guard": True,
+        "max_odds": DEFAULT_SIGNAL_MAX_ODDS,
+    }
+)
+
+
 def model_requires_uncertainty(model_name: str) -> bool:
     spec = get_model(model_name)
     if spec is not None:
@@ -184,6 +202,8 @@ def is_bet_eligible(
     uncertainty_required: bool = False,
     uncertainty_basis: str | None = None,
     uncertainty_reason: str | None = None,
+    prob_base: float | None = None,
+    base_prob_required: bool = False,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Determine whether a proposed bet satisfies mathematical EV and safety boundaries.
 
@@ -192,6 +212,14 @@ def is_bet_eligible(
     prob_model : float
         Calibrated model probability of winning (in (0, 1)).
         Retained for display and mean-market divergence guards.
+    prob_base : float | None
+        Sports-only (C0) probability of the same side. The logit divergence gate
+        is evaluated on it; for a market-shrunk hybrid, gating the hybrid p would
+        halve the effective bound. When None and ``base_prob_required`` is False
+        the model probability is the sports probability.
+    base_prob_required : bool
+        Hybrid predictions: reject (fail closed) when ``prob_base`` is missing or
+        invalid instead of silently gating the hybrid probability.
     prob_conservative : float | None
         Side-specific conservative score used for EV; never the other side's complement.
     uncertainty_required : bool
@@ -455,20 +483,31 @@ def is_bet_eligible(
             diag["quarantine_reason"] = "coinflip_market_divergence_trap"
             return False, "coinflip_market_divergence_trap", diag
 
-    # Guard B: Dynamic Logit Disagreement Gate (Tail-sensitive protection against Optimizer's Curse)
-    if (
-        prob_market_novig is not None
-        and max_logit_disagreement is not None
-        and 0.0 < prob_model < 1.0
-        and 0.0 < prob_market_novig < 1.0
-    ):
-        from src.analysis.betting_guards_a_to_d import dynamic_logit_disagreement
-        logit_gap = dynamic_logit_disagreement(prob_model, prob_market_novig)
-        diag["logit_disagreement"] = round(logit_gap, 4)
-        if logit_gap > max_logit_disagreement:
+    # Guard B: Dynamic Logit Disagreement Gate (Tail-sensitive protection against Optimizer's Curse).
+    # Evaluated on the sports (C0) probability, never on the market-shrunk hybrid.
+    if max_logit_disagreement is not None:
+        gate_prob = prob_model if prob_base is None and not base_prob_required else prob_base
+        diag["prob_base"] = gate_prob
+        if gate_prob is None or not (
+            isinstance(gate_prob, (int, float))
+            and not isinstance(gate_prob, bool)
+            and math.isfinite(gate_prob)
+            and 0.0 < gate_prob < 1.0
+        ):
+            reason = (
+                "missing_base_probability" if gate_prob is None else "invalid_base_probability"
+            )
             diag["quarantine"] = True
-            diag["quarantine_reason"] = "dynamic_logit_market_divergence"
-            return False, "dynamic_logit_market_divergence", diag
+            diag["quarantine_reason"] = reason
+            return False, reason, diag
+        if prob_market_novig is not None:
+            from src.analysis.betting_guards_a_to_d import dynamic_logit_disagreement
+            logit_gap = dynamic_logit_disagreement(float(gate_prob), prob_market_novig)
+            diag["logit_disagreement"] = round(logit_gap, 4)
+            if logit_gap > max_logit_disagreement:
+                diag["quarantine"] = True
+                diag["quarantine_reason"] = "dynamic_logit_market_divergence"
+                return False, "dynamic_logit_market_divergence", diag
     # Tier-1 Gating: Reject regional/secondary leagues without referee verification when requested
     if tier1_only and competition_tier not in ("Tier-1 International", "Tier-1 Domestic"):
         diag["quarantine"] = True
@@ -497,6 +536,19 @@ def qualification_tier(league: str | None, match_date: Any = None) -> str:
     }.get(tier, tier.value)
 
 
+def is_market_hybrid_prediction(model_name: str, diagnostics: Mapping[str, Any]) -> bool:
+    """True only when this prediction's persisted probability is market-shrunk."""
+    spec = get_model(model_name) if model_name else None
+    if spec is not None:
+        return spec.family == "bayesian_market_hybrid"
+    # Unknown hybrid names remain fail-closed, while ordinary native forecasts
+    # may carry base-model provenance without becoming market-shrunk forecasts.
+    return bool(
+        str(model_name).startswith("Hybrid")
+        or diagnostics.get("market_features_used")
+    )
+
+
 def qualify_prediction_sides(
     *,
     prob_a: float,
@@ -510,15 +562,31 @@ def qualify_prediction_sides(
     match_date: Any = None,
     tax_rate: float = 0.12,
     min_ev_net: float = DEFAULT_BASE_MIN_EV,
-    max_ev_net: float | None = None,
+    max_ev_net: float | None = SIGNAL_GATE_KWARGS["max_ev_net"],
     best_of: int | None = None,
     market_prob_close_a: float | None = None,
     max_ev_longshot: float | None = DEFAULT_MAX_EV_LONGSHOT,
     longshot_odds_threshold: float = DEFAULT_LONGSHOT_ODDS_THRESHOLD,
     max_bo1_market_gap: float | None = DEFAULT_MAX_BO1_MARKET_GAP,
     max_negative_clv_drift: float | None = DEFAULT_MAX_NEGATIVE_CLV_DRIFT,
+    max_odds: float | None = SIGNAL_GATE_KWARGS["max_odds"],
+    max_rating_disagreement: float | None = SIGNAL_GATE_KWARGS["max_rating_disagreement"],
+    universal_rating_guard: bool = SIGNAL_GATE_KWARGS["universal_rating_guard"],
+    wasserstein_epsilon: float | None = DEFAULT_WASSERSTEIN_EPSILON,
+    rating_disagreement: float | None = None,
+    base_prob_a: float | None = None,
 ) -> dict[str, tuple[bool, str, dict[str, Any]]]:
-    """Shared read-side gate; malformed persisted predictions never recommend."""
+    """Shared read-side gate; malformed persisted predictions never recommend.
+
+    Applies the same gate set as the EV-signal pipeline (``SIGNAL_GATE_KWARGS`` plus the
+    Wasserstein DRO check), so the dashboard/alerts cannot recommend a bet the pipeline
+    quarantines. Pass ``None`` for a limit only for an explicit diagnostic view.
+
+    ``base_prob_a`` is the sports-only (C0) probability of side A; it defaults to
+    ``diagnostics["base_prob_a"]``. For market-hybrid predictions the divergence gate uses it
+    and fails closed (``missing_base_probability``) when it is absent. ``rating_disagreement``
+    supplies an externally computed value when the diagnostics carry none.
+    """
 
     try:
         diag = prediction_safety_diagnostics(
@@ -534,6 +602,17 @@ def qualify_prediction_sides(
                 effective_best_of = int(effective_best_of)
             except ValueError:
                 effective_best_of = None
+        base_required = is_market_hybrid_prediction(model_name, diag)
+        base_a = base_prob_a if base_prob_a is not None else diag.get("base_prob_a")
+        if base_a is not None and (
+            not isinstance(base_a, (int, float)) or isinstance(base_a, bool) or not math.isfinite(base_a)
+        ):
+            base_a = float("nan")
+        disagreement = (
+            diag.get("rating_disagreement")
+            if diag.get("rating_disagreement") is not None
+            else rating_disagreement
+        )
         return {
             side: is_bet_eligible(
                 prob_model=prob,
@@ -541,9 +620,13 @@ def qualify_prediction_sides(
                 prob_market_novig=market,
                 tax_rate=tax_rate,
                 min_ev_net=min_ev_net,
-                rating_disagreement=diag.get("rating_disagreement"),
+                rating_disagreement=disagreement,
+                max_rating_disagreement=max_rating_disagreement,
+                universal_rating_guard=universal_rating_guard,
                 competition_tier=tier_name,
                 max_ev_net=max_ev_net,
+                max_odds=max_odds,
+                wasserstein_epsilon=wasserstein_epsilon,
                 best_of=effective_best_of,
                 max_ev_longshot=max_ev_longshot,
                 longshot_odds_threshold=longshot_odds_threshold,
@@ -554,15 +637,18 @@ def qualify_prediction_sides(
                 uncertainty_required=diag["uncertainty_required"],
                 uncertainty_basis=diag["uncertainty_basis"],
                 uncertainty_reason=diag["uncertainty_reason"],
+                prob_base=base,
+                base_prob_required=base_required,
             )
-            for side, prob, odds, market, close_market in (
-                ("a", prob_a, odds_a, market_prob_a, market_prob_close_a),
+            for side, prob, odds, market, close_market, base in (
+                ("a", prob_a, odds_a, market_prob_a, market_prob_close_a, base_a),
                 (
                     "b",
                     prob_b,
                     odds_b,
                     1.0 - market_prob_a,
                     (1.0 - market_prob_close_a) if market_prob_close_a is not None else None,
+                    (1.0 - base_a) if base_a is not None else None,
                 ),
             )
         }

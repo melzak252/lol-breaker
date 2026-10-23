@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 from scipy.special import expit, logit
 
+from scripts.run_c0_distilled_financial_simulations import leave_one_book_out_consensus
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPORT_DIR = PROJECT_ROOT / "data/08_reporting/c0_upgrade_and_distillation_20261017"
 OUTPUT_JSON_PATH = REPORT_DIR / "marginal_blocked_bets_audit.json"
@@ -40,6 +41,137 @@ PREDICTIONS_PATH = REPORT_DIR / "year_anchor_distilled_predictions.parquet"
 PINNACLE_T1_PATH = PROJECT_ROOT / "data/08_reporting/a0_data_focus/a0_data_focus_20260929_192443/market_T1_joined.parquet"
 LEDGER_PATH = PROJECT_ROOT / "data/08_reporting/optimal_strategy_simulation_ledger.csv"
 UNIFORM_MONTHLY_PATH = PROJECT_ROOT / "data/07_model_output/a0_native_refit/native_refit_20260929_122617/uniform/uniform_monthly/candidate.parquet"
+
+
+def _normalize_team_name(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return (
+        str(value).casefold().replace(" ", "").replace(".", "").replace("-", "")
+        .replace("esports", "").replace("gaming", "").replace("team", "")
+    )
+
+
+def team_a_is_team1(team_a: Any, team_b: Any, team1: Any, team2: Any) -> bool:
+    """Orient quote side A from team identities, never from match outcome."""
+    a, b = _normalize_team_name(team_a), _normalize_team_name(team_b)
+    one, two = _normalize_team_name(team1), _normalize_team_name(team2)
+    if not all((a, b, one, two)):
+        raise ValueError("Cannot orient quote: raw and prediction team identity names are required.")
+    if (a, b) == (one, two):
+        return True
+    if (a, b) == (two, one):
+        return False
+    raise ValueError(
+        f"Cannot orient quote from identities: raw teams {team_a!r}/{team_b!r} "
+        f"do not match prediction teams {team1!r}/{team2!r}."
+    )
+
+def build_ledger_prediction_frame(
+    predictions: pd.DataFrame,
+    golgg: pd.DataFrame,
+    monthly: pd.DataFrame,
+) -> pd.DataFrame:
+    """Attach gold identity and recorded ledger probability recipes by exact match ID."""
+    required_gold = {"match_id", "date", "team1_name", "team2_name"}
+    required_monthly = {"golgg_match_id", "p_full"}
+    if missing := required_gold.difference(golgg.columns):
+        raise ValueError(f"Missing gold prediction metadata: {sorted(missing)}")
+    if missing := required_monthly.difference(monthly.columns):
+        raise ValueError(f"Missing monthly ledger probabilities: {sorted(missing)}")
+    if predictions["golgg_match_id"].astype(str).duplicated().any():
+        raise ValueError("Prediction frame has duplicate golgg_match_id values.")
+    gold = golgg[["match_id", "date", "team1_name", "team2_name"]].copy()
+    gold["golgg_match_id"] = gold["match_id"].astype(str)
+    if gold["golgg_match_id"].duplicated().any():
+        raise ValueError("Gold metadata has duplicate match IDs.")
+    gold = gold.drop(columns="match_id")
+    month = monthly[["golgg_match_id", "p_full"]].copy()
+    month["golgg_match_id"] = month["golgg_match_id"].astype(str)
+    if month["golgg_match_id"].duplicated().any():
+        raise ValueError("Monthly probabilities have duplicate match IDs.")
+    if set(predictions["golgg_match_id"].astype(str)) - set(gold["golgg_match_id"]):
+        raise ValueError("Gold metadata does not cover every prediction match ID.")
+    if set(predictions["golgg_match_id"].astype(str)) - set(month["golgg_match_id"]):
+        raise ValueError("Monthly probabilities do not cover every prediction match ID.")
+    enriched = predictions.copy()
+    enriched["golgg_match_id"] = enriched["golgg_match_id"].astype(str)
+    enriched = enriched.merge(gold, on="golgg_match_id", how="left", validate="one_to_one")
+    enriched = enriched.merge(month, on="golgg_match_id", how="left", validate="one_to_one")
+    return enriched
+
+
+def _ledger_probability_matches(pred: Any, reverse: bool, target: float, tolerance: float) -> bool:
+    """The recorded ledger uses either distilled p_c0__full or native monthly p_full."""
+    for col in ("p_c0__full", "p_full"):
+        value = pred.get(col)
+        if value is not None and pd.notna(value):
+            selected_probability = 1.0 - float(value) if reverse else float(value)
+            if abs(selected_probability - target) <= tolerance + 1e-12:
+                return True
+    return False
+
+
+def build_ledger_prediction_frame_or_withheld(
+    predictions: pd.DataFrame,
+    golgg: pd.DataFrame,
+    monthly: pd.DataFrame,
+) -> pd.DataFrame | None:
+    """Return complete ID-aligned metadata, or None to explicitly withhold matching."""
+    try:
+        return build_ledger_prediction_frame(predictions, golgg, monthly)
+    except (KeyError, ValueError):
+        return None
+
+
+def match_ledger_prediction(
+    ledger_row: Any,
+    predictions: pd.DataFrame,
+    probability_tolerance: float = 1e-3,
+) -> tuple[str, bool, bool] | None:
+    """Match by required ID or exact team identity, date, and probability."""
+    row = ledger_row
+    canonical_id = row.get("canonical_match_id") if "canonical_match_id" in row else None
+    selected = _normalize_team_name(row.get("team_selected"))
+    opponent = _normalize_team_name(row.get("opponent"))
+    target = pd.to_numeric(row.get("p_c0"), errors="coerce")
+    if not np.isfinite(target):
+        return None
+    if canonical_id is not None and pd.notna(canonical_id) and "canonical_match_id" in predictions:
+        matches = predictions[predictions["canonical_match_id"].astype(str) == str(canonical_id)].copy()
+    else:
+        if not selected or not opponent:
+            return None
+        row_date = pd.to_datetime(row.get("date"), errors="coerce", utc=True)
+        if pd.isna(row_date):
+            return None
+        pred_dates = pd.to_datetime(predictions["date"], errors="coerce", utc=True)
+        matches = predictions[(pred_dates - row_date).abs() <= pd.Timedelta(days=1)].copy()
+        sides = matches.apply(
+            lambda pred: (
+                _normalize_team_name(pred.get("team1_name")),
+                _normalize_team_name(pred.get("team2_name")),
+            ),
+            axis=1,
+        )
+        matches = matches.loc[sides.map(lambda pair: pair in ((selected, opponent), (opponent, selected)))]
+    candidates: list[tuple[float, str, bool]] = []
+    for _, pred in matches.iterrows():
+        gid = str(pred.get("golgg_match_id", ""))
+        for reverse in (False, True):
+            if selected:
+                team = pred.get("team2_name" if reverse else "team1_name")
+                if _normalize_team_name(team) != selected:
+                    continue
+            if _ledger_probability_matches(pred, reverse, float(target), probability_tolerance):
+                candidates.append((0.0, gid, reverse))
+                break
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        return "", False, True
+    _, gid, reverse = candidates[0]
+    return gid, reverse, False
 
 
 def build_mathematical_proof() -> dict[str, Any]:
@@ -259,44 +391,58 @@ def run_full_audit() -> dict[str, Any]:
     # =========================================================================
     # COHORT 2: 50-BET POLISH PRODUCTION OPPORTUNITY COHORT (12% TAX)
     # =========================================================================
-    print("\n--- Auditing Cohort 2: 50-Bet Polish Production Opportunity Cohort ---")
-    um_2026 = um_df.set_index("golgg_match_id").loc[p1["golgg_match_id"].astype(str)].reset_index()
-    p_c0_mon = um_2026["p_full"].to_numpy(dtype=np.float64)
+    ledger_predictions = build_ledger_prediction_frame_or_withheld(p1, golgg, um_df)
+    if ledger_predictions is None:
+        print("Withholding Cohort 2 ledger matching: prediction metadata/probability coverage is incomplete.")
+        ledger_predictions = p1.iloc[0:0].copy()
+        ledger_predictions["date"] = pd.Series(dtype="datetime64[ns]")
+        ledger_predictions["team1_name"] = pd.Series(dtype="object")
+        ledger_predictions["team2_name"] = pd.Series(dtype="object")
+        ledger_predictions["p_full"] = pd.Series(dtype="float64")
+
+    if ledger_predictions.empty:
+        p_c0_mon = np.full(len(p1), np.nan, dtype=np.float64)
+    else:
+        monthly_by_gid = ledger_predictions.set_index("golgg_match_id")["p_full"]
+        p_c0_mon = monthly_by_gid.reindex(p1["golgg_match_id"].astype(str)).to_numpy(dtype=np.float64)
     p_c0_full = p1["p_c0__full"].to_numpy(dtype=np.float64)
-    p1_dates = pd.to_datetime(p1["date"])
     gid_to_idx = {str(gid): i for i, gid in enumerate(p1["golgg_match_id"].values)}
 
-    ledger_to_golgg = {}
+    ledger_to_golgg: dict[int, tuple[str, bool]] = {}
+    unmatched_ledger_bets = 0
+    ambiguous_ledger_bets = 0
     for _, r in ledger_df.iterrows():
         bid = int(r["bet_id"])
-        dt = pd.to_datetime(str(r["date"])[:10])
-        target_p = float(r["p_c0"])
-        mask_dt = (p1_dates - dt).abs().dt.days <= 3
-        idxs = np.where(mask_dt)[0]
-        best = None
-        for idx in idxs:
-            for is_rev in (False, True):
-                val_m = (1.0 - p_c0_mon[idx]) if is_rev else p_c0_mon[idx]
-                val_s = (1.0 - p_c0_full[idx]) if is_rev else p_c0_full[idx]
-                diff = min(abs(val_m - target_p), abs(val_s - target_p))
-                if best is None or diff < best[0]:
-                    best = (diff, str(p1["golgg_match_id"].iloc[idx]), is_rev)
-        if best is not None:
-            ledger_to_golgg[bid] = (best[1], best[2])
+        match = match_ledger_prediction(r, ledger_predictions)
+        if match is None:
+            unmatched_ledger_bets += 1
+            continue
+        gid, is_rev, ambiguous = match
+        if ambiguous:
+            ambiguous_ledger_bets += 1
+            continue
+        if gid not in gid_to_idx:
+            unmatched_ledger_bets += 1
+            continue
+        ledger_to_golgg[bid] = (gid, is_rev)
 
-    l_c0_led = logit(ledger_df["p_c0"].to_numpy(dtype=float))
-    l_hyb_led = logit(ledger_df["p_hybrid"].to_numpy(dtype=float))
+    matched_ledger = ledger_df[ledger_df["bet_id"].astype(int).isin(ledger_to_golgg)].copy()
+    l_c0_led = logit(matched_ledger["p_c0"].to_numpy(dtype=float))
+    l_hyb_led = logit(matched_ledger["p_hybrid"].to_numpy(dtype=float))
     l_mkt_led = 2.0 * l_hyb_led - l_c0_led
     p_mkt_led = expit(l_mkt_led)
-    p_thesis_led = ledger_df["p_thesis"].to_numpy(dtype=float)
-    odds_led = ledger_df["odds_taken"].to_numpy(dtype=float)
-    won_led = ledger_df["won"].to_numpy(dtype=int)
+    p_thesis_led = matched_ledger["p_thesis"].to_numpy(dtype=float)
+    odds_led = matched_ledger["odds_taken"].to_numpy(dtype=float)
+    won_led = matched_ledger["won"].to_numpy(dtype=int)
 
-    cohort2_results: dict[str, Any] = {}
+    cohort2_results: dict[str, Any] = {
+        "unmatched_ledger_bets": unmatched_ledger_bets,
+        "ambiguous_ledger_bets": ambiguous_ledger_bets,
+    }
 
     for m_name, p_arr in models.items():
         p_m_list = []
-        for idx_row, r in ledger_df.iterrows():
+        for _, r in matched_ledger.iterrows():
             bid = int(r["bet_id"])
             gid, is_rev = ledger_to_golgg[bid]
             g_idx = gid_to_idx[gid]
@@ -317,7 +463,7 @@ def run_full_audit() -> dict[str, Any]:
         pass_dro = dro_ev > 0.0
 
         # Build DataFrame for bets passing DRO
-        df_sub = ledger_df.copy()
+        df_sub = matched_ledger.copy()
         df_sub["p_model"] = p_m_vec
         df_sub["p_hyb"] = p_hyb
         df_sub["q_mkt"] = p_mkt_led
@@ -455,8 +601,11 @@ def run_full_audit() -> dict[str, Any]:
     # COHORT 1: FULL 645-MATCH / 248,735-QUOTE POLISH SCANNER (T-48h..1h)
     # =========================================================================
     print("\n--- Auditing Cohort 1: Full 645-Match Polish Scanner ---")
+    required_quote_identity = {"raw_team_a", "raw_team_b"}
+    if missing := required_quote_identity.difference(quotes.columns):
+        raise ValueError(f"Cannot orient marginal-audit quote sides; missing identity columns: {sorted(missing)}")
     m_map = mappings[["canonical_match_id", "golgg_match_id"]].merge(
-        matches[["id", "winner_side", "start_time_normalized", "league", "team_a_name", "team_b_name"]],
+        matches[["id", "start_time_normalized", "league"]],
         left_on="canonical_match_id",
         right_on="id",
     )
@@ -464,28 +613,51 @@ def run_full_audit() -> dict[str, Any]:
 
     p1_sub_pol = p1[["golgg_match_id", "y", "p_c0_d_year_core__full", "p_c0_slim_year__full"]].copy()
     p1_sub_pol["golgg_match_id"] = p1_sub_pol["golgg_match_id"].astype(str)
+    golgg_identity = golgg[["match_id", "team1_name", "team2_name"]].copy()
+    golgg_identity["golgg_match_id"] = golgg_identity["match_id"].astype(str)
 
-    merged_matches = m_map.merge(p1_sub_pol, on="golgg_match_id")
-    merged_matches["a_is_pred_t1"] = (merged_matches["winner_side"] == "team_a") == (merged_matches["y"] == 1)
-
+    merged_matches = m_map.merge(p1_sub_pol, on="golgg_match_id").merge(
+        golgg_identity[["golgg_match_id", "team1_name", "team2_name"]],
+        on="golgg_match_id",
+    )
     q_m = quotes.merge(merged_matches, on="canonical_match_id")
+    q_m["a_is_pred_t1"] = q_m.apply(
+        lambda r: team_a_is_team1(
+            r["raw_team_a"], r["raw_team_b"], r["team1_name"], r["team2_name"]
+        ),
+        axis=1,
+    )
     start_dt = pd.to_datetime(q_m["start_time_normalized"], utc=True, format="mixed")
     scraped_dt = pd.to_datetime(q_m["scraped_at"], utc=True, format="mixed")
     q_m["lead_hours"] = (start_dt - scraped_dt).dt.total_seconds() / 3600.0
 
     q_window = q_m[(q_m["lead_hours"] >= 1.0) & (q_m["lead_hours"] <= 48.0)].copy()
-    q_window["scraped_dt"] = scraped_dt
+    q_window["scraped_dt"] = pd.to_datetime(q_window["scraped_at"], utc=True, format="mixed")
     q_window = q_window.sort_values(by=["scraped_dt"]).reset_index(drop=True)
-
-    inv_a = 1.0 / q_window["odds_a"].to_numpy(dtype=float)
-    inv_b = 1.0 / q_window["odds_b"].to_numpy(dtype=float)
-    overround = (inv_a + inv_b) - 1.0
-    psa = np.clip(inv_a - overround / 2.0, 1e-6, 1.0 - 1e-6)
-    psb = 1.0 - psa
-
-    q_window["p_shin_a"] = psa
-    q_window["p_shin_b"] = psb
-    q_window["p_039"] = q_window["golgg_match_id"].map(p039_lookup).to_numpy(dtype=float)
+    q_window["p_shin_a"] = np.nan
+    q_window["p_shin_b"] = np.nan
+    for index, quote in q_window.iterrows():
+        contemporaneous = q_window[
+            (q_window["canonical_match_id"] == quote["canonical_match_id"])
+            & (q_window["scraped_dt"] <= quote["scraped_dt"])
+        ]
+        consensus_a = leave_one_book_out_consensus(
+            contemporaneous, quote.get("bookmaker_id"), cutoff=quote["scraped_dt"]
+        )
+        if consensus_a is None:
+            continue
+        oriented_a = consensus_a if quote["a_is_pred_t1"] else 1.0 - consensus_a
+        q_window.at[index, "p_shin_a"] = oriented_a
+        q_window.at[index, "p_shin_b"] = 1.0 - oriented_a
+    unmatched_quotes = int(q_window["p_shin_a"].isna().sum())
+    q_window = q_window.dropna(subset=["p_shin_a"]).reset_index(drop=True)
+    psa = q_window["p_shin_a"].to_numpy(dtype=float)
+    psb = q_window["p_shin_b"].to_numpy(dtype=float)
+    q_window["raw_a_won"] = np.where(
+        q_window["a_is_pred_t1"],
+        q_window["y"].to_numpy(dtype=int) == 1,
+        q_window["y"].to_numpy(dtype=int) == 0,
+    ).astype(int)
 
     cohort1_match_results: dict[str, Any] = {}
     cohort1_quote_results: dict[str, Any] = {}
@@ -547,9 +719,9 @@ def run_full_audit() -> dict[str, Any]:
                 p_m = p_a[i]
                 p_h = p_hyb_a[i]
                 q_mkt_val = psa[i]
-                won = int(q_window["winner_side"].iloc[i] == "team_a")
-                t_sel = q_window["team_a_name"].iloc[i]
-                t_opp = q_window["team_b_name"].iloc[i]
+                won = int(q_window["raw_a_won"].iloc[i])
+                t_sel = q_window["raw_team_a"].iloc[i]
+                t_opp = q_window["raw_team_b"].iloc[i]
             else:
                 side = "b"
                 odds = ob[i]
@@ -560,9 +732,9 @@ def run_full_audit() -> dict[str, Any]:
                 p_m = p_b[i]
                 p_h = p_hyb_b[i]
                 q_mkt_val = psb[i]
-                won = int(q_window["winner_side"].iloc[i] == "team_b")
-                t_sel = q_window["team_b_name"].iloc[i]
-                t_opp = q_window["team_a_name"].iloc[i]
+                won = 1 - int(q_window["raw_a_won"].iloc[i])
+                t_sel = q_window["raw_team_b"].iloc[i]
+                t_opp = q_window["raw_team_a"].iloc[i]
 
             profit = 100.0 * (odds * 0.88 - 1.0) if won else -100.0
             seen_matches.add(mid)
@@ -611,11 +783,11 @@ def run_full_audit() -> dict[str, Any]:
                     p_m = p_a[i] if side == "a" else p_b[i]
                     p_h = p_hyb_a[i] if side == "a" else p_hyb_b[i]
                     q_mkt_v = psa[i] if side == "a" else psb[i]
-                    won = int(q_window["winner_side"].iloc[i] == ("team_a" if side == "a" else "team_b"))
+                    won = int(q_window["raw_a_won"].iloc[i]) if side == "a" else 1 - int(q_window["raw_a_won"].iloc[i])
                     profit = 100.0 * (odds * 0.88 - 1.0) if won else -100.0
 
-                    t_sel = q_window["team_a_name"].iloc[i] if side == "a" else q_window["team_b_name"].iloc[i]
-                    t_opp = q_window["team_b_name"].iloc[i] if side == "a" else q_window["team_a_name"].iloc[i]
+                    t_sel = q_window["raw_team_a"].iloc[i] if side == "a" else q_window["raw_team_b"].iloc[i]
+                    t_opp = q_window["raw_team_b"].iloc[i] if side == "a" else q_window["raw_team_a"].iloc[i]
 
                     quotes_passing.append({
                         "canonical_match_id": q_window["canonical_match_id"].iloc[i],
@@ -644,11 +816,11 @@ def run_full_audit() -> dict[str, Any]:
             ("gate_max_ev", "Max EV <= 25%", df_quotes["ev_net"] > 0.25),
             ("gate_min_ev", "Min EV >= 5%", df_quotes["ev_net"] < 0.05),
             ("gate_guard_b", "Guard B |dLogit| <= 0.85", df_quotes["gap"] > 0.85),
-            ("gate_exp039_veto", "EXP-039 Veto <= 0.10", ~df_quotes["veto"]),
         ]
         cohort1_quote_results[m_name] = analyze_gate_blocks(df_quotes, gate_specs_quotes)
 
     audit_results["cohorts"]["polish_scanner_645_matches"] = {
+        "unmatched_quote_rows_insufficient_fresh_books": unmatched_quotes,
         "chronological_match_bets": cohort1_match_results,
         "quote_level_opportunities": cohort1_quote_results,
     }

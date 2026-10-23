@@ -15,6 +15,7 @@ from betting_app.core.db import get_session
 from betting_app.core.matching import normalize_team_name
 from betting_app.services.canonical_match_service import canonical_team_key
 from betting_app.services import c0_inference, mapping_service
+from betting_app.core.models import C0_NATIVE
 
 
 @dataclass
@@ -692,7 +693,7 @@ SUPPORTED_BRACKETS = {
     "lcs_2026_championship": get_lcs_2026_championship_bracket,
 }
 
-TOURNAMENT_PROBABILITY_VERSION = "c0-native-2026-w32-e12-v1"
+TOURNAMENT_PROBABILITY_VERSION = C0_NATIVE.version
 
 
 class TournamentSimulator:

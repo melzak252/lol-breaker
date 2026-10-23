@@ -13,6 +13,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -299,6 +300,21 @@ def run_production_calibration(argv: list[str]) -> None:
 
 
 def main() -> None:
+    if sys.argv[1:2] == ["long-term-market"]:
+        from src.analysis.long_term_market_evaluation import main as long_term_market_main
+
+        long_term_market_main(sys.argv[2:])
+        return
+    if sys.argv[1:2] == ["current-policy"]:
+        from src.analysis.c0_policy_runner import main as current_policy_main
+
+        current_policy_main(sys.argv[2:])
+        return
+    if sys.argv[1:2] == ["model-region-factorial"]:
+        from src.analysis.c0_region_factorial import main as factorial_main
+
+        factorial_main(sys.argv[2:])
+        return
     if sys.argv[1:2] == ["c0-market-study"]:
         run_c0_market_study(sys.argv[2:])
         return

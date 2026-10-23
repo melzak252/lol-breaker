@@ -2,24 +2,44 @@
 
 Lokalna aplikacja do ręcznej bukmacherki/analityki LoL. Aplikacja **nie stawia zakładów automatycznie** — służy do zbierania kursów, mapowania drużyn, liczenia EV, zapisywania decyzji i późniejszej analizy bankrolla/CLV.
 
-> Stan lokalnego checkoutu po cutoverze 2026-10-05 i naprawach kontraktów 2026-10-06: model sportowy **Causal-C0**, hybryda **C0 + rynek**. To nie jest deklaracja wdrożenia na serwer. Obserwacje produkcyjne z 2026-09-26 i wcześniejsze procedury zachowano w archiwalnej części poniżej; nie opisują aktualnego modelu lokalnego.
+> Local checkout status after the 2026-10-23 serving-default change: **fresh20 C0 + regional input correction** is the local default, with a separate fresh20-plus-market shrinkage identity. This is a local selector/configuration change, not a deployment, restart, live acquisition, prediction refresh, user-database change, research-study adoption, promotion, or financial certification.
 
-## Aktualny kontrakt C0
+## Current C0 serving contract
 
-| Ścieżka | Nazwa | Dokładna wersja |
+| Path | Name | Exact version |
 |---|---|---|
-| Model sportowy | `Causal-C0` | `c0-native-2026-w32-e12-v1` |
-| Shrinkage model + rynek | `Hybrid-Operational-Market` | `c0-native-2026-w32-e12-v1-a0.50-t1.00` |
+| Sports model | `Causal-C0` | `c0-native-fresh20-2026-10-21-v1-regional-v1` |
+| Sports features | — | `native-c0-fresh20-history19-regional-v1` |
+| Market-shrinkage model | `Hybrid-Operational-Market` | `c0-native-fresh20-2026-10-21-v1-regional-v1-a0.50-t1.00` |
 
-- Rejestr i wspólny silnik: `betting_app/core/models/registry.py` oraz `engine.py`. Upcoming, ręczne **Predict**, scheduler, symulacje, bieżące selektory API i finansów korzystają z C0 albo osobnej hybrydy C0. Stare rekordy EXP081 nie są przemianowywane ani dopuszczane jako aktualna wersja.
-- Worker: `betting_app/services/c0_inference.py` / `c0_worker.py`; natywny adapter: `betting_app/core/models/native_c0.py`. Izolowany proces chroni API przed kolizją nazw archiwalnych modułów `src.models`.
-- To oryginalny zamrożony **control W32/E12** z `a0_data_focus_20260929_192443`: trzy checkpointy neuronowe, wspólne eksperci rating/MLP i kalibracja/mieszanki zależne od trybu. Nie roczny A0, challenger pojemnościowy ani adapter EXP081.
-- Wynik C0 jest już prawdopodobieństwem **całej serii** BO1/3/5. Nie wykonujemy drugiej projekcji BO. C0 nie udostępnia operacyjnych dolnych granic ani `epistemic_sigma_z`; brak takich danych nie jest naprawiany fikcyjną niepewnością.
-- Model sportowy nie używa kursów. Osobna hybryda przekształca zapisany C0 dokładnie raz: `sigmoid(0.50 * logit(p_C0) + 0.50 * logit(q_market))`, T=1.00. Analizy korzystające z już zapisanej hybrydy nie shrinkują jej ponownie.
-- Wymagane są prawdziwe identyfikatory pięciu różnych graczy na każdą stronę, rozłączne składy, obsługiwany BO i strefowe zegary decyzji/startu. Lokalny `golgg_teams.id` nie jest identyfikatorem źródłowym `team_id`.
-- Przy braku ID organizacji po którejkolwiek stronie i kompletnych składach używany jest jawny tryb `no_organization`, nie rating domyślny ani model zastępczy. Pozostałe tryby to `full` i `no_w20`. Cutoff przed 2026-01-01, braki wejścia, nieobsługiwany BO lub błąd artefaktu pozostają jawną odmową prognozy.
-- Symulacje używają natywnych prawdopodobieństw zwycięzcy serii. Nie wymyślają mapowej ani warunkowej dystrybucji wyniku do obsługi rozpoczętej serii; nieobsługiwany stan jest odrzucany. ENC wymaga dokładnych ID zawodników; błąd zapytania źródłowego jest błędem serwera, nie „niekompletnym składem”.
-- EXP081 nie ma aktywnego loadera, domyślnego artefaktu ani aliasu w aplikacji. Historyczne raporty, rekordy i jawnie wybrane narzędzia badawcze zachowano bez recertyfikacji. EXP-039 pozostaje osobnym, zamrożonym baseline'em.
+- The local C0 default loads the audited genuine fresh20 three-seed checkpoint bundle from `data/06_models/c0_distilled_verification/c0d_repro_20261021_01/fresh/20t`, its calibration, and the associated protocol at `data/05_model_input/c0_distilled_verification/c0d_repro_20261021_01/protocol.json`. Its 20 tokens are **19 observed history slots** (365/180/90-day aggregates and recent16) plus **one learned model token**. It does not use the old 16-history regional tensors or the C0-D-20T registry's former slope-surrogate behavior. Historical identities and artifacts remain unchanged.
+- Regional input correction remains enabled and is applied causally before the fresh20 model. The separate hybrid applies the saved fresh20-plus-regional prediction exactly once: `sigmoid(0.50 * logit(p_C0_fresh20_regional) + 0.50 * logit(q_market))`, T=1.00. The original frozen C0 weights remain separately identifiable as shared experts and are not represented as the fresh20 model's learned checkpoint.
+- `serving_raw_history_path` in `conf/base/c0_serving.json` selects the retained `data/04_feature/live_c0_cache/extended_matches.json` for model history and causal regional replay. Its latest effective release was **2026-10-18** in the offline check. The separate `raw_history_path`/SHA still identify the frozen canonical reference; they are not the runtime default. An explicit `C0_RAW_HISTORY_PATH` overrides the runtime source and is recorded in provenance. Missing runtime history fails rather than silently falling back to the September-only reference.
+- Regional state uses only whole series released strictly before the requested UTC cutoff day, never today's regional cache for an earlier forecast. Source hashes, cutoff-specific state, law and consumed release boundary accompany actual adjusted tensors; saved evidence replays without applying the correction twice, including after worker restart. Old 16-history/regional or unadjusted prediction/cache evidence is not valid fresh20 evidence.
+- `no_w20` removes W20 before computing the regional gate; `no_organization` also removes organization context. Excluded context therefore cannot indirectly alter player inputs. New organizations can use prior player-family support without shared organization history. Unidentifiable supported families remain explicit absence, not invented offsets; genuine empty-history cold starts remain neutral.
+- Worker: `betting_app/services/c0_inference.py` / `c0_worker.py`; native adapter: `betting_app/core/models/native_c0.py`; registry: `betting_app/core/models/registry.py`. These local defaults do not imply deployment. Old prediction records and sealed research artifacts remain unchanged.
+- C0 already returns the probability of the **whole BO1/3/5 series**. No second BO projection is applied. C0 does not provide operational lower bounds or `epistemic_sigma_z`; missing uncertainty is not replaced with fabricated uncertainty.
+- True IDs for five distinct players per side, disjoint rosters, supported BO, and valid decision/start clocks are required. Local `golgg_teams.id` is not the source `team_id`.
+- If either organization ID is absent but both rosters are complete, use the explicit `no_organization` mode, not a default rating or substitute model. Other modes are `full` and `no_w20`. Missing input, unsupported BO, or artifact errors remain explicit prediction refusals.
+- Simulations with explicit native inputs use series-winner probabilities. They do not invent map-level or conditional result distributions for started series. ENC requires exact player IDs; a source-query error is a server error, not an “incomplete roster.”
+- EXP081 has no active loader, default artifact, or application alias. Historical reports and records remain unchanged and are not recertified. EXP-039 remains a separate frozen baseline.
+
+### Local aggregate reserved-capital contract — 2026-10-23
+
+The local upcoming-inference path carries the running reserved balance when sizing each successive suggestion. With the corrected staking helper, `max_portfolio_exposure=0.25` is an **aggregate reserved-capital ceiling**, not merely a limit on each ticket as a share of free cash. For cash `C` and already reserved stakes `R`, the remaining limit is `max(0, 0.25 × (C + R) − R)`. Quarter-Kelly sizing uses free cash; the stake is also bounded by aggregate headroom, free cash, the existing minimum and maximum. Decimal wallet admission does not round a proposed stake upward past headroom. Over-cap recovered states block new admission until ordinary settlement brings headroom back; positions are not force-settled or liquidated.
+
+This is not a claim that every application call path is globally safe: the helper's optional `reserved_bankroll` defaults to zero, and legacy shadow/manual bet placement does not thereby become aware of other reservations. The upcoming caller passes its running reserved amount; callers that do not supply the actual reserved balance cannot enforce an aggregate cap across positions.
+
+The correction's historical, conditional four-wallet replay recorded no cap rejections on its 482-fixture cohort; it does not establish profitability or policy superiority. The research-only challenger disabled only the Tier-1 market-gap gate. **No production gate/default, serving model, source, or deployment changed.** The prospective shadow remains blocked and its registered T−1h admission, source requirements, deadline (2026-10-31T00:00:00Z), and 2026-11-01 start are unchanged. See the [measured aggregate-cap report](../reports/c0d20_aggregate_cap_shadow_20261023.md) and its linked immutable receipts for scope and limitations.
+
+### Kwalifikacja ofert po audycie 2026-10-21
+
+- Board, szczegóły meczu, lista sygnałów i alerty korzystają z `qualify_prediction_for_quote`. Każda oceniana oferta wymaga co najmniej **dwóch innych, różnych bukmacherów**; dwa źródła łącznie nie wystarczają. Obowiązują zegary i aktualność kontekstu kwotowań.
+- Hybryda jest przeliczana dla konkretnego bukmachera z jej dokładnie powiązanego `base_prob_a`, zapisanych parametrów i konsensusu bez ocenianego źródła. Nie uśredniamy ponownie zapisanej hybrydy i nie zastępujemy brakującej bazy najnowszą, niepowiązaną prognozą.
+- Najpierw kwalifikujemy wszystkie oferty, potem wybieramy najlepszą zakwalifikowaną. Limity EV, kursów, BO1, rozbieżności i DRO nie są wyłączane dla boardu. EV, konserwatywny score i Kelly odnoszą się do tej samej oferty; domyślny podatek pochodzi z konfiguracji aplikacji.
+- W lokalnym kontrakcie `BettingRecommendation` pole `raw_clv` zastąpiono przez **`current_market_edge`**: `odds × focal_consensus_probability − 1`. Jest to porównanie z bieżącym konsensusem, **nie CLV ani prognoza ceny zamknięcia**. Backend i klient migrują razem, bez starego aliasu.
+- Brak wykonanego porównania EXP-039 nie oznacza zgodności modeli; UI pokazuje „Nie oceniono”. Przekształcona dolna granica hybrydy nie dostaje deklaracji gwarancji konformalnej.
+- To poprawki kontraktów oprogramowania. Nie certyfikują publikacji wejść, niezależnych wyników przyszłych, jakości modelu ani rentowności.
 
 ### Historyczny benchmark proxy nie jest ścieżką native C0 — Plan11
 
@@ -79,9 +99,9 @@ PROTOCOL="data/05_model_input/c0_input_aligned/$RUN/protocol.json"
 
 Źródłem konfiguracji jest `conf/base/c0_serving.json`, nie nazwa najnowszego folderu:
 
-- Model: `data/06_models/a0_data_focus/a0_data_focus_20260929_192443` — `control/seed_{20260910,20260911,20260912}/model.joblib`, `control/calibration/model.joblib`, `shared/model.joblib`, ich receipty i `execution.json`.
-- Receipt zakończenia: `data/08_reporting/a0_data_focus/a0_data_focus_20260929_192443/completed.json`. Artefakty, receipty, zamrożone źródła treningowe i aktualna dozwolona ścieżka serving są weryfikowane osobno; nie przepisywać hashy, żeby ominąć błąd.
-- Domyślna historia: `data/artifacts/golgg-database-recovery-20260909/matches.json`, SHA-256 `991c23cdc67a119a6a2be6b04cb60018ab0f3eeec979f34871f8213f9d6899ca`. Obejmuje 41 915 serii; ostatnia data źródła/release to **2026-09-08**. To jawnie zamrożona historia, nie świeży feed.
+- Aktywne fresh20: `data/06_models/c0_distilled_verification/c0d_repro_20261021_01/fresh/20t` — trzy `seed_*/checkpoint_epoch16.pt`, `calibration.json` i `bundle_manifest.json`; protokół: `data/05_model_input/c0_distilled_verification/c0d_repro_20261021_01/protocol.json`. `fresh_candidate: "20t"` oraz ścisłe wersje weight/serving w konfiguracji wiążą tę ścieżkę; nie używać `C0-D-20T` slope-surrogate registry entry.
+- Oryginalne C0 shared expert artifacts zachowują wyłącznie historyczną rolę i provenance: `data/06_models/a0_data_focus/a0_data_focus_20260929_192443` — `control/seed_{20260910,20260911,20260912}/model.joblib`, `control/calibration/model.joblib`, `shared/model.joblib`, receipts i `execution.json`; completion receipt: `data/08_reporting/a0_data_focus/a0_data_focus_20260929_192443/completed.json`. Nie są fresh20 checkpointami i nie zostały nadpisane.
+- Runtime history: `serving_raw_history_path` wybiera retained `data/04_feature/live_c0_cache/extended_matches.json`, whose latest effective release was **2026-10-18** in the offline check. `raw_history_path`/SHA retain frozen canonical reference identity, not the runtime default. No silent fallback is allowed.
 - Research root musi zawierać `nonlinear-history-20260912`, `unified-ratings-20260911`, `a0-phase-walkforward-20260914` i `auxiliary-player-20260912`. Mapa korekt release: `a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/release_days.json`.
 - Root jest rozwiązywany przez `C0_RESEARCH_ROOT`, `ENSEMBLE_RESEARCH_ROOT`, `RESEARCH_ROOT`, następnie `data/research_root.txt`. Opcjonalne nadpisania: `C0_SERVING_CONFIG`, `C0_MODEL_ROOT`, `C0_RAW_HISTORY_PATH`, `C0_RELEASE_MAP_PATH`.
 - Jawny alternatywny plik historii jest walidowany i jego hash/proweniencja są zapisywane. Nie ma cichego fallbacku do `data/golgg_matches.json`. Aktualizacja tego cache lub przebudowa `ratings-v2`/W20 nie aktualizuje automatycznie wejścia C0.

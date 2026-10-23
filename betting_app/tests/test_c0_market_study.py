@@ -1,4 +1,6 @@
 """Consumer-level regressions for the separately versioned native study."""
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -86,6 +88,13 @@ def test_wrong_native_mode_and_calendar_rejected():
             validate_c0_protocol({**protocol,field:value})
 
 
+@pytest.mark.requires_artifacts(
+    Path(__file__).resolve().parents[2] / "data/08_reporting/a0_context_reliability/source_activation_20261004_01/matrix.json",
+    Path(__file__).resolve().parents[2] / "conf/base/c0_serving.json",
+    Path(__file__).resolve().parents[2] / "data/05_model_input/betting_ev_reliability/forward_protocol_20260930_234022/protocol.json",
+    Path(__file__).resolve().parents[2] / "data/05_model_input/betting_ev_reliability/forward_protocol_20260930_234022/source_contracts.json",
+    Path(__file__).resolve().parents[2] / "data/08_reporting/a0_data_focus/a0_data_focus_20260929_192443/completed.json",
+)
 def test_cli_synthetic_seals_and_zero_real_fits(tmp_path):
     from scripts.run_unified_betting_evaluation import run_c0_market_study
     import json

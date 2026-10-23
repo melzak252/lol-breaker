@@ -37,6 +37,8 @@ from betting_app.services.upcoming_inference_service import (
     generate_model_ev_signals,
     predict_all_upcoming,
 )
+from betting_app.core.config import load_config
+from betting_app.services.bankroll_service import wallet_bankroll
 from betting_app.services.bet_qualification_service import DEFAULT_BASE_MIN_EV
 
 DEFAULT_FEATURE_VERSION = get_active_model().feature_version
@@ -80,9 +82,22 @@ def main() -> None:
     parser.add_argument(
         "--thesis-hybrid-temperature", type=float, default=THESIS_HYBRID_TEMPERATURE
     )
-    parser.add_argument("--tax-rate", type=float, default=0.12)
+    parser.add_argument(
+        "--tax-rate",
+        type=float,
+        default=load_config().tax_rate,
+        help="Betting tax as a fraction (default: configured tax rate).",
+    )
     parser.add_argument("--min-ev", type=float, default=DEFAULT_BASE_MIN_EV)
-    parser.add_argument("--bankroll", type=float, default=100.0)
+    parser.add_argument(
+        "--bankroll",
+        type=float,
+        default=None,
+        help=(
+            "Total PLN bankroll for Kelly sizing (cash plus open stakes). Default: the real "
+            "bookmaker wallet balance; with no wallet, no stake is suggested."
+        ),
+    )
     parser.add_argument("--include-past", action="store_true")
     parser.add_argument(
         "--include-partial",
@@ -178,12 +193,13 @@ def main() -> None:
         ev_model_name = THESIS_HYBRID_MODEL_NAME
         ev_model_version = thesis_hybrid_version
 
+    bankroll = resolve_bankroll(args.bankroll)
     signals, stats = generate_model_ev_signals(
         model_name=ev_model_name,
         model_version=ev_model_version,
         tax_rate=args.tax_rate,
         min_ev=args.min_ev,
-        bankroll=args.bankroll,
+        bankroll=bankroll,
         check_confirmed_lineups=True,
         return_stats=True,
     )
@@ -224,6 +240,26 @@ def main() -> None:
             alert_res = scan_and_dispatch_ev_alerts(session)
             print(f"Alerts summary: {alert_res.get('message')}")
     print_readiness_counts()
+
+
+def resolve_bankroll(explicit: float | None) -> float:
+    """Bankroll for Kelly sizing: explicit override, else the real wallet, else 0.
+
+    Zero makes ``fractional_kelly_stake`` return no stake (fail closed); no placeholder
+    bankroll is ever invented. The wallet total is Decimal until the float Kelly boundary.
+    """
+    if explicit is not None:
+        print(f"Bankroll (explicit --bankroll): {explicit:.2f} PLN")
+        return float(explicit)
+    wallet = wallet_bankroll()
+    if wallet is None:
+        print("Bankroll: no active PLN wallet found; stake suggestions are 0 (fail closed).")
+        return 0.0
+    print(
+        f"Bankroll (wallet): cash={wallet.cash:.2f} PLN + open stakes={wallet.open_stakes:.2f} PLN "
+        f"= {wallet.total:.2f} PLN"
+    )
+    return float(wallet.total)
 
 
 def print_readiness_counts() -> None:

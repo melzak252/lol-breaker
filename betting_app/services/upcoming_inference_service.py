@@ -23,7 +23,7 @@ from openskill.models import PlackettLuce, ThurstoneMostellerFull
 from trueskill import TrueSkill
 
 from betting_app.core.db import get_session, query_df, transaction
-from betting_app.core.ev import expected_value, fair_market_probabilities
+from betting_app.core.ev import expected_value
 from betting_app.core.matching import normalize_team_name
 from betting_app.services.current_roster_service import (
     clean_player_name, load_current_roster, lock_current_roster_teams, upsert_current_roster,
@@ -36,12 +36,14 @@ from betting_app.scrapers.lineup_scraper import (
     normalize_player_id,
 )
 from betting_app.services.bet_qualification_service import (
-    is_bet_eligible,
     DEFAULT_BASE_MIN_EV,
     DEFAULT_WASSERSTEIN_EPSILON,
-    qualification_tier,
+    SIGNAL_GATE_KWARGS,
+    is_bet_eligible,
+    is_market_hybrid_prediction,
     model_requires_uncertainty,
     prediction_safety_diagnostics,
+    qualification_tier,
 )
 from betting_app.services.canonical_match_service import (
     align_snapshot_odds,
@@ -64,11 +66,18 @@ from betting_app.core.models import (
 )
 from betting_app.core.models.engine import apply_temperature_scaling
 from betting_app.services.prematch_quote_service import (
-    load_prematch_quotes, serialize_market_context, prediction_time_is_actionable,
-    stored_market_context_is_current, latest_predictions, parse_aware_utc,
+    blend_hybrid_for_consensus,
     hybrid_prediction_contract_is_current,
+    latest_predictions,
+    load_prematch_quotes,
+    parse_aware_utc,
+    prediction_time_is_actionable,
+    quotes_consensus,
+    serialize_focal_consensus,
+    serialize_market_context,
+    stored_market_context_is_current,
 )
-from betting_app.core.models.registry import get_hybrid_spec
+from betting_app.core.models.registry import get_hybrid_spec, get_thesis_model
 from src.models.competition_tiers import (
     CompetitionScope,
     CompetitionTier,
@@ -410,6 +419,8 @@ def _load_native_roster_overrides(
     session: Any = None,
     lock: bool = False,
 ) -> dict[str, dict[str, Any]]:
+    if match_id <= 0:
+        return {}
     rows = query_df(
         """
         SELECT team_side, roster_json, updated_at FROM match_roster_overrides
@@ -2282,7 +2293,7 @@ def fetch_latest_pre_match_market_prob(
     *,
     as_of: datetime | None = None,
 ) -> float | None:
-    """Return the shared admitted same-book proportional consensus."""
+    """Return the shared fresh multi-book multiplicative consensus."""
     if canonical_match_id is None:
         return None
     return load_prematch_quotes(
@@ -2358,6 +2369,7 @@ def evaluate_bayesian_market_hybrid(
         "base_model_name": sports.model_name,
         "base_model_version": sports.model_version,
         "p_sports": sports.prob_a,
+        "base_prob_a": sports.prob_a,
         "p_market_novig": market,
         "alpha": hybrid.alpha,
         "alpha_semantics": "sports_model_weight",
@@ -2369,7 +2381,11 @@ def evaluate_bayesian_market_hybrid(
             context, model_name=spec.name, model_version=spec.version,
             base_model_name=base_spec.name, base_model_version=base_spec.version,
         ) if context is not None else None,
-        "market_unavailable_reason": "market_missing" if market is None else None,
+        "market_unavailable_reason": (
+            None if market is not None
+            else "market_missing" if context is None or not context.quotes
+            else next((r.reason for r in reversed(context.rejections)), "market_missing")
+        ),
         "side_symmetric": sports.diagnostics.get("side_symmetric", False),
         "uncertainty_required": base_spec.has_uncertainty,
         "epistemic_sigma_z": sports.epistemic_sigma_z,
@@ -2515,16 +2531,24 @@ def generate_hybrid_predictions(
         list(dict.fromkeys(int(r["canonical_match_id"]) for r in predictions)), decision_at=market_cutoff,
     )
     results: list[dict[str, Any]] = []
+    withheld: list[dict[str, Any]] = []
     with transaction() as connection:
         for first in predictions:
             canonical_match_id = int(first["canonical_match_id"])
             context = contexts[canonical_match_id]
-            if context.prob_a is None or not prediction_time_is_actionable(
+            if not prediction_time_is_actionable(
                 first,decision_at=market_cutoff,start_at=context.start_at,
                 model_name=base_model_name,model_version=base_model_version,
             )[0]:
                 continue
-            market_probs = [(1/q.odds_a)/(1/q.odds_a+1/q.odds_b) for q in context.quotes]
+            if context.prob_a is None:
+                # Fewer than MIN_CONSENSUS_BOOKS distinct fresh books: no consensus, so no
+                # hybrid. Never shrink toward the single quote that might be bet.
+                reason = next((r.reason for r in reversed(context.rejections)), "market_consensus_unavailable")
+                withheld.append({"canonical_match_id": canonical_match_id, "reason": reason, "book_count": context.book_count})
+                logger.info("Hybrid prediction withheld for match %s: %s (%s fresh books)", canonical_match_id, reason, context.book_count)
+                continue
+            market_prob = context.prob_a
             try:
                 model_prob = float(first["model_prob_a"])
                 base_diagnostics = prediction_safety_diagnostics(
@@ -2556,7 +2580,7 @@ def generate_hybrid_predictions(
                 except (TypeError, ValueError):
                     effective_cutoff = market_cutoff_at
             model_t = apply_temperature_probability(model_prob, temperature)
-            market_prob = sum(market_probs) / len(market_probs)
+            # context.prob_a is the shared multiplicative consensus over >=2 distinct fresh books.
             hybrid_prob = PredictionEngine.blend_with_market(
                 model_prob, market_prob, hybrid_spec
             )
@@ -2584,9 +2608,13 @@ def generate_hybrid_predictions(
                 "market_cutoff_at": market_cutoff_at,
                 "alpha_semantics": "sports_model_weight",
                 "model_prob_a": model_prob,
+                # C0 (sports-only) probability for side A, before temperature/market blending.
+                # The hybrid p is stored separately in hybrid_prob_a / the prediction's prob_a.
+                "base_prob_a": model_prob,
+                "hybrid_prob_a": hybrid_prob,
                 "model_prob_a_temperature": model_t,
                 "market_prob_a_avg_no_vig": market_prob,
-                "bookmakers_used": len(market_probs),
+                "bookmakers_used": context.book_count,
                 "formula": formula_name,
                 "uncertainty_required": base_diagnostics["uncertainty_required"],
                 "uncertainty_basis": base_diagnostics["uncertainty_basis"],
@@ -2659,6 +2687,7 @@ def generate_hybrid_predictions(
                     "diagnostics": diagnostics,
                 }
             )
+    setattr(generate_hybrid_predictions, "last_withheld", withheld)
     return results
 
 
@@ -2721,17 +2750,17 @@ def generate_model_ev_signals(
     tax_rate: float = 0.12,
     min_ev: float = DEFAULT_BASE_MIN_EV,
     wasserstein_epsilon: float | None = DEFAULT_WASSERSTEIN_EPSILON,
-    bankroll: float = 100.0,
+    bankroll: float = 0.0,
     reserved_bankroll: float | None = None,
     check_confirmed_lineups: bool = False,
     lineup_current_time: Any = None,
     return_stats: bool = False,
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Generate EV rows for latest predictions and latest odds per bookmaker.
+    """Generate EV rows for latest predictions and fresh focal-book quotes.
 
-    Calculates multi-bookmaker consensus fair market probabilities, identifies
-    bookmaker market edges/outliers, and sizes stakes taking into account currently
-    open bets and portfolio risk limits.
+    Each candidate uses the multiplicative leave-one-out consensus from at
+    least two other fresh bookmakers. The same focal-excluded probability feeds
+    the market gates and the persisted signal context.
     """
     if check_confirmed_lineups:
         upcoming_matches = load_canonical_matches(include_past=False)
@@ -2774,14 +2803,23 @@ def generate_model_ev_signals(
     contexts = load_prematch_quotes(cm_ids,decision_at=evaluated_at)
     generated: list[dict[str, Any]] = []
     parsed_rows = []
-    consensus_market_p_a = {}
+    withheld_markets: list[dict[str, Any]] = []
     for prediction in predictions:
         mid = int(prediction["canonical_match_id"])
         context = contexts[mid]
-        if context.prob_a is None or not prediction_time_is_actionable(
+        actionable, _ = prediction_time_is_actionable(
             prediction,decision_at=evaluated_at,start_at=context.start_at,
             model_name=model_name,model_version=model_version,
-        )[0]:
+        )
+        if not actionable:
+            continue
+        if context.prob_a is None:
+            reason = next((r.reason for r in reversed(context.rejections)), "market_consensus_unavailable")
+            withheld_markets.append({
+                "canonical_match_id": mid,
+                "reason": reason,
+                "book_count": context.book_count,
+            })
             continue
         diagnostic = prediction.get("diagnostics_json")
         try:
@@ -2790,8 +2828,9 @@ def generate_model_ev_signals(
             continue
         if not isinstance(diagnostic,dict):
             continue
+        is_hybrid = is_market_hybrid_prediction(model_name, diagnostic)
         forecast_context = diagnostic.get("market_context")
-        if diagnostic.get("base_model_name") or diagnostic.get("market_features_used") or str(model_name).startswith("Hybrid"):
+        if is_hybrid:
             if not hybrid_prediction_contract_is_current(prediction)[0]:
                 continue
             if not forecast_context:
@@ -2802,69 +2841,94 @@ def generate_model_ev_signals(
             at_forecast = load_prematch_quotes([mid],decision_at=forecast_at)[mid]
             if not stored_market_context_is_current(forecast_context,evaluation_context=at_forecast,current_context=context)[0]:
                 continue
-        consensus_market_p_a[mid] = context.prob_a
         for quote in context.quotes:
+            focal = quotes_consensus(context.quotes, exclude_bookmaker_id=quote.bookmaker_id)
+            if focal.prob_a is None:
+                withheld_markets.append({
+                    "canonical_match_id": mid,
+                    "bookmaker_id": quote.bookmaker_id,
+                    "reason": focal.reason or "market_consensus_unavailable",
+                    "book_count": focal.book_count,
+                })
+                continue
+            if is_hybrid:
+                probability_view, reason = blend_hybrid_for_consensus(diagnostic, focal.prob_a)
+                if probability_view is None:
+                    withheld_markets.append({
+                        "canonical_match_id": mid,
+                        "bookmaker_id": quote.bookmaker_id,
+                        "reason": reason or "hybrid_probability_unavailable",
+                        "book_count": focal.book_count,
+                    })
+                    continue
+            else:
+                probability_view = {
+                    "prob_a": float(prediction["prob_a"]),
+                    "p_low_a": diagnostic.get("p_low_a"),
+                    "p_low_b": diagnostic.get("p_low_b"),
+                }
             row = dict(prediction, odds_snapshot_id=quote.odds_snapshot_id,bookmaker_id=quote.bookmaker_id,
                 bookmaker=quote.bookmaker,offer_url=quote.offer_url,scraped_at=quote.scraped_at)
-            ma,mb = fair_market_probabilities(quote.odds_a,quote.odds_b)
-            parsed_rows.append(dict(row=row,odds_a=quote.odds_a,odds_b=quote.odds_b,single_market_a=ma,single_market_b=mb))
-    opening_market_probs: dict[int, list[float]] = {}
-    if cm_ids:
-        placeholders = ",".join("?" for _ in cm_ids)
-        historical = query_df(
-            f"SELECT * FROM odds_snapshots WHERE market_type='match_winner' AND canonical_match_id IN ({placeholders})",
-            tuple(cm_ids),
-        ).to_dict("records")
-        earliest = {}
-        blocked = set()
-        for observed in historical:
-            key = (int(observed["canonical_match_id"]),int(observed["bookmaker_id"]))
-            clock = parse_aware_utc(observed.get("scraped_at"))
-            if clock is None:
-                blocked.add(key)
-                continue
-            if clock > evaluated_at:
-                continue
-            rank = (clock,int(observed["id"]))
-            if key not in earliest or rank < earliest[key][0]:
-                earliest[key] = (rank,observed)
-        for key,(rank,observed) in earliest.items():
-            context = contexts[key[0]]
-            if key in blocked or not context.start_at or rank[0] >= context.start_at or observed.get("is_live") != 0:
-                continue
-            aligned = align_snapshot_odds(
-                context.team_a_name,context.team_b_name,
-                str(observed.get("raw_team_a") or ""),str(observed.get("raw_team_b") or ""),
-                observed.get("odds_a"),observed.get("odds_b"),
-                league=context.league,source_system="bookmaker",match_date=context.start_at.date(),
-            )
-            if aligned is not None:
-                opening_market_probs.setdefault(key[0],[]).append(fair_market_probabilities(*aligned)[0])
+            parsed_rows.append({
+                "row": row,
+                "odds_a": quote.odds_a,
+                "odds_b": quote.odds_b,
+                "focal_consensus": focal,
+                "prob_a": probability_view["prob_a"],
+                "p_low_a": probability_view["p_low_a"],
+                "p_low_b": probability_view["p_low_b"],
+            })
 
-    consensus_open_market_p_a: dict[int, float] = {
-        cm_id: sum(probs) / len(probs)
-        for cm_id, probs in opening_market_probs.items()
-        if probs
+    thesis_model = get_thesis_model()
+    thesis_probability_by_match: dict[int, dict[str, Any]] = {
+        mid: {"status": "not_evaluated", "reason": "exp039_prediction_missing"}
+        for mid in cm_ids
     }
-    thesis_prob_a_by_match: dict[int, float] = {}
     if cm_ids:
         try:
             placeholders = ",".join("?" for _ in cm_ids)
             thesis_rows = query_df(
-                f"""SELECT canonical_match_id, prob_a, predicted_at, id
+                f"""SELECT *
                 FROM canonical_predictions
-                WHERE prediction_status='active'
-                  AND model_name='Sym-Cal LR-ElasticNet-W20-Binomial'
+                WHERE model_name=? AND model_version=?
                   AND canonical_match_id IN ({placeholders})""",
-                tuple(cm_ids),
+                (thesis_model.name, thesis_model.version, *cm_ids),
             ).to_dict("records")
-            for t_row in latest_predictions(thesis_rows):
-                t_mid = int(t_row["canonical_match_id"])
-                t_pa = none_or_float(t_row.get("prob_a"))
-                if t_pa is not None and 0.0 < t_pa < 1.0:
-                    thesis_prob_a_by_match[t_mid] = t_pa
+            for thesis_row in latest_predictions(thesis_rows):
+                thesis_mid = int(thesis_row["canonical_match_id"])
+                valid, reason = prediction_time_is_actionable(
+                    thesis_row,
+                    decision_at=evaluated_at,
+                    start_at=contexts[thesis_mid].start_at,
+                    model_name=thesis_model.name,
+                    model_version=thesis_model.version,
+                )
+                if not valid:
+                    thesis_probability_by_match[thesis_mid] = {
+                        "status": "not_evaluated",
+                        "reason": reason or "exp039_prediction_not_actionable",
+                    }
+                    continue
+                thesis_prob = none_or_float(thesis_row.get("prob_a"))
+                if thesis_prob is None or not 0.0 < thesis_prob < 1.0:
+                    thesis_probability_by_match[thesis_mid] = {
+                        "status": "not_evaluated",
+                        "reason": "exp039_probability_invalid",
+                    }
+                    continue
+                thesis_probability_by_match[thesis_mid] = {
+                    "status": "fresh",
+                    "prob_a": thesis_prob,
+                    "prediction_id": int(thesis_row["id"]),
+                    "predicted_at": thesis_row.get("predicted_at"),
+                    "data_cutoff_at": thesis_row.get("data_cutoff_at"),
+                }
         except Exception:
-            thesis_prob_a_by_match = {}
+            logger.exception("Unable to load fresh EXP-039 predictions for signal veto")
+            thesis_probability_by_match = {
+                mid: {"status": "not_evaluated", "reason": "exp039_lookup_failed"}
+                for mid in cm_ids
+            }
 
     stats: dict[str, Any] = {
         "total_fixtures_evaluated": len(cm_ids),
@@ -2874,6 +2938,8 @@ def generate_model_ev_signals(
         "total_quarantined": 0,
         "quarantined_breakdown": Counter(),
         "disqualified_breakdown": Counter(),
+        "withheld_markets": withheld_markets,
+        "exp039_veto": Counter(),
     }
 
     # 2. Collect candidate signals across both sides
@@ -2881,17 +2947,17 @@ def generate_model_ev_signals(
     for item in parsed_rows:
         row = item["row"]
         cm_id = int(row["canonical_match_id"])
-        cons_a = consensus_market_p_a.get(cm_id, item["single_market_a"])
+        focal_consensus = item["focal_consensus"]
+        cons_a = focal_consensus.prob_a
         cons_b = 1.0 - cons_a
-        open_a = consensus_open_market_p_a.get(cm_id, cons_a)
-        open_b = 1.0 - open_a
+        # Both active market gates use the same fresh, focal-excluded consensus;
+        # historical opening prices are not fresh decision-time evidence.
+        open_a, open_b = cons_a, cons_b
 
-        # Extract tier, best_of, and rating disagreement for safety gating
         tier_str = qualification_tier(
             row.get("league"), row.get("start_time_normalized")
         )
         effective_best_of = row.get("best_of")
-
         try:
             diag_data = prediction_safety_diagnostics(
                 row.get("diagnostics_json"),
@@ -2902,29 +2968,59 @@ def generate_model_ev_signals(
         except (TypeError, ValueError) as exc:
             logger.warning("Skipping EV prediction %s: %s", row["prediction_id"], exc)
             continue
-        disag = diag_data.get("rating_disagreement")
-        if disag is None and cm_id in thesis_prob_a_by_match:
-            base_pa = none_or_float(diag_data.get("base_prob_a"))
-            if base_pa is None or not 0.0 < base_pa < 1.0:
-                base_pa = float(row["prob_a"])
-            disag = abs(base_pa - thesis_prob_a_by_match[cm_id])
+        is_hybrid = is_market_hybrid_prediction(model_name, diag_data)
+        base_prob_a = none_or_float(diag_data.get("base_prob_a"))
+        if not is_hybrid and (base_prob_a is None or not 0.0 < base_prob_a < 1.0):
+            base_prob_a = float(row["prob_a"])
+        if base_prob_a is not None and not 0.0 < base_prob_a < 1.0:
+            base_prob_a = None
+        disagreement = diag_data.get("rating_disagreement")
+        exp039 = thesis_probability_by_match.get(
+            cm_id, {"status": "not_evaluated", "reason": "exp039_prediction_missing"}
+        )
+        if exp039.get("status") == "fresh" and base_prob_a is not None:
+            exp039_delta = abs(base_prob_a - exp039["prob_a"])
+            exp039_gate = {
+                "status": "pass" if exp039_delta <= SIGNAL_GATE_KWARGS["max_rating_disagreement"] else "fail",
+                "source": "fresh_exp039_prediction",
+                "base_prob_a": base_prob_a,
+                "exp039_prob_a": exp039["prob_a"],
+                "max_difference": SIGNAL_GATE_KWARGS["max_rating_disagreement"],
+                "prediction_id": exp039["prediction_id"],
+                "predicted_at": exp039["predicted_at"],
+                "data_cutoff_at": exp039["data_cutoff_at"],
+            }
+        else:
+            exp039_gate = {
+                "status": "not_evaluated",
+                "reason": (
+                    "hybrid_base_probability_missing"
+                    if is_hybrid and base_prob_a is None
+                    else exp039.get("reason", "exp039_prediction_missing")
+                ),
+                "max_difference": SIGNAL_GATE_KWARGS["max_rating_disagreement"],
+            }
         if effective_best_of is None:
             effective_best_of = diag_data.get("best_of")
 
         candidates = [
-            ("a", float(row["prob_a"]), item["odds_a"], cons_a, open_a),
-            ("b", float(row["prob_b"]), item["odds_b"], cons_b, open_b),
+            ("a", float(item["prob_a"]), item["odds_a"], cons_a, open_a),
+            ("b", 1.0 - float(item["prob_a"]), item["odds_b"], cons_b, open_b),
         ]
         for side, prob, odds, cons_prob, open_prob in candidates:
             stats["candidate_sides_evaluated"] += 1
-            conservative_prob = diag_data.get(f"p_low_{side}")
+            stats["exp039_veto"][exp039_gate["status"]] += 1
+            conservative_prob = item[f"p_low_{side}"]
+            base_prob_side = (
+                base_prob_a if side == "a" else 1.0 - base_prob_a
+            ) if base_prob_a is not None else None
             eligible, reason, diag_res = is_bet_eligible(
                 prob_model=prob,
                 odds=odds,
                 prob_market_novig=open_prob,
                 tax_rate=tax_rate,
                 min_ev_net=min_ev,
-                rating_disagreement=disag,
+                rating_disagreement=disagreement,
                 competition_tier=tier_str,
                 prob_conservative=conservative_prob,
                 uncertainty_required=diag_data["uncertainty_required"],
@@ -2932,22 +3028,41 @@ def generate_model_ev_signals(
                 uncertainty_reason=diag_data["uncertainty_reason"],
                 best_of=int(effective_best_of) if effective_best_of else None,
                 prob_market_close_novig=cons_prob,
-                max_ev_net=0.25,
-                max_rating_disagreement=0.10,
-                universal_rating_guard=True,
-                max_odds=4.00,
+                prob_base=base_prob_side,
+                base_prob_required=is_hybrid,
+                **SIGNAL_GATE_KWARGS,
                 wasserstein_epsilon=wasserstein_epsilon,
             )
+            if eligible and exp039_gate["status"] == "fail":
+                eligible, reason = False, "exp039_disagreement"
             if not eligible:
                 stats["disqualified_breakdown"][reason] += 1
-                if diag_res.get("quarantine"):
-                    q_reason = diag_res.get("quarantine_reason", reason)
+                if diag_res.get("quarantine") or reason == "exp039_disagreement":
+                    q_reason = (
+                        "exp039_disagreement"
+                        if reason == "exp039_disagreement"
+                        else diag_res.get("quarantine_reason", reason)
+                    )
                     stats["quarantined_breakdown"][q_reason] += 1
                     stats["total_quarantined"] += 1
                 continue
             stats["value_bets_qualified"] += 1
             ev = expected_value(diag_res["prob_for_ev"], odds, tax_rate)
             market_edge = (odds * cons_prob) - 1.0
+            gates = {
+                "min_ev_net": {
+                    "status": "pass",
+                    "threshold": min_ev,
+                    "effective_threshold": diag_res["effective_min_ev"],
+                    "actual": ev,
+                },
+                "max_ev_net": {
+                    "status": "pass",
+                    "threshold": SIGNAL_GATE_KWARGS["max_ev_net"],
+                    "actual": ev,
+                },
+                "exp039_veto": exp039_gate,
+            }
             candidate_signals.append(
                 {
                     "row": row,
@@ -2960,6 +3075,8 @@ def generate_model_ev_signals(
                     "uncertainty_reason": diag_res["uncertainty_reason"],
                     "competition_tier": tier_str,
                     "market_prob": cons_prob,
+                    "focal_consensus": focal_consensus,
+                    "gates": gates,
                     "ev": ev,
                     "market_edge": market_edge,
                     "outlier_ratio": odds * cons_prob,
@@ -2990,6 +3107,13 @@ def generate_model_ev_signals(
             cm_id = int(row["canonical_match_id"])
             context = contexts[cm_id]
             signal_context = serialize_market_context(context,model_name=model_name,model_version=model_version)
+            signal_context["focal_consensus"] = serialize_focal_consensus(sig["focal_consensus"])
+            signal_context["gates"] = sig["gates"]
+            signal_context["gate_config"] = {
+                "min_ev_net": min_ev,
+                "max_ev_net": SIGNAL_GATE_KWARGS["max_ev_net"],
+                "exp039_max_difference": SIGNAL_GATE_KWARGS["max_rating_disagreement"],
+            }
             signal_context["logit_disagreement"] = sig.get("logit_disagreement")
             current = load_prematch_quotes([cm_id],decision_at=datetime.now(UTC),session=connection._session)[cm_id]
             if not stored_market_context_is_current(

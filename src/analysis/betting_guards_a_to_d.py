@@ -64,13 +64,10 @@ def devig_power(odds_a: float, odds_b: float) -> tuple[float, float]:
 
 
 def devig_shin(odds_a: float, odds_b: float) -> tuple[float, float]:
-    """Shin (1992) structural model with 2-way closed-form and general bisection.
+    """Two-outcome Shin: positive overround has the exact additive solution.
 
-    Note on Python library bug:
-    In Jullien & Salanie (1994), the fixed point iteration divides by (n - 2).
-    For n = 2 outcomes, n - 2 = 0, causing division by zero!
-    For 2-outcome markets, Shin's insider trading z is algebraically equivalent to
-    the additive margin split: z = S - 1, and pi_i = q_i - (S - 1)/2.
+    Nonpositive overround, within the existing numerical tolerance, retains
+    proportional normalization rather than inventing a negative insider share.
     """
     if odds_a <= 1.0 or odds_b <= 1.0 or not math.isfinite(odds_a) or not math.isfinite(odds_b):
         raise ValueError(f"Odds must be > 1.0 and finite: {odds_a}, {odds_b}")
@@ -80,15 +77,9 @@ def devig_shin(odds_a: float, odds_b: float) -> tuple[float, float]:
     if s <= 1.0000000001:
         return qa / s, qb / s
         
-    # Analytical solution for n = 2:
-    z = s - 1.0
-    denom = 2.0 * (1.0 - z)
-    if denom <= 1e-12:
-        return qa / s, qb / s
-    pa = (math.sqrt(z * z + 4.0 * (1.0 - z) * (qa * qa / s)) - z) / denom
-    pb = (math.sqrt(z * z + 4.0 * (1.0 - z) * (qb * qb / s)) - z) / denom
-    tot = pa + pb
-    return pa / tot, pb / tot
+    # Subtracting the two Shin equations gives p_a - p_b = q_a - q_b.
+    pa = (1.0 + qa - qb) / 2.0
+    return pa, 1.0 - pa
 
 
 # =============================================================================

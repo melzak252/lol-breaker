@@ -15,8 +15,13 @@ from betting_app.models.alerts import AlertConfig, ValueAlertLog
 from betting_app.api.deps import query_df, query_one
 from betting_app.core.config import load_config
 from betting_app.core.models import get_active_hybrid
-from betting_app.services.prematch_quote_service import load_prematch_quotes, parse_aware_utc, signal_is_actionable
-from betting_app.services.bet_qualification_service import qualify_prediction_sides
+from betting_app.services.prematch_quote_service import (
+    load_prematch_quotes,
+    parse_aware_utc,
+    qualify_prediction_for_quote,
+    signal_is_actionable,
+)
+from betting_app.services.bankroll_service import wallet_bankroll
 from betting_app.services.market_service import expected_value
 
 ACTIVE_HYBRID = get_active_hybrid()
@@ -27,6 +32,25 @@ DEFAULT_MIN_EV = 0.05
 DEFAULT_MIN_ODDS = 1.25
 DEFAULT_MAX_ODDS = 12.0
 DEFAULT_COOLDOWN_HOURS = 6.0
+STAKE_CURRENCY = "PLN"
+
+
+def _tax_label(signal: Dict[str, Any]) -> str:
+    """Tax percent text from the signal's configured tax fraction (never hard-coded)."""
+    tax_rate = signal.get("tax_rate")
+    if tax_rate is None:
+        tax_rate = load_config().tax_rate
+    return f"{float(tax_rate) * 100:g}%"
+
+
+def _stake_text(signal: Dict[str, Any]) -> str:
+    """Stake as a PLN amount, plus percent of the wallet cash when that balance is known."""
+    stake = float(signal.get("suggested_stake") or 0.0)
+    text_value = f"{stake:.2f} {STAKE_CURRENCY}"
+    bankroll = signal.get("bankroll")
+    if bankroll is not None and float(bankroll) > 0:
+        text_value += f" ({stake / float(bankroll) * 100:.1f}% salda portfela)"
+    return text_value
 
 
 def get_or_create_alert_config(db: Session) -> AlertConfig:
@@ -108,7 +132,6 @@ def build_discord_embed(signal: Dict[str, Any]) -> Dict[str, Any]:
     ev = float(signal.get("ev") or 0.0)
     model_prob = float(signal.get("model_prob") or 0.0)
     market_prob = float(signal.get("market_prob") or 0.0)
-    stake_pct = float(signal.get("suggested_stake") or 0.0)
     match_start = signal.get("match_start_at") or "Wkrótce"
     conviction = signal.get("conviction", "HIGH_CONVICTION")
     conviction_badge = signal.get("conviction_badge") or ("🔥 WYSOKA PEWNOŚĆ" if ev >= 0.10 else "⚡ SPEKULACYJNY")
@@ -130,9 +153,9 @@ def build_discord_embed(signal: Dict[str, Any]) -> Dict[str, Any]:
         {"name": "🎯 Typowana Drużyna", "value": f"**{team_name}** ({side}) • `{conviction_badge}`", "inline": True},
         {"name": "🏢 Bukmacher", "value": f"**{bookmaker}**", "inline": True},
         {"name": "📈 Kurs i Przewaga", "value": f"**{odds:.2f}** (Edge: `{edge_str}`)", "inline": True},
-        {"name": "💰 EV (po podatku 12%)", "value": f"**+{ev * 100:.1f}%**", "inline": True},
+        {"name": f"💰 EV (po podatku {_tax_label(signal)})", "value": f"**+{ev * 100:.1f}%**", "inline": True},
         {"name": "📊 Model vs Rynek", "value": f"Model: `{model_prob * 100:.1f}%`\nRynek: `{market_prob * 100:.1f}%`", "inline": True},
-        {"name": "💵 Sugerowana Stawka", "value": f"`{stake_pct:.1f}%` bankrolla", "inline": True},
+        {"name": "💵 Sugerowana Stawka", "value": f"`{_stake_text(signal)}`", "inline": True},
         {"name": "👥 Weryfikacja Składu", "value": roster_str, "inline": True},
         {"name": "⏰ Początek Meczu", "value": f"{match_start}", "inline": False},
     ]
@@ -158,7 +181,6 @@ def build_telegram_html(signal: Dict[str, Any]) -> str:
     ev = float(signal.get("ev") or 0.0)
     model_prob = float(signal.get("model_prob") or 0.0)
     market_prob = float(signal.get("market_prob") or 0.0)
-    stake_pct = float(signal.get("suggested_stake") or 0.0)
     match_start = signal.get("match_start_at") or "Wkrótce"
     conviction_badge = signal.get("conviction_badge") or "🔥 VALUE BET"
     market_edge = float(signal.get("market_edge") or 0.0)
@@ -173,10 +195,10 @@ def build_telegram_html(signal: Dict[str, Any]) -> str:
         f"🎯 <b>Typ:</b> <b>{team_name}</b> [Strona {side}]\n"
         f"🏢 <b>Bukmacher:</b> <b>{bookmaker}</b>\n"
         f"📈 <b>Kurs:</b> <b>{odds:.2f}</b> {edge_str}\n"
-        f"💰 <b>EV (po podatku 12%):</b> <b>+{ev * 100:.1f}%</b>\n"
+        f"💰 <b>EV (po podatku {_tax_label(signal)}):</b> <b>+{ev * 100:.1f}%</b>\n"
         f"👥 <b>Skład:</b> {roster_str}\n"
         f"📊 <b>Prawdopodobieństwo:</b> Model: {model_prob * 100:.1f}% | Rynek: {market_prob * 100:.1f}%\n"
-        f"💵 <b>Sugerowana stawka (Kelly):</b> {stake_pct:.1f}% bankrolla\n"
+        f"💵 <b>Sugerowana stawka (Kelly):</b> {_stake_text(signal)}\n"
         f"⏰ <b>Start meczu:</b> {match_start}\n\n"
         f"⚡ <i>LoL-Breaker Intelligence</i>"
     )
@@ -281,6 +303,7 @@ def scan_and_dispatch_ev_alerts(db: Session, force_dry_run: bool = False) -> Dic
     min_odds = cfg.min_odds
     max_odds = cfg.max_odds or 999.0
     cooldown_hours = cfg.cooldown_hours
+    tax_rate = float(load_config().tax_rate)
 
     # Fetch active new EV signals for matches starting in the future
     sql = """
@@ -293,6 +316,7 @@ def scan_and_dispatch_ev_alerts(db: Session, force_dry_run: bool = False) -> Dic
             cm.team_b_name,
             cm.league,
             cm.start_time_normalized,
+            cm.best_of,
             b.name AS bookmaker_name,
             umf.feature_status,
             cp.diagnostics_json
@@ -344,17 +368,27 @@ def scan_and_dispatch_ev_alerts(db: Session, force_dry_run: bool = False) -> Dic
                       and quote.bookmaker_id == row["bookmaker_id"]), None)
         if quote is None:
             continue
-        choices = qualify_prediction_sides(
-            prob_a=row["prob_a"], prob_b=row["prob_b"], diagnostics=row.get("diagnostics_json"),
-            model_name=row["model_name"], odds_a=quote.odds_a, odds_b=quote.odds_b,
-            market_prob_a=current.prob_a,
-            league=row.get("league"), match_date=row.get("start_time_normalized"))
+        qualified = qualify_prediction_for_quote(
+            context=current,
+            quote=quote,
+            prob_a=row["prob_a"],
+            prob_b=row["prob_b"],
+            diagnostics=row.get("diagnostics_json"),
+            model_name=row["model_name"],
+            league=row.get("league"),
+            match_date=row.get("start_time_normalized"),
+            best_of=row.get("best_of"),
+            tax_rate=tax_rate,
+        )
+        choices = qualified["qualified"]
         if not choices[side][0]:
             continue
-        raw_ev = expected_value(choices[side][2]["prob_for_ev"], row["odds"], .12)
+        raw_ev = expected_value(choices[side][2]["prob_for_ev"], row["odds"], tax_rate)
         if raw_ev < min_ev:
             continue
         row["ev"] = raw_ev
+        row["model_prob"] = qualified[f"prob_{side}"]
+        row["prob_conservative"] = choices[side][2]["prob_conservative"]
         admitted_rows.append(row)
     rows = sorted(admitted_rows, key=lambda row: (-row["ev"], row["signal_id"]))[:25]
 
@@ -370,6 +404,15 @@ def scan_and_dispatch_ev_alerts(db: Session, force_dry_run: bool = False) -> Dic
 
     can_discord = bool(cfg.discord_enabled and discord_url)
     can_telegram = bool(cfg.telegram_enabled and tg_token and tg_chat)
+
+    wallet_cash: Optional[float] = None
+    if rows:
+        try:
+            wallet = wallet_bankroll(STAKE_CURRENCY)
+        except Exception as exc:  # the percent is display-only; the PLN amount is always shown
+            logger.warning("Wallet balance unavailable for alert stake percent: %s", exc)
+            wallet = None
+        wallet_cash = float(wallet.total) if wallet is not None else None
 
     for row in rows:
         side = str(row.get("side") or "").lower()
@@ -396,22 +439,9 @@ def scan_and_dispatch_ev_alerts(db: Session, force_dry_run: bool = False) -> Dic
         feature_status = str(row.get("feature_status") or "").lower()
         is_full_roster = feature_status in {"ready_player", "ready"}
 
-        # Conformal risk / Epistemic uncertainty check from diagnostics
-        p_low = None
-        p_low_ev = None
-        diag_raw = row.get("diagnostics_json")
-        if diag_raw:
-            try:
-                diag = json.loads(diag_raw) if isinstance(diag_raw, str) else diag_raw
-                p_low_key = f"prob_risk_adjusted_p_low_{side}"
-                if p_low_key in diag:
-                    p_low = float(diag[p_low_key])
-                elif f"res_p_low_{side}" in diag:
-                    p_low = float(diag[f"res_p_low_{side}"])
-                if p_low is not None and 0 < p_low < 1:
-                    p_low_ev = p_low * odds * 0.88 - 1.0
-            except Exception:
-                pass
+        # Display the same focal conservative score used for qualification and EV.
+        p_low = row.get("prob_conservative")
+        p_low_ev = expected_value(p_low, odds, tax_rate) if p_low is not None else None
 
         # Conviction classification:
         # 1. HIGH CONVICTION: Verified full roster AND (market edge > 0 or conformal lower-bound EV > 0)
@@ -445,6 +475,8 @@ def scan_and_dispatch_ev_alerts(db: Session, force_dry_run: bool = False) -> Dic
             "market_edge": market_edge,
             "ev": ev,
             "suggested_stake": suggested_stake,
+            "bankroll": wallet_cash,
+            "tax_rate": tax_rate,
             "conviction": conviction,
             "conviction_badge": conviction_badge,
             "is_full_roster": is_full_roster,
@@ -541,6 +573,7 @@ def send_test_alert(db: Session, channel: str = "both") -> Dict[str, Any]:
         "market_prob": 0.390,
         "ev": 0.076,  # +7.6% EV
         "suggested_stake": 2.5,
+        "tax_rate": load_config().tax_rate,
         "match_start_at": (datetime.now(timezone.utc) + timedelta(hours=4)).strftime("%Y-%m-%d %H:%M UTC"),
     }
 

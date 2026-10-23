@@ -99,6 +99,67 @@ class TestHistoricalProductionSimulator:
         assert "net_profit" in res
         assert "final_equity" in res
 
+    def test_simulator_uses_deterministic_bet_identity_and_net_clv(self):
+        sim = HistoricalProductionSimulator(
+            initial_bankroll=1000.0,
+            policy_kind="unconstrained",
+            min_ev=0.05,
+            tier1_only=False,
+            flat_stake=50.0,
+        )
+        now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+        df = pd.DataFrame([{
+            "snapshot_id": "quote-1",
+            "canonical_match_id": 101,
+            "scraped_at": now - timedelta(hours=4),
+            "start_time_normalized": now.isoformat(),
+            "league": "LCK",
+            "odds_a": 2.50,
+            "odds_b": 1.60,
+            "p_shin_a": 0.38,
+            "p_model_a": 0.55,
+            "p_close_a": 0.40,
+            "winner_side": "a",
+        }])
+
+        first = sim.run(df)["settled_df"].iloc[0]
+        second = sim.run(df)["settled_df"].iloc[0]
+
+        assert first["bet_id"] == second["bet_id"] == "101:a:quote-1"
+        assert first["clv"] == pytest.approx(2.50 * 0.88 * 0.40 - 1.0)
+        assert first["shin_edge_vs_focal"] == pytest.approx(2.50 * 0.88 * 0.3875 - 1.0)
+
+    def test_simulator_missing_close_excludes_clv_and_counts_bet(self):
+        sim = HistoricalProductionSimulator(
+            initial_bankroll=1000.0,
+            policy_kind="unconstrained",
+            min_ev=0.05,
+            tier1_only=False,
+            flat_stake=50.0,
+        )
+        now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+        df = pd.DataFrame([{
+            "snapshot_id": "quote-2",
+            "canonical_match_id": 102,
+            "scraped_at": now - timedelta(hours=4),
+            "start_time_normalized": now.isoformat(),
+            "league": "LCK",
+            "odds_a": 2.50,
+            "odds_b": 1.60,
+            "p_shin_a": 0.38,
+            "p_model_a": 0.55,
+            "winner_side": "a",
+        }])
+
+        result = sim.run(df)
+
+        assert result["settled_df"].iloc[0]["clv"] is None
+        assert result["net_clv_pct"] is None
+        assert result["n_clv_bets"] == 0
+        assert result["n_missing_close"] == 1
+        assert result["shin_edge_vs_focal_pct"] is not None
+        assert "final_equity" in result
+
     def test_guard_b_filters_divergence_in_simulator(self):
         sim_strict = HistoricalProductionSimulator(
             initial_bankroll=1000.0,

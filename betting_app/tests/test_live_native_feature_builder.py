@@ -303,11 +303,12 @@ def test_live_native_feature_builder_end_to_end_orchestration(tmp_path):
     assert audit["db_new_count"] == 1
     assert digest == hashlib.sha256(path.read_bytes()).hexdigest()
 
-    # Second call with same cutoff should return cached file idempotently
+    # Live DB input is refreshed on every call; a previous export is never
+    # treated as current without a source watermark.
     path2, digest2, audit2 = builder.prepare_extended_history(cutoff_date=date(2026, 9, 20))
     assert path2 == path
     assert digest2 == digest
-
+    assert audit2.get("cached") is not True
 
 def test_live_native_feature_builder_force_refresh_invalidates_cache(tmp_path):
     m1, g1, p1 = _make_sample_match_records("99001", "2026-09-15")
@@ -323,11 +324,13 @@ def test_live_native_feature_builder_force_refresh_invalidates_cache(tmp_path):
     session._games.extend(g2)
     session._players.extend(p2)
 
-    # Without force_refresh, returns cached
+    # Live DB input is queried again, even when the cache file is recent.
     path_cached, digest_cached, audit_cached = builder.prepare_extended_history(cutoff_date=date(2026, 9, 20))
-    assert audit_cached.get("cached") is True
-    assert digest_cached == digest1
+    assert audit_cached.get("cached") is not True
+    assert audit_cached["total_series_count"] == 3
+    assert digest_cached != digest1
 
+    # Force refresh remains supported and produces the same current source view.
     # With force_refresh, writes new extended file
     path2, digest2, audit2 = builder.prepare_extended_history(cutoff_date=date(2026, 9, 20), force_refresh=True)
     assert audit2.get("total_series_count") == 3
@@ -346,7 +349,7 @@ def test_live_native_feature_builder_handles_empty_db(tmp_path):
     assert audit["db_new_count"] == 0
 
 
-def test_raw_match_corrupt_stats_falls_back_to_zeros():
+def test_raw_match_corrupt_stats_stay_masked_not_zero():
     m_row, g_rows, p_rows = _make_sample_match_records()
     # Corrupt stats_json on one player
     for p in p_rows:
@@ -354,9 +357,8 @@ def test_raw_match_corrupt_stats_falls_back_to_zeros():
             p["stats_json"] = "not a valid json"
     match_dict = raw_match_from_db_records(m_row, g_rows, p_rows)
     mid_p = match_dict["games"][0]["t1_players"]["MID"]
-    # Should fall back to 0.0 for all stats
-    assert mid_p["stats"]["kills"] == 0.0
-    assert mid_p["stats"]["dpm"] == 0.0
+    # No fabricated 0.0: every stat is absent, so the frozen-bank mask stays 0 for all of them
+    assert mid_p["stats"] == {}
 
 
 def test_merge_c0_history_exact_cutoff_boundary():
@@ -411,3 +413,164 @@ def test_predict_matchup_integration_with_extended_history(tmp_path):
     assert t1_info["id"] == "100"
     assert t1_info["last_played_date"] == "2026-09-15"
     assert len(t1_info["player_ids"]) == 5
+
+
+
+def test_load_raw_matches_defaults_to_canonical_not_stale_extended_cache(tmp_path, monkeypatch):
+    import os
+
+    from scripts.predict_matchup import load_raw_matches
+
+    canonical = tmp_path / "data/artifacts/golgg-database-recovery-20260909/matches.json"
+    stale_extended = tmp_path / "data/04_feature/live_c0_cache/extended_matches.json"
+    canonical.parent.mkdir(parents=True)
+    stale_extended.parent.mkdir(parents=True)
+    canonical.write_text(json.dumps([{"match_id": "canonical"}]), encoding="utf-8")
+    stale_extended.write_text(json.dumps([{"match_id": "stale"}]), encoding="utf-8")
+    monkeypatch.setattr("scripts.predict_matchup.PROJECT_ROOT", tmp_path)
+    monkeypatch.delenv("C0_RAW_HISTORY_PATH", raising=False)
+
+    assert load_raw_matches() == [{"match_id": "canonical"}]
+    assert "C0_RAW_HISTORY_PATH" not in os.environ
+
+
+def test_load_raw_matches_honors_explicit_history_environment(tmp_path, monkeypatch):
+    from scripts.predict_matchup import load_raw_matches
+
+    explicit = tmp_path / "history.json"
+    explicit.write_text(json.dumps([{"match_id": "explicit"}]), encoding="utf-8")
+    monkeypatch.setenv("C0_RAW_HISTORY_PATH", str(explicit))
+
+    assert load_raw_matches() == [{"match_id": "explicit"}]
+
+
+def _pack_like_frozen_bank(stats: dict, keys: tuple[str, ...]) -> tuple[list[float], list[float]]:
+    """Mirror of temporal_player_features.py: value = float(v) if finite numeric else 0.0, valid = ok."""
+    import math
+
+    values, valid = [], []
+    for key in keys:
+        v = stats.get(key)
+        ok = isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+        values.append(float(v) if ok else 0.0)
+        valid.append(float(ok))
+    return values, valid
+
+
+def test_missing_stat_stays_masked_and_is_not_a_zero_value():
+    from betting_app.services.live_native_feature_builder import STAT_KEYS
+
+    m_row, g_rows, p_rows = _make_sample_match_records()
+    for p in p_rows:
+        if p["role"] == "MID" and p["side"] == "t1":
+            stats = json.loads(p["stats_json"])
+            del stats["csd@15"]
+            stats["xpd@15"] = None
+            stats["dpm"] = 0  # a genuine observed zero must stay valid
+            p["stats_json"] = json.dumps(stats)
+    match_dict = raw_match_from_db_records(m_row, g_rows, p_rows)
+    mid_stats = match_dict["games"][0]["t1_players"]["MID"]["stats"]
+
+    assert "csd@15" not in mid_stats
+    assert "xpd@15" not in mid_stats
+    assert mid_stats["dpm"] == 0.0
+
+    values, valid = _pack_like_frozen_bank(mid_stats, STAT_KEYS)
+    by_key = dict(zip(STAT_KEYS, zip(values, valid)))
+    assert by_key["csd@15"] == (0.0, 0.0)
+    assert by_key["xpd@15"] == (0.0, 0.0)
+    assert by_key["dpm"] == (0.0, 1.0)
+    assert by_key["kills"] == (3.0, 1.0)
+
+
+def test_non_finite_stat_is_masked():
+    m_row, g_rows, p_rows = _make_sample_match_records()
+    for p in p_rows:
+        if p["role"] == "TOP" and p["side"] == "t1":
+            p["stats_json"] = json.dumps({"kills": 3, "gpm": float("nan")})
+    match_dict = raw_match_from_db_records(m_row, g_rows, p_rows)
+    stats = match_dict["games"][0]["t1_players"]["TOP"]["stats"]
+    assert stats == {"kills": 3.0}
+
+
+def test_games_sorted_by_numeric_game_id_not_string():
+    m_row, g_rows, p_rows = _make_sample_match_records()
+    template_game = g_rows[0]
+    template_players = [p for p in p_rows if p["game_id"] == template_game["game_id"]]
+    games, players = [], []
+    for gid in ("10", "9", "2"):
+        games.append({**template_game, "game_id": gid})
+        players.extend({**p, "game_id": gid} for p in template_players)
+    match_dict = raw_match_from_db_records(m_row, games, players)
+    assert [g["game_id"] for g in match_dict["games"]] == ["2", "9", "10"]
+
+    # Non-numeric ids keep a deterministic natural order instead of failing.
+    games2, players2 = [], []
+    for gid in ("m_10", "m_9", "m_2"):
+        games2.append({**template_game, "game_id": gid})
+        players2.extend({**p, "game_id": gid} for p in template_players)
+    match_dict2 = raw_match_from_db_records(m_row, games2, players2)
+    assert [g["game_id"] for g in match_dict2["games"]] == ["m_2", "m_9", "m_10"]
+
+
+def test_cutoff_uses_strictly_prior_release_day_not_played_start_date():
+    def series(match_id: str, start: str, *map_days: str) -> dict:
+        return {"match_id": match_id, "date": start, "games": [{"date": d} for d in map_days]}
+
+    db_matches = [
+        series("a", "2026-09-18", "2026-09-18", "2026-09-19"),  # released 09-19 < cutoff: kept
+        series("b", "2026-09-19", "2026-09-19", "2026-09-20"),  # started before cutoff, released ON cutoff: excluded
+        series("c", "2026-09-19", "2026-09-19", "2026-09-21"),  # released after cutoff: excluded
+    ]
+    merged, audit = merge_c0_history([], db_matches, cutoff_date=date(2026, 9, 20))
+    assert [m["match_id"] for m in merged] == ["a"]
+    assert audit["excluded_by_cutoff_count"] == 2
+    assert audit["max_included_date"] == "2026-09-19"
+
+
+def test_extended_history_cache_is_keyed_by_cutoff_and_expires(tmp_path):
+    import os
+    import time
+
+    canonical_file = tmp_path / "canonical.json"
+    canonical_file.write_text(
+        json.dumps([
+            {"match_id": "1001", "date": "2026-09-01", "games": []},
+            {"match_id": "1002", "date": "2026-09-10", "games": []},
+        ]),
+        encoding="utf-8",
+    )
+    builder = LiveNativeFeatureBuilder(session=None, canonical_history_path=canonical_file, cache_dir=tmp_path / "cache")
+
+    path_a, digest_a, audit_a = builder.prepare_extended_history(cutoff_date=date(2026, 9, 5))
+    path_b, digest_b, audit_b = builder.prepare_extended_history(cutoff_date=date(2026, 9, 20))
+    assert path_a != path_b
+    assert audit_a["total_series_count"] == 1
+    assert audit_b["total_series_count"] == 2
+    assert digest_a != digest_b
+
+    # Same cutoff is a cache hit.
+    path_a2, _, audit_a2 = builder.prepare_extended_history(cutoff_date=date(2026, 9, 5))
+    assert path_a2 == path_a and audit_a2.get("cached") is True
+
+    # Older than max age: rebuilt rather than returned forever.
+    old = time.time() - 7200
+    os.utime(path_a, (old, old))
+    _, _, audit_a3 = builder.prepare_extended_history(cutoff_date=date(2026, 9, 5), max_age_seconds=3600)
+    assert audit_a3.get("cached") is None
+    assert audit_a3["total_series_count"] == 1
+
+    # A changed canonical source changes the cache key.
+    canonical_file.write_text(json.dumps([{"match_id": "1001", "date": "2026-09-01", "games": []}]), encoding="utf-8")
+    path_a4, _, audit_a4 = builder.prepare_extended_history(cutoff_date=date(2026, 9, 5))
+    assert path_a4 != path_a
+    assert audit_a4["total_series_count"] == 1
+
+
+def test_default_cutoff_is_today_not_open_ended(tmp_path):
+    from datetime import datetime, timezone
+
+    from betting_app.services.live_native_feature_builder import resolve_cutoff_day
+
+    assert resolve_cutoff_day(None) == datetime.now(timezone.utc).date()
+    assert resolve_cutoff_day("2026-09-20") == date(2026, 9, 20)

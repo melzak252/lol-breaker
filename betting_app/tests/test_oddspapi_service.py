@@ -12,6 +12,7 @@ from urllib.request import Request
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, text
+from sqlalchemy.orm import Session
 
 from betting_app.core.db import get_session
 from betting_app.models.match import CanonicalMatch
@@ -835,5 +836,56 @@ def test_odds_client_capture_records_http_error_bytes_and_status_without_network
         assert capture.failure_reason == "http_error"
         assert retained["body_bytes"] == body
         assert retained["sha256"] == hashlib.sha256(body).hexdigest()
+    finally:
+        session.close()
+
+
+def test_horizon_fetch_skips_matches_with_pinnacle_quote_inside_two_hour_window(client: TestClient) -> None:
+    session = get_session()
+    try:
+        now = datetime.now(UTC)
+        match_start = now + timedelta(hours=6)
+        pinnacle_id = get_or_create_bookmaker("pinnacle")
+        # (canonical id, fixture id, age of the latest Pinnacle observation)
+        cases = [
+            (811, "fix_recent_811", timedelta(minutes=90)),
+            (812, "fix_stale_812", timedelta(hours=2, minutes=30)),
+        ]
+        for cm_id, fixture_id, age in cases:
+            session.execute(
+                text("""
+                INSERT INTO canonical_matches (
+                    id, canonical_key, team_a_name, team_b_name,
+                    normalized_team_a, normalized_team_b, start_time_normalized,
+                    league, status, match_confidence
+                ) VALUES (
+                    :id, :key, 'Team A', 'Team B', 'team a', 'team b', :start_time,
+                    'LEC', 'upcoming', 1.0
+                )
+                """),
+                {"id": cm_id, "key": f"lec-horizon-{cm_id}", "start_time": match_start.replace(microsecond=0).isoformat()},
+            )
+            session.add(OddspapiFixtureMapping(
+                fixture_id=fixture_id, canonical_match_id=cm_id, sport_id=18, league="LEC",
+                provider_team_1="Team A", provider_team_2="Team B", provider_team_1_is_a=1,
+                start_time=match_start, has_odds=1,
+            ))
+            session.add(OddsSnapshot(
+                canonical_match_id=cm_id, bookmaker_id=pinnacle_id, market_type="match_winner",
+                raw_team_a="Team A", raw_team_b="Team B", odds_a=1.8, odds_b=2.0,
+                is_live=0, scraped_at=now - age,
+            ))
+        session.commit()
+
+        mock_client = MockOddsPapiClient(responses={})
+        fetch_pinnacle_horizon_odds(
+            session=session, target_horizon_hours=6.0, tolerance_hours=1.0,
+            max_requests=5, client=mock_client,
+        )
+
+        requested = [path for path, _ in mock_client.requested_paths]
+        assert len(requested) == 1
+        logged = session.scalars(select(OddspapiRequestLog.fixture_id)).all()
+        assert logged == ["fix_stale_812"]
     finally:
         session.close()

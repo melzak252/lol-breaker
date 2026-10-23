@@ -27,7 +27,7 @@ import json
 import math
 import random
 from typing import Any
-
+from src.features.champion_pool_entropy import player_pool_registry_scope
 import numpy as np
 
 from src.models.tournament_swiss_lottery import SwissMatchup, simulate_swiss_round_draws
@@ -214,6 +214,14 @@ def blend_probability(
 
     p_eff = 1.0 / (1.0 + math.exp(-z_soft))
     return float(np.clip(p_eff, eps, 1.0 - eps))
+def _assert_mass_conserved(label: str, *actual_expected: tuple[float, float], tolerance: float = 1e-8) -> float:
+    """Raise when an unnormalized outcome mass differs from its theoretical total."""
+    deviation = max((abs(actual - expected) for actual, expected in actual_expected), default=0.0)
+    if deviation > tolerance:
+        raise AssertionError(f"{label} outcome mass is not conserved (max deviation={deviation:.3g})")
+    return deviation
+
+
 
 
 def _simulate_standard_series_maps(
@@ -261,7 +269,7 @@ def _sample_fallback_swiss_draws(
     team_regions: dict[str, str] | None,
     rng: random.Random,
 ) -> list[SwissMatchup]:
-    """Fallback Swiss pairings when Riot ball-by-ball sequential draw is disabled."""
+    """Fallback pairings enforce no rematches; impossible constraints fail rather than waive."""
     active = {t: rec for t, rec in active_records.items() if rec[0] < 3 and rec[1] < 3}
     if not active:
         return []
@@ -303,8 +311,9 @@ def _sample_fallback_swiss_draws(
 
         paired = find_legal_pairs(pool_teams)
         if paired is None:
-            # Fallback waiver: minimal constraint pairing
-            paired = [(pool_teams[i], pool_teams[i + 1]) for i in range(0, len(pool_teams), 2)]
+            raise ValueError(
+                f"No legal no-rematch pairing exists for Swiss record pool {pool_name}."
+            )
 
         for ta, tb in paired:
             matchups.append(
@@ -564,18 +573,22 @@ class AdvancedTournamentSimulator:
             elif (team_b, team_a, best_of) in base_probabilities:
                 base_p = 1.0 - float(base_probabilities[(team_b, team_a, best_of)])
             elif (team_a, team_b) in base_probabilities:
-                p_map = float(base_probabilities[(team_a, team_b)])
-                base_p = series_win_probability(p_map, best_of) if best_of > 1 else p_map
+                base_p = float(base_probabilities[(team_a, team_b)])
             elif (team_b, team_a) in base_probabilities:
-                p_map = 1.0 - float(base_probabilities[(team_b, team_a)])
-                base_p = series_win_probability(p_map, best_of) if best_of > 1 else p_map
+                base_p = 1.0 - float(base_probabilities[(team_b, team_a)])
 
         if base_p is None:
             ratings = dict(self.default_ratings)
             if team_ratings:
                 ratings.update(team_ratings)
-            ra = ratings.get(team_a, DEFAULT_WORLDS_RATINGS.get(team_a, 1500.0))
-            rb = ratings.get(team_b, DEFAULT_WORLDS_RATINGS.get(team_b, 1500.0))
+            missing = [team for team in (team_a, team_b) if team not in ratings]
+            if missing:
+                raise ValueError(
+                    "No rating or matchup probability is available for team(s): "
+                    + ", ".join(sorted(set(missing)))
+                )
+            ra = ratings[team_a]
+            rb = ratings[team_b]
             p_map = float(1.0 / (1.0 + 10.0 ** ((rb - ra) / 400.0)))
             base_p = series_win_probability(p_map, best_of) if best_of > 1 else p_map
 
@@ -659,6 +672,8 @@ class AdvancedTournamentSimulator:
         team_list = list(DEFAULT_WORLDS_16_TEAMS) if teams is None else list(teams)
         if len(team_list) != 16:
             raise ValueError(f"Worlds simulation requires exactly 16 teams, got {len(team_list)}")
+        if len(set(team_list)) != len(team_list):
+            raise ValueError("Worlds participants must be unique.")
 
         regions = dict(DEFAULT_WORLDS_REGIONS)
         if self.default_regions:
@@ -720,15 +735,16 @@ class AdvancedTournamentSimulator:
             if fearless:
                 r_a = rosters.get(team_a)
                 r_b = rosters.get(team_b)
-                s_res = simulate_fearless_series_maps(
-                    team_a=team_a,
-                    team_b=team_b,
-                    roster_a=r_a,
-                    roster_b=r_b,
-                    best_of=best_of,
-                    base_series_prob=p_match,
-                    rng=rng,
-                )
+                with player_pool_registry_scope():
+                    s_res = simulate_fearless_series_maps(
+                        team_a=team_a,
+                        team_b=team_b,
+                        roster_a=r_a,
+                        roster_b=r_b,
+                        best_of=best_of,
+                        base_series_prob=p_match,
+                        rng=rng,
+                    )
                 winner = s_res.winner
                 loser = s_res.loser
                 sa = s_res.score_winner if winner == team_a else s_res.score_loser
@@ -958,19 +974,17 @@ class AdvancedTournamentSimulator:
                 final_pair = tuple(sorted([t1, t2]))
                 joint_final_acc[final_pair] += 1.0
 
-        # Post-process distributions
         inv_n = 1.0 / n_simulations
         tot_c = math.fsum(champ_acc[t] * inv_n for t in team_list)
-        c_scale = 1.0 / tot_c if tot_c > 0 else 1.0
         tot_t2 = math.fsum(top2_acc[t] * inv_n for t in team_list)
-        t2_scale = 2.0 / tot_t2 if tot_t2 > 0 else 1.0
+        mass_deviation = _assert_mass_conserved("Worlds", (tot_c, 1.0), (tot_t2, 2.0))
 
         standings_rows = []
         for t in team_list:
             standings_rows.append({
                 "team": t,
-                "champion_prob": (champ_acc[t] * inv_n) * c_scale,
-                "top2_prob": (top2_acc[t] * inv_n) * t2_scale,
+                "champion_prob": champ_acc[t] * inv_n,
+                "top2_prob": top2_acc[t] * inv_n,
                 "top3_prob": None,  # Single-elimination does not contest 3rd place
                 "top4_prob": top4_acc[t] * inv_n,
             })
@@ -1055,6 +1069,12 @@ class AdvancedTournamentSimulator:
                 "use_riot_lottery": riot_lottery,
                 "shrinkage_lambda": s_lambda,
                 "temperature": temp,
+                "momentum_knockout_policy": (
+                    "frozen_at_swiss_completion" if bayesian and hybrid
+                    else "updated_after_each_knockout_series" if bayesian
+                    else "disabled"
+                ),
+                "mass_check_max_deviation": mass_deviation,
             },
             swiss_record_probs=swiss_record_probs,
             top_qualifier_sets=top_qualifier_sets,
@@ -1239,14 +1259,15 @@ class AdvancedTournamentSimulator:
                 winner = None if reset_played else (node.winner or manual.get(m_id))
                 loser: str | None = None
                 sa, sb = 0, 0
-                sline = "3-0"
+                sline = ""
 
                 if winner is not None:
+                    if winner not in (t1, t2):
+                        raise ValueError(f"Recorded winner {winner!r} is not a participant in {m_id}.")
                     loser = t2 if winner == t1 else t1
-                    needed = (node.best_of // 2) + 1
-                    sa = needed if winner == t1 else 0
-                    sb = 0 if winner == t1 else needed
-                    sline = f"{needed}-0"
+                    # The source bracket has no scoreline; don't invent a sweep.
+                    sa = sb = 0
+                    # Confirmed outcomes carry no scoreline and do not train momentum.
                 else:
                     p_eff = self.get_matchup_probability(
                         t1,
@@ -1267,15 +1288,16 @@ class AdvancedTournamentSimulator:
                     if fearless:
                         r_a = rosters.get(t1)
                         r_b = rosters.get(t2)
-                        s_res = simulate_fearless_series_maps(
-                            team_a=t1,
-                            team_b=t2,
-                            roster_a=r_a,
-                            roster_b=r_b,
-                            best_of=node.best_of,
-                            base_series_prob=p_match,
-                            rng=sim_rng,
-                        )
+                        with player_pool_registry_scope():
+                            s_res = simulate_fearless_series_maps(
+                                team_a=t1,
+                                team_b=t2,
+                                roster_a=r_a,
+                                roster_b=r_b,
+                                best_of=node.best_of,
+                                base_series_prob=p_match,
+                                rng=sim_rng,
+                            )
                         winner = s_res.winner
                         loser = s_res.loser
                         sa = s_res.score_winner if winner == t1 else s_res.score_loser
@@ -1293,9 +1315,9 @@ class AdvancedTournamentSimulator:
                     if momentum_filter:
                         momentum_filter.update_after_series(t1, t2, winner, sa, sb, pre_match_prob_a=p_match)
 
-                if node.best_of == 3:
+                if sline and node.best_of == 3:
                     bo3_counts[sline] += 1
-                elif node.best_of == 5:
+                elif sline and node.best_of == 5:
                     bo5_counts[sline] += 1
 
                 if node.next_match_winner_id:
@@ -1320,17 +1342,15 @@ class AdvancedTournamentSimulator:
 
         inv_n = 1.0 / n_simulations
         tot_c = math.fsum(counts[t][1] * inv_n for t in team_list)
-        c_scale = 1.0 / tot_c if tot_c > 0 else 1.0
         tot_t2 = math.fsum(counts[t][2] * inv_n for t in team_list)
-        t2_scale = 2.0 / tot_t2 if tot_t2 > 0 else 1.0
+        mass_deviation = _assert_mass_conserved("Bracket", (tot_c, 1.0), (tot_t2, 2.0))
         standings_rows = []
         for t in team_list:
-            top3 = counts[t][3] * inv_n if 3 not in ambiguous[t] else None
             standings_rows.append({
                 "team": t,
-                "champion_prob": (counts[t][1] * inv_n) * c_scale,
-                "top2_prob": (counts[t][2] * inv_n) * t2_scale,
-                "top3_prob": top3,
+                "champion_prob": counts[t][1] * inv_n,
+                "top2_prob": counts[t][2] * inv_n,
+                "top3_prob": None,  # No explicit third-place match is modeled
                 "top4_prob": counts[t][4] * inv_n,
             })
         standings_rows.sort(
@@ -1384,6 +1404,7 @@ class AdvancedTournamentSimulator:
                 "use_bayesian_momentum": bayesian,
                 "shrinkage_lambda": s_lambda,
                 "temperature": temp,
+                "mass_check_max_deviation": mass_deviation,
             },
         )
 
@@ -1405,8 +1426,8 @@ def build_or_load_worlds_2026_pair_probabilities(
     model_code: str = "C0-D",
     force_rebuild: bool = False,
 ) -> dict[tuple[str, str, int], float]:
-    """Compute or load all 120 unordered pairs x {BO1, BO3, BO5} for Worlds 2026 using C0-D (Norm)."""
-    from pathlib import Path
+    """Build/load Worlds pairs; C0-D uses legacy C0 plus the research BO-slope surrogate."""
+    import hashlib
     import os
     import joblib
     from betting_app.core.models.native_c0 import PROJECT_ROOT, NativeC0Adapter
@@ -1418,29 +1439,42 @@ def build_or_load_worlds_2026_pair_probabilities(
         resolve_side_domestic_family,
     )
     from scripts.predict_matchup import load_raw_matches, resolve_team
-
+    decision_iso = "2026-10-21T00:00:00Z"
+    start_iso = "2026-10-21T02:00:00Z"
+    snap_path = PROJECT_ROOT / "data/04_feature/live_c0_cache/worlds_2026_swiss_r1_snapshots.pkl"
+    snapshot_sha256 = hashlib.sha256(snap_path.read_bytes()).hexdigest() if snap_path.is_file() else None
+    provenance = {
+        "model": model_code,
+        "decision_at": decision_iso,
+        "start_at": start_iso,
+        "probability_provenance": (
+            "legacy C0 with research BO-slope surrogate; not distilled C0-D inference"
+            if model_code.upper() == "C0-D" else model_code
+        ),
+    }
     cache_path = (
         PROJECT_ROOT
         / f"data/04_feature/live_c0_cache/worlds_2026_all_pairs_{model_code.lower().replace('-', '_')}_norm.json"
     )
-    if cache_path.is_file() and not force_rebuild:
+    if snapshot_sha256 is not None and cache_path.is_file() and not force_rebuild:
         data = json.loads(cache_path.read_text(encoding="utf-8"))
-        out: dict[tuple[str, str, int], float] = {}
-        for row in data["rows"]:
-            ta, tb, bo, p = str(row["team_a"]), str(row["team_b"]), int(row["best_of"]), float(row["p"])
-            out[(ta, tb, bo)] = p
-            out[(tb, ta, bo)] = 1.0 - p
-        return out
-
+        if data.get("provenance") == provenance:
+            out: dict[tuple[str, str, int], float] = {}
+            for row in data["rows"]:
+                ta, tb, bo, p = str(row["team_a"]), str(row["team_b"]), int(row["best_of"]), float(row["p"])
+                out[(ta, tb, bo)] = p
+                out[(tb, ta, bo)] = 1.0 - p
+            if len(out) == 16 * 15 // 2 * 3:
+                return out
     import pickle
     from src.models.cross_region_input_normalizer import decode_encoded_snapshot
+
 
     os.environ.setdefault(
         "ENSEMBLE_RESEARCH_ROOT",
         str((PROJECT_ROOT / "data/05_model_input/canonical_benchmark").resolve()),
     )
     spec = resolve_model_spec(model_code)
-    snap_path = PROJECT_ROOT / "data/04_feature/live_c0_cache/worlds_2026_swiss_r1_snapshots.pkl"
 
     single_raw: dict[str, dict[str, np.ndarray]] = {}
     single_hist: dict[str, dict[str, np.ndarray]] = {}
@@ -1473,8 +1507,6 @@ def build_or_load_worlds_2026_pair_probabilities(
         raw_matches = load_raw_matches()
         team_fam_map, player_fam_map = build_prior_domestic_family_lookup(raw_matches)
         adapter = NativeC0Adapter()
-        decision_iso = "2026-10-21T00:00:00Z"
-        start_iso = "2026-10-21T02:00:00Z"
         for ta, tb in WORLDS_2026_SWISS_R1_PAIRINGS:
             ia = resolve_team(ta, raw_matches)
             ib = resolve_team(tb, raw_matches)
@@ -1531,14 +1563,15 @@ def build_or_load_worlds_2026_pair_probabilities(
             backend, shared, models, calibration, raw_norm, hist_norm, bo_arr
         )["full"][:, 0]
         for (ta, tb), p_raw in zip(pair_list, preds):
-            pa, pb = apply_model_calibration(float(p_raw), spec, best_of=bo)
+            pa, pb = apply_model_calibration(
+                float(p_raw), spec, best_of=bo, allow_surrogate=True
+            )
             prob_table[(ta, tb, bo)] = pa
             prob_table[(tb, ta, bo)] = pb
             rows_out.append({"team_a": ta, "team_b": tb, "best_of": bo, "p": round(pa, 6)})
 
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(
-        json.dumps({"model": model_code, "rows": rows_out}, indent=2),
+        json.dumps({"model": model_code, "provenance": provenance, "rows": rows_out}, indent=2),
         encoding="utf-8",
     )
     return prob_table

@@ -1310,24 +1310,26 @@ export default function MatchDetail() {
                       <div className="kpi-note">limit bezpieczeństwa: Δ ≤ 0.85</div>
                     </div>
                   )}
-                {match.recommendation.thesis_disagreement !== null &&
-                  match.recommendation.thesis_disagreement !== undefined && (
-                    <div className="kpi-box thesis-kpi">
-                      <div className="kpi-label">Model-Consensus-Veto (Thesis Guard)</div>
-                      <div className={`kpi-val ${match.recommendation.thesis_guard_passed ? 'positive' : ''}`}>
-                        {match.recommendation.thesis_guard_passed ? '🟢 ZGODA' : '🔴 WETO'} (Δ = {(match.recommendation.thesis_disagreement * 100).toFixed(1)}%)
-                      </div>
-                      <div className="kpi-note">próg weta: rozbieżność architektur ≤ 10.0%</div>
+                <div className="kpi-box thesis-kpi">
+                  <div className="kpi-label">Model-Consensus-Veto (Thesis Guard)</div>
+                  {match.recommendation.thesis_guard_passed == null ||
+                    match.recommendation.thesis_disagreement == null ? (
+                    <div className="kpi-val">Nie oceniono</div>
+                  ) : (
+                    <div className={`kpi-val ${match.recommendation.thesis_guard_passed ? 'positive' : 'negative'}`}>
+                      {match.recommendation.thesis_guard_passed ? 'ZGODA' : 'WETO'} (Δ = {(match.recommendation.thesis_disagreement * 100).toFixed(1)}%)
                     </div>
                   )}
-                {match.recommendation.raw_clv !== null &&
-                  match.recommendation.raw_clv !== undefined && (
+                  <div className="kpi-note">Brak porównania nie oznacza zgodności modeli.</div>
+                </div>
+                {match.recommendation.current_market_edge !== null &&
+                  match.recommendation.current_market_edge !== undefined && (
                     <div className="kpi-box clv-kpi">
-                      <div className="kpi-label">Oczekiwany Raw CLV</div>
-                      <div className="kpi-val positive">
-                        +{((match.recommendation.raw_clv) * 100).toFixed(1)}%
+                      <div className="kpi-label">Przewaga ceny nad bieżącym konsensusem</div>
+                      <div className={`kpi-val ${match.recommendation.current_market_edge >= 0 ? 'positive' : 'negative'}`}>
+                        {match.recommendation.current_market_edge >= 0 ? '+' : ''}{(match.recommendation.current_market_edge * 100).toFixed(1)}%
                       </div>
-                      <div className="kpi-note">przewaga nad kursem zamknięcia</div>
+                      <div className="kpi-note">To nie jest CLV ani prognoza kursu zamknięcia.</div>
                     </div>
                   )}
               </div>

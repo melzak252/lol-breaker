@@ -197,7 +197,7 @@ export interface BettingRecommendation {
   thesis_disagreement?: number | null;
   thesis_guard_passed?: boolean | null;
   guard_b_passed?: boolean | null;
-  raw_clv?: number | null;
+  current_market_edge?: number | null;
 }
 
 export interface ParlayLeg {

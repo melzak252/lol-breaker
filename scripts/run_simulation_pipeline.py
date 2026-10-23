@@ -133,16 +133,16 @@ def main() -> int:
             res = run_stage4_econometric_audit(catalog_path, params_path)
             decomp = res["decomposition"]
             hyp = res["hypothesis_testing"]
-            t2p = res["time_to_profit"]
+            conditional = res["conditional_sampling"]
             print("\n[Stage 4: Econometric Audit]")
             print(f"Identity Check:       Discrepancy = {decomp['max_identity_discrepancy']:.2e}")
             print(f"Pure C0 Claimed EV:   +{decomp['pure_c0_claimed_ev_pct']}%")
             print(f"Shrunk Hybrid EV:     +{decomp['shrunk_hybrid_claimed_ev_pct']}%")
             print(f"Curse Removed:        {decomp['curse_removed_by_shrinkage_pp']} pp")
-            print(f"True Net CLV (Edge):  +{decomp['true_long_term_edge_net_clv_pct']}% (t = {hyp['net_clv']['t_statistic']}, p = {hyp['net_clv']['p_value']})")
+            print(f"Historical Net CLV:   +{decomp['true_long_term_edge_net_clv_pct']}% (descriptive; t = {hyp['net_clv']['t_statistic']}, p = {hyp['net_clv']['p_value']})")
             print(f"Match Outcome Noise:  +{decomp['match_outcome_noise_pp']} pp")
             print(f"Variance Ratio:       {hyp['variance_ratio']}x (Match outcome vs Net CLV)")
-            print(f"Time-to-Profit N_min: {t2p['n_min_12pct_tax']} bets (12% tax) | {t2p['n_min_0pct_tax']} bets (0% tax)")
+            print(f"Conditional 95% sampling illustration: {conditional['n_for_95pct_conditional_sampling_probability_12pct_tax']} bets (12% tax); not a profit guarantee")
 
         elif args.stage == "generate_report":
             res = run_stage5_generate_report(catalog_path, params_path)
@@ -181,7 +181,7 @@ def main() -> int:
             s4 = run_stage4_econometric_audit(catalog_path, params_path)
             decomp = s4["decomposition"]
             hyp = s4["hypothesis_testing"]
-            print(f"[4/5] Stage 4 Audited: True Net CLV = +{decomp['true_long_term_edge_net_clv_pct']}% (t={hyp['net_clv']['t_statistic']}, p={hyp['net_clv']['p_value']}), N_min = {s4['time_to_profit']['n_min_12pct_tax']} bets")
+            print(f"[4/5] Stage 4 Audited: Historical Net CLV = +{decomp['true_long_term_edge_net_clv_pct']}% (descriptive; t={hyp['net_clv']['t_statistic']}, p={hyp['net_clv']['p_value']}), conditional 95% sampling illustration = {s4['conditional_sampling']['n_for_95pct_conditional_sampling_probability_12pct_tax']} bets; not a guarantee")
 
             # 5. Stage 5
             s5 = run_stage5_generate_report(catalog_path, params_path)

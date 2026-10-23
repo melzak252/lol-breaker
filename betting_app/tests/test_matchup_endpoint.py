@@ -106,8 +106,8 @@ def test_simulate_matchup_endpoint_basic(monkeypatch: pytest.MonkeyPatch, client
         requests.append(features["c0_request"])
         return SimpleNamespace(
             model_name="Causal-C0",
-            model_version="c0-native-2026-w32-e12-v1",
-            feature_version="native-c0-history16-v1",
+            model_version="c0-native-fresh20-2026-10-21-v1-regional-v1",
+            feature_version="native-c0-fresh20-history19-regional-v1",
             best_of=features["c0_request"]["best_of"],
             prob_a=0.67,
             prob_b=0.33,

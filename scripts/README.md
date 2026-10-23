@@ -16,13 +16,16 @@ Use the **[model/study catalog](../docs/MODEL_CATALOG.md)** to choose a retained
 
 | Purpose | Interface | Boundary |
 |---|---|---|
-| End-to-End 5-stage simulation pipeline | `run_simulation_pipeline.py --stage all` / `dvc repro` | Kedro 8-layer data catalog, proper-score benchmarks, shrinkage grid, Polish 12% tax & multi-year simulations, econometric audit |
-| Pre-match matchup prediction, EV/DRO gates & live region ranks | `predict_matchup.py <TeamA> <TeamB> [--bo 1\|3\|5] [--model C0-D] [--show-region-ranks] [--live-db]` | Standalone inference with automatic cross-regional input normalization, 4-rule DRO safety gates, and dynamic regional offset table |
+| Historical 5-stage orchestration | `run_simulation_pipeline.py --stage all` / `dvc repro` | Historical tool, not the current policy benchmark or authorization to collect/train; older financial and normalization claims are withdrawn/unverified |
+| Native pre-match matchup prediction | `predict_matchup.py <TeamA> <TeamB> [--bo 1\|3\|5] [--model C0]` | C0 is the default. Legacy BO slopes require `--allow-research-surrogate`; cached regional transforms require `--research-cross-region-norm`. Neither is genuine distilled inference or causal confirmation; use the saved-weight interfaces below |
 | Live PostgreSQL GOL.GG extended history & regional state exporter | `python -m betting_app.services.live_native_feature_builder [--cutoff YYYY-MM-DD]` | Exports post-cutoff DB matches to `extended_matches.json` and `FamilyCalibratedGlicko2` state to `regional_offsets_state.json` |
 | Canonical saved-prediction benchmark | `run_model_benchmark.py --suite --doctor` / an authorized new output directory | Annual A0/rating/039 controls; no training or deployment |
+| Retained production probability comparison | `run_model_benchmark.py --production-probability PREPARED_DIR [--production-replay FORECASTS.parquet] --output-dir NEW_DIR` | Same-clock two-sided bookmaker no-vig probabilities versus recorded model-ASOF forecasts or separately labeled fresh20+regional counterfactuals; all-row accounting, no EV/DRO/tax filtering, fitting or deployment |
 | Existing standalone prop inference | `train_prop_distribution.py predict --run-id prop_distribution_20261007_01 --match-id ID` | Frozen historical feature rows; Map1 kills/duration and series length, not a live adapter |
 | Prop preservation/recovery | `preserve_prop_model.py create|verify|restore|replay` | Checksummed separate archive; never overwrite outputs, fit or activate models |
+| Long-term retained-odds C0 audit | `run_unified_betting_evaluation.py long-term-market --help` | Source-separated 2021–2026 conditional endpoint and cutoff-correct prior-roster diagnostics; fixed α/tax/DRO controls, not full production-gated execution. Uses retained OddsPortal/OddsPapi inputs; no acquisition or deployment |
 | Closed challenger experiments below | Their exact study runners and saved protocols | Archive/reproducibility tools; NOT_ADOPTED and gated NOT_RUN studies do not resume automatically |
+| Chronological year-anchor diagnostic builder | `build_year_anchor_bank.py [--verify] [--output-dir DIR] [--research-root DIR]` | Reconstructs 365-day anchor bank from supplied feature bank; read-only `--verify` fails if historical mismatch; requires nonexistent `--output-dir` (default `year_anchor_bank_rebuilt`); no original 365-day bank certification, full old bank mismatch observed; research-only, no automatic training or adoption |
 
 The original prop run and its selected bundle stay in place. [Recovery ZIP, digest and proof](../docs/MODEL_CATALOG.md#3-preserved-standalone-prop-model-recovery-bundle) include all five study stages plus source dependencies and environment metadata. Actual create/verify and restored-source inference completed; old scientific receipts and retained failures are unchanged.
 
@@ -33,6 +36,27 @@ The original prop run and its selected bundle stay in place. [Recovery ZIP, dige
 ```
 
 `create --run-id ID --output NEW.zip` validates the original frozen study and refuses an existing output. `restore --bundle ZIP --sha256 HASH --destination NEW_DIR` checks all members before extracting; the directory must not exist. `verify` restores into its own temporary directory and compares full marginal components/PMFs in a fresh process. It does not certify live inputs, untested rows or a full raw-source rebuild. Copy the ZIP and receipt to separate storage for a real backup; only load trusted joblib/pickle.
+
+### Production probability audit — 2026-10-23
+
+The [production probability audit](../reports/production_probability_audit_20261023.md) uses the read-only production export `data/01_raw/production_probability/production_probability_20261023_01/`, not the older OddsPortal/OddsPapi cohorts. Do not overwrite its occupied output namespaces.
+
+- `src.analysis.production_probability_outcomes.pair_outcome_quotes` pairs only exact event, market, scrape-run and clock A/B observations; every constituent observation has an accounting row.
+- `src.analysis.production_probability_inputs.normalize_production_probability_export` prepares source/model ledgers and prior-roster requests. Canonical team A is the probability orientation, including the evaluator's historical field names `p_team1`/`p_team2`. Canonical foreign keys and side names are conditional bindings, not independent authentication.
+- `src.models.production_probability_history` preserves the frozen canonical history and applies the existing post-2026-09-08 DB extension frontier. `src.models.production_probability_replay` uses the genuine saved fresh20 artifacts, strict prior-day exact-context rosters and one causal regional transform; no target-roster fallback or fit.
+- `declared_date_cutoff_scenario` is **separate** from timestamp-only comparisons. A declared latest-included date is usable only after the following UTC midnight. This is a conditional daily scenario, not authenticated release or issuance; missing/invalid cutoffs remain invalid.
+- `--production-replay` accepts the comparison-schema replay parquet. Daily counterfactual states are retained only after their recorded scenario clock and within the same UTC day. Actual generation remains separate. The runner refuses existing output directories and writes model-ASOF accounting as a bounded `accounting/` parquet dataset.
+
+Executed source-consistent replay:
+
+```bash
+.venv/bin/python scripts/run_model_benchmark.py \
+  --production-probability data/03_primary/production_probability/production_probability_20261023_01/integrity_v7_replay_only \
+  --production-replay data/07_model_output/production_probability/production_probability_20261023_01/integrity_v4/comparison_forecasts.parquet \
+  --output-dir data/08_reporting/production_probability/production_probability_20261023_01/fresh20_regional_comparison_v3
+```
+
+That output already exists; inspect it rather than rerunning the occupied command. The report records the timestamp-only and declared-date production comparisons separately. None establishes source activation, a current production-model cutover, betting profitability or model superiority over bookmakers.
 
 ## Aktualny punkt wejścia do badań
 
@@ -50,6 +74,168 @@ The original prop run and its selected bundle stay in place. [Recovery ZIP, dige
 - Dawny tryb `--data ... --candidate-col ...` pozostaje kompatybilnym narzędziem pojedynczej kolumny; jego automatyczne bramki nie zastępują pełnego dopuszczenia produkcyjnego.
 
 Poniższa numeracja opisuje historyczne narzędzia i wyspecjalizowane potoki, nie kilka konkurujących standardów benchmarku. Nowe eksperymenty powinny eksportować prognozy do jednego benchmarku.
+
+### Genuine saved C0-D inference and current financial policy — frozen 2026-10-21 study
+
+These are reproducibility interfaces, not permission to rerun fitted studies or activate sources. Protocols are under `data/05_model_input/{c0_distilled_verification,c0_policy_evaluation}/`; measured decisions and bounded proof receipts are indexed in [the research journal](../docs/RESEARCH.md).
+
+- **Original saved 18/20-token students:** `src.models.c0_distilled_replay` loads the genuine three-seed weights, native Beta calibration and shared expert assembly in an isolated process. It does not rescale C0 logits. Original anchor identity remains `unverified_legacy_positional`; numerical replay does not certify that bank's causal lineage.
+- **Separately frozen fresh study:** `src.models.c0_causal_anchor_bank` reconstructs 90/180/365-day histories from all eligible authoritative raw maps, explicit map/player/series IDs, strict release/window membership and native 33-coordinate summaries. `src.models.c0_distilled_reproduction` consumes its verified new row-ID-aligned bank and genuine saved student weights. This is frozen-batch research inference, not a live roster adapter or operational model activation.
+- **Current complete financial policy:** the existing unified runner dispatches `current-policy` to `src.analysis.c0_policy_runner`. It retains every opportunity and quote state, true focal-excluded consensus, actual shared qualification, six fixed policy arms and the existing operational portfolio engine. The saved reports distinguish the primary 300s panel, predeclared 24h sensitivity and zero-admission authenticated panel.
+
+Read-only saved-weight prediction examples, from the repository root:
+
+```bash
+.venv/bin/python -m src.models.c0_distilled_replay \
+  --protocol data/05_model_input/c0_distilled_verification/c0d_repro_20261021_01/protocol.json \
+  --candidate20t --rows 73043 --bo 3 --mode full
+
+.venv/bin/python -m src.models.c0_distilled_reproduction \
+  --protocol data/05_model_input/c0_distilled_verification/c0d_repro_20261021_01/protocol.json \
+  --predict 20t --row-ids 73043 --best-of 3 --mode full
+```
+
+Both interfaces support BO1/3/5 and `full`, `no_w20`, `no_organization`; caller-supplied research batches are also accepted by their Python prediction functions. `--verify` replays saved weights and the frozen checks, without fitting. Trust the recorded scope/tolerance, not a universal bitwise claim.
+
+The raw-bank builder's `--build`, student `--bind/--run`, and unified runner's `current-policy --bind/--run` were used for the frozen executions; their output namespaces are now occupied and must not be overwritten or recycled. A new experiment needs a separately authorized frozen protocol. For an intentional no-fit input smoke only:
+
+```bash
+.venv/bin/python scripts/run_unified_betting_evaluation.py current-policy \
+  --protocol data/05_model_input/c0_policy_evaluation/c0_full_policy_20261021_01_integrity_v2/protocol.json \
+  --smoke
+```
+
+The smoke regenerates historical native scenarios; it is not forecast issuance, collection or an executable betting result. The recorded financial run uses zero model fits and no independently bound Pinnacle close. Missing EXP-039/rating comparisons remain not_evaluated. Source activation, permission/entitlement evidence and genuine future confirmation remain separately blocked; forward dates are not rolled.
+
+### C0 earlier-window financial replay — frozen 2026-10-22 study
+
+`src.analysis.c0_interval_runner` reuses the existing complete-policy quote gates and reserved-cash portfolio engine; it does not fit or deploy a model. The frozen protocol is `data/05_model_input/c0_interval_policy/c0_interval_policy_20261022_01/protocol.json`. Its lead-time bands are **[0,6), [6,12), [12,24), [24,48)** hours before the earliest recorded scheduled start, with a separate full **[0,48)** scan. A decision must strictly precede start; the five-minute quote TTL is unchanged.
+
+- `first_eligible_2h`: fixed UTC even-hour checks, earliest qualifying offer, at most one bet per canonical fixture.
+- `random_check`: 200 seeded schedules, one uniformly sampled scheduled check per fixture/window. Missing quotes, missing forecasts and failed gates abstain without resampling.
+- `max_coverage_model_ev`: all recorded snapshot times plus the fixed grid, selecting the highest qualifying nominal model EV per fixture. This is a **noncausal timing benchmark**, not maximum realized profit or an executable strategy.
+
+Native C0 is regenerated for each exact fixture/UTC-day causal state and explicitly projected to that day's checkpoint clocks. Representative clocks, exact roster/context contracts and eight native tensor hashes are retained; no cross-day T−1h probability reuse or authenticated issuance is implied. All 1,771 fixtures and 248,735 quote states remain accounted for. Unknown outcomes reserve capital rather than becoming losses; optional unavailable EXP-039/rating comparisons remain `not_evaluated`, and true CLV remains null.
+
+```bash
+.venv/bin/python -m src.analysis.c0_interval_runner \
+  --protocol data/05_model_input/c0_interval_policy/c0_interval_policy_20261022_01/protocol.json \
+  --smoke
+```
+
+`--smoke` regenerates native historical inputs without running timing portfolios. `--bind` and `--run` are the immutable study-creation interfaces, not permission to recycle an existing namespace. Reports belong under `data/08_reporting/c0_interval_policy/`; consult [the research journal](../docs/RESEARCH.md) for measured completion status and limitations. Historical timing variation and nominal EV do not establish prospective profit, authentic execution or the ±2 pp financial-reliability requirement.
+
+### C0 / fresh20 × regional four-cell audit — completed v4 + v7 continuation
+
+The unified runner exposes `model-region-factorial`, implemented by
+`src.analysis.c0_region_factorial`; reusable regional replay and finance logic
+lives in `src.models.c0_regional_replay`, `src.models.c0_live_query`, and
+`src.analysis.c0_region_finance`. The retained frozen protocol is
+[`c0_region_factorial_20261022_01_integrity_v4`](../data/05_model_input/c0_region_factorial/c0_region_factorial_20261022_01_integrity_v4/protocol.json).
+It compares exactly **C0**, **C0+regional**, **fresh20**, and
+**fresh20+regional**. The execution binding freezes protocol, source/model/code
+bytes, source closure, configuration and policy inputs. It reuses saved C0 and
+fresh20 weights: **zero new neural fits and zero calibration fits**.
+
+The accepted v4 run was prepared against retained local inputs; it does not
+refresh a database or activate a live source. The raw-history cache contract is
+41,915 series / 69,370 maps / 693,700 map records; the extended-history cache
+is 42,177 series / 70,029 maps / 700,290 map records. Canonical histories use
+the canonical cache; extended Worlds histories use their separately bound
+extended cache. The Worlds cutoff is 2026-10-20 and its newest used history is
+2026-10-18. Its saved roster and placeholder start time are conditional input
+scenarios, not verified announcements, official schedule/issuance clocks, or
+live-bettable forecasts.
+
+Regional states are reconstructed from prior release-day history using the
+existing `FamilyCalibratedGlicko2` engine and `compute_dynamic_offsets_from_state`;
+the current regional-state cache is diagnostic only and is never a fallback.
+The fresh20 transform uses 19 input-slot positions, with per-slot masks/presence
+indicating which observations are valid; this does **not** mean 19 valid
+observations per player. Strict source release clocks and anchor cutoffs apply;
+missing inputs remain absent rather than using latest-state/target-roster
+fallbacks. Historical coverage retains all **3,103 requested rows** in every
+configuration, including explicit regional absences; paired comparisons use
+only the legitimate exact common cohort and report it separately. This audit
+neither trains/calibrates nor changes serving, model registries, manifests,
+deployment, or database state.
+
+The completed v4 historical/Worlds run and v7 finance/projection continuation
+are documented in [the research journal](../docs/RESEARCH.md) and the [full
+report](../reports/c0_regional_factorial_audit_20261022.md). The v7 protocol
+hash-binds and reuses the exact sealed v4 daily prediction parquet plus v4
+historical protocol, stage and execution-binding hashes; it does not create a
+v7 neural-network stage or rerun/duplicate inference. The retired v4
+all-absent first-ready projection is not accepted; use only the corrected v7
+910/910 projection. Zero new neural/calibration fits; 204 focused selected
+tests, 73 independent oracle checks, 32 Decimal wallets and 191/191 protected
+files/artifacts are reported with their bounded scope in the research journal.
+Completed work is not permission to rerun or copy occupied namespaces. In
+particular, do not treat new/frozen run names as authorization, automatically
+promote a candidate, select a new threshold/alpha, or change forward dates.
+No live source authentication is available; the retained production export is
+not a fresh database query.
+
+The supported CLI accepts `prepare`, `worlds`, `historical`, `finance`, and
+`all`. These recorded commands describe the completed, occupied namespaces;
+they are provenance, not authorization to execute them again:
+
+```bash
+.venv/bin/python scripts/run_unified_betting_evaluation.py model-region-factorial \
+  --protocol data/05_model_input/c0_region_factorial/c0_region_factorial_20261022_01_integrity_v4/protocol.json \
+  --stage worlds
+
+# v7 binds the finance continuation to the exact sealed v4 scientific evidence.
+.venv/bin/python scripts/run_unified_betting_evaluation.py model-region-factorial \
+  --protocol data/05_model_input/c0_region_factorial/c0_region_factorial_20261022_01_integrity_v7/protocol.json \
+  --stage prepare
+.venv/bin/python scripts/run_unified_betting_evaluation.py model-region-factorial \
+  --protocol data/05_model_input/c0_region_factorial/c0_region_factorial_20261022_01_integrity_v7/protocol.json \
+  --stage finance
+```
+
+The v7 `prepare` binds its frozen inputs. Its protocol hashes the v4 daily
+prediction parquet and v4 historical protocol, stage cache and execution
+binding; v7 `finance` consumes the sealed evidence rather than fitting or
+replaying the NN stage. This is explicitly hashed historical reuse, not a
+missing or fabricated v7 NN run. The accepted v7 first-ready projection has
+910/910 admitted rows; the v4 all-absent projection is retired. The v4
+historical and v7 finance/projection stages are complete; see the journal and
+[full report](../reports/c0_regional_factorial_audit_20261022.md) for measured
+results and receipts. Do not rerun, overwrite, or copy the occupied namespaces.
+Frozen/new run names are not permission to repeat work. No automatic
+promotion, new thresholds/alpha, or forward-date changes are authorized.
+
+### C0 edge-recovery audit — frozen v2 interfaces (bounded independent numerical audit complete; no financial certification)
+
+The protocol is `data/05_model_input/c0_edge_recovery/c0_edge_recovery_20261022_01/protocol_v2.json`; artifacts are retained under the matching stage08 directory. Alpha preparation/run, mechanics, recovery, genuine model comparison, and full policy runtime have completed. The parent quote→core→F821 numerical verifier completed with all checks passing within its documented scope; see [`docs/RESEARCH.md`](../docs/RESEARCH.md) for measured results and limits. This is not financial certification or production issuance proof. Preparation caches native daily states; reuse that cache rather than replaying inference per policy cell.
+
+```bash
+.venv/bin/python -m src.analysis.c0_edge_alpha_audit --protocol data/05_model_input/c0_edge_recovery/c0_edge_recovery_20261022_01/protocol_v2.json --prepare
+.venv/bin/python -m src.analysis.c0_edge_alpha_audit --protocol data/05_model_input/c0_edge_recovery/c0_edge_recovery_20261022_01/protocol_v2.json --run
+.venv/bin/python -m src.analysis.c0_edge_mechanics_audit --protocol data/05_model_input/c0_edge_recovery/c0_edge_recovery_20261022_01/protocol_v2.json
+.venv/bin/python -m src.analysis.c0_edge_recovery_attribution --protocol data/05_model_input/c0_edge_recovery/c0_edge_recovery_20261022_01/protocol_v2.json
+.venv/bin/python -m src.models.c0_edge_model_audit --protocol data/05_model_input/c0_edge_recovery/c0_edge_recovery_20261022_01/protocol_v2.json
+.venv/bin/python -m src.analysis.c0_edge_policy_audit --protocol data/05_model_input/c0_edge_recovery/c0_edge_recovery_20261022_01/protocol_v2.json
+```
+
+These are the actual v2 interfaces, not authorization to replace occupied outputs. Genuine inference comparisons cover six configurations: native C0; C0-D/Core18 (the same manifest/registry artifact); Track-1 `student_w32_kd` Core17 (distinct model); Slim18 single seed with its own Beta calibration; fresh18; and fresh20. The full research CLI completed successfully on all910 focal rows/302 fixtures. The policy CLI primary matrix contains **350 primary configuration IDs** × four timing schedules × two splits = **2,800 primary case rows**. The continuous proper-score fit comparator adds **8 case summaries** and the baseline noncausal oracle adds **2**, yielding **2,810 case summaries**. Three separate diagnostic configurations add **24 rows** in `source_safety_only_controls.parquet`, outside that count; **144 locked-model rows** and **8 market-extension rows** are separate. The TRAIN rule selected **0 primary policies** for insufficient support; the **0.2853137251** earlier-only proper-score alpha is research-only, not an ASSESS-selected α≥0.25 policy. See the research journal for measured results. Named-matchup BO-slope surrogates/local serving transforms are not genuine neural inference or substitutes for these candidates. The audit leaves serving/model configuration unchanged and does not certify financial reliability or authorize live-wallet/source use; the bounded numerical audit is complete, not a financial or production certification.
+
+
+### Chronological year-anchor diagnostic builder — 2026-10-21
+
+`scripts/build_year_anchor_bank.py` is a chronological diagnostic builder reconstructed from the supplied feature bank (`release_corrected_bank`), not a replacement model artifact or an authorized path to training or promotion. It reconstructs the strictly prior 365-day anchor bank for player histories using release-corrected metadata dates.
+
+```bash
+.venv/bin/python scripts/build_year_anchor_bank.py --output-dir data/08_reporting/c0_upgrade_and_distillation_20261017/year_anchor_bank_rebuilt
+.venv/bin/python scripts/build_year_anchor_bank.py --verify
+```
+
+- **Archive resolution order:** CLI `--research-root` > environment variable `ENSEMBLE_RESEARCH_ROOT` > config file `data/research_root.txt`.
+- **Outputs:** Rebuild mode requires a new, nonexistent directory (default `data/08_reporting/c0_upgrade_and_distillation_20261017/year_anchor_bank_rebuilt`), strictly refusing to overwrite existing bank paths or artifacts.
+- **Verification:** Read-only `--verify` runs causal future-perturbation tests and compares against historical bank artifacts, failing explicitly if a historical mismatch occurs.
+- **Audit status & provenance:** As documented in the [`docs/RESEARCH.md` audit section](../docs/RESEARCH.md#original-365-day-anchor-bank-provenance--2026-10-21), exact map identity and release dates are absent from the exported bank, so original 365-day bank certification is **UNVERIFIED / NOT_REPRODUCED**. A full old bank mismatch is observed (the first 200 rows differ in 11 of 2,000 mask values).
+- **Boundary:** Diagnostic alternative only; no automatic training, adoption, or promotion.
 
 ### Bounded sports reliability improvement studies — 2026-10-10
 

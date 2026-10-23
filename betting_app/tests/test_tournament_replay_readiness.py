@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from scripts.audit_tournament_replay_readiness import audit
+from scripts.audit_tournament_replay_readiness import DEFAULT_BUNDLE, DEFAULT_PILOT, audit
 from scripts.score_tournament_forecasts import digest
 
 
@@ -359,6 +359,10 @@ def _pilot_sources(tmp_path):
     return bundle, rows
 
 
+@pytest.mark.requires_artifacts(
+    DEFAULT_PILOT,
+    DEFAULT_BUNDLE / 'series_results.csv',
+)
 def test_pilot_compiles_source_routes_and_does_not_invent_a_champion(tmp_path):
     from scripts.audit_tournament_replay_readiness import compile_pilot_inputs
     bundle, _ = _pilot_sources(tmp_path)
@@ -378,6 +382,10 @@ def test_pilot_compiles_source_routes_and_does_not_invent_a_champion(tmp_path):
         compile_pilot_inputs(tmp_path / 'compiled', bundle=bundle)
 
 
+@pytest.mark.requires_artifacts(
+    DEFAULT_PILOT,
+    DEFAULT_BUNDLE / 'series_results.csv',
+)
 def test_pilot_rejects_unmapped_teams_and_illegal_source_scores(tmp_path):
     from scripts.audit_tournament_replay_readiness import compile_pilot_inputs
     bundle, rows = _pilot_sources(tmp_path)

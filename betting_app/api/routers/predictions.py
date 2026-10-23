@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from betting_app.services.prematch_quote_service import load_prematch_quotes, parse_aware_utc, signal_is_actionable
+from betting_app.services.prematch_quote_service import (
+    load_prematch_quotes,
+    parse_aware_utc,
+    qualify_prediction_for_quote,
+    signal_is_actionable,
+)
 from betting_app.services.market_service import expected_value
 from fastapi import APIRouter, Depends, Query
 
@@ -13,11 +18,6 @@ from betting_app.services.market_service import kelly_fraction, none_or_float
 from betting_app.core.models import get_active_hybrid, list_registered_models
 from betting_app.services.bet_qualification_service import (
     DEFAULT_BASE_MIN_EV,
-    DEFAULT_MAX_EV_NET,
-    is_bet_eligible,
-    model_requires_uncertainty,
-    prediction_safety_diagnostics,
-    qualification_tier,
 )
 
 DEFAULT_HYBRID_MODEL = get_active_hybrid()
@@ -96,54 +96,66 @@ def list_predictions(
         prediction = dict(row, id=row["prediction_id"], canonical_match_id=row["prediction_match_id"])
         if not signal_is_actionable(row, prediction, evaluation_context=evaluation, current_context=current, session=db)[0]:
             continue
-        if len(current.quotes) < min_books:
+        side = row["side"]
+        quote = next(
+            (
+                candidate for candidate in current.quotes
+                if candidate.odds_snapshot_id == row["odds_snapshot_id"]
+                and candidate.bookmaker_id == row["bookmaker_id"]
+            ),
+            None,
+        )
+        if quote is None:
             continue
         odds = none_or_float(row.get("odds"))
-        try:
-            safety = prediction_safety_diagnostics(
-                row.get("diagnostics_json"),
-                row["prob_a"],
-                row["prob_b"],
-                uncertainty_required=model_requires_uncertainty(row["model_name"]),
-            )
-            side = row["side"]
-            prob = row[f"prob_{side}"]
-            conservative = safety.get(f"p_low_{side}")
-            eligible, _, decision = is_bet_eligible(
-                prob_model=prob,
-                prob_conservative=conservative,
-                odds=odds,
-                uncertainty_required=safety["uncertainty_required"],
-                uncertainty_basis=safety["uncertainty_basis"],
-                uncertainty_reason=safety["uncertainty_reason"],
-                prob_market_novig=none_or_float(row.get("market_prob")),
-                tax_rate=TAX_RATE,
-                min_ev_net=max(DEFAULT_BASE_MIN_EV, min_ev),
-                rating_disagreement=safety.get("rating_disagreement"),
-                competition_tier=qualification_tier(
-                    row.get("league"), row.get("start_time_normalized")
-                ),
-                max_ev_net=max_ev,
-                best_of=int(row["best_of"]) if row.get("best_of") is not None else None,
-            )
-        except (KeyError, TypeError, ValueError):
+        if odds is None:
             continue
-        if not eligible:
+        qualified = qualify_prediction_for_quote(
+            context=current,
+            quote=quote,
+            prob_a=row["prob_a"],
+            prob_b=row["prob_b"],
+            diagnostics=row.get("diagnostics_json"),
+            model_name=row["model_name"],
+            league=row.get("league"),
+            match_date=row.get("start_time_normalized"),
+            best_of=int(row["best_of"]) if row.get("best_of") is not None else None,
+            tax_rate=TAX_RATE,
+        )
+        choices = qualified["qualified"]
+        if side not in choices or not choices[side][0]:
+            continue
+        decision = choices[side][2]
+        prob = qualified[f"prob_{side}"]
+        if prob is None:
             continue
         prob_for_ev = decision["prob_for_ev"]
         ev = expected_value(prob_for_ev, odds, TAX_RATE)
+        if ev < max(DEFAULT_BASE_MIN_EV, min_ev):
+            continue
+        if max_ev is not None and ev > max_ev:
+            continue
+        try:
+            quote_scraped_at = next(
+                q.scraped_at.isoformat() for q in current.quotes
+                if q.odds_snapshot_id == row["odds_snapshot_id"]
+                and q.bookmaker_id == row["bookmaker_id"]
+            )
+            offer_url = quote.offer_url
+        except (KeyError, TypeError, ValueError, StopIteration):
+            continue
         signals.append(
             EVSignal(
                 canonical_match_id=row["canonical_match_id"],
                 odds_snapshot_id=row["odds_snapshot_id"],
-                quote_scraped_at=next(q.scraped_at.isoformat() for q in current.quotes if q.odds_snapshot_id == row["odds_snapshot_id"]),
+                quote_scraped_at=quote_scraped_at,
                 evaluated_at=evaluated.isoformat(),
                 match=f"{row.get('team_a_name','?')} vs {row.get('team_b_name','?')}",
                 league=row.get("league"),
                 start_time_normalized=row.get("start_time_normalized"),
                 model_name=row.get("model_name", "?"),
                 model_version=row.get("model_version", "?"),
-                side=row["side"],
+                side=side,
                 odds=odds,
                 bookmaker=row.get("bookmaker_name", "?"),
                 model_prob=prob,
@@ -151,10 +163,10 @@ def list_predictions(
                 prob_for_ev=prob_for_ev,
                 uncertainty_basis=decision["uncertainty_basis"],
                 uncertainty_reason=decision["uncertainty_reason"],
-                market_prob=none_or_float(row.get("market_prob")),
+                market_prob=qualified.get("market_prob_a"),
                 ev=ev,
                 kelly=kelly_fraction(prob_for_ev, odds, TAX_RATE),
-                offer_url=next(q.offer_url for q in current.quotes if q.odds_snapshot_id == row["odds_snapshot_id"]),
+                offer_url=offer_url,
             )
         )
 

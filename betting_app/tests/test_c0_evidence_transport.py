@@ -14,7 +14,7 @@ def test_worker_accepts_bounded_evidence_operation():
 
 
 @pytest.fixture(scope="module")
-def evidence_client():
+def evidence_client(require_native_artifacts):
     from betting_app.services.c0_inference import C0InferenceClient
     client = C0InferenceClient()
     try:
@@ -50,7 +50,7 @@ def test_genuine_child_evidence_replays_exact_arrays_and_ordinary_probability(be
             assert evidence.encoded_snapshot["target"][f"{prefix}_player_order_{side}"] == sorted(request[f"roster_{side}"])
 
 
-def test_real_evidence_worker_rotation_preserves_prediction_and_closes_old_child():
+def test_real_evidence_worker_rotation_preserves_prediction_and_closes_old_child(require_native_artifacts):
     from betting_app.services.c0_inference import C0InferenceClient
     from betting_app.tests.test_native_c0 import _request
     client = C0InferenceClient()

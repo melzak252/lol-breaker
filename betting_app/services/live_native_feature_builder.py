@@ -3,18 +3,21 @@
 Extracts freshly scraped and completed GOL.GG matches from the relational
 database (PostgreSQL/TimescaleDB), transforms them into the canonical GOL.GG raw
 match format, merges them with the frozen canonical baseline history, enforces
-strict causal cutoff boundaries (date < cutoff_date), and generates an
+strict causal cutoff boundaries (effective release day < cutoff day), and generates an
 authenticated, SHA-256 verified extended history dataset.
 """
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import re
 import tempfile
+import time
 from typing import Any, Iterable, Mapping, Sequence
 
 from sqlalchemy import text
@@ -24,6 +27,7 @@ from betting_app.core.config import PROJECT_ROOT
 CANONICAL_HISTORY_RELATIVE = "data/artifacts/golgg-database-recovery-20260909/matches.json"
 DEFAULT_CACHE_DIR_RELATIVE = "data/04_feature/live_c0_cache"
 DEFAULT_CANONICAL_CUTOFF = date(2026, 9, 8)
+DEFAULT_CACHE_MAX_AGE_SECONDS = 3600.0
 
 ROLES = ("TOP", "JUNGLE", "MID", "ADC", "SUPPORT")
 STAT_KEYS = (
@@ -70,14 +74,27 @@ def _extract_rows(res: Any) -> list[Any]:
         return list(res.all())
     return list(res)
 
+def _game_id_sort_key(game_id: Any) -> tuple[tuple[int, int, str], ...]:
+    """Natural sort key: digit runs compare as integers, other text lexically (stable fallback)."""
+    text_id = str(game_id or "").strip()
+    return tuple(
+        (0, int(part), "") if part.isdigit() else (1, 0, part)
+        for part in re.findall(r"\d+|\D+", text_id)
+    )
+
+
 def _standardize_stats(stats_dict: Mapping[str, Any]) -> dict[str, float]:
+    """Keep only finite numeric stats; a missing stat stays ABSENT (masked), never 0.0.
+
+    The frozen history bank packs ``value = float(v) if finite numeric else 0.0`` together with a
+    presence flag ``valid = float(ok)`` (``temporal_player_features.py``). The tensor mask therefore
+    only stays correct if absent stats remain absent here; a fabricated 0.0 would be flagged valid.
+    """
     result: dict[str, float] = {}
     for key in STAT_KEYS:
         val = stats_dict.get(key)
-        if isinstance(val, (int, float)) and not isinstance(val, bool):
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and math.isfinite(val):
             result[key] = float(val)
-        else:
-            result[key] = 0.0
     return result
 
 
@@ -140,11 +157,11 @@ def raw_match_from_db_records(
             "stats": standardized_stats,
         }
 
-    # Assemble games
+    # Assemble games (numeric game-id order; '9' < '10')
     assembled_games: list[dict[str, Any]] = []
     sorted_games = sorted(
         [_to_dict(g) for g in games_rows],
-        key=lambda g: str(g.get("game_id") or ""),
+        key=lambda g: _game_id_sort_key(g.get("game_id")),
     )
 
     if not sorted_games:
@@ -303,12 +320,34 @@ def export_db_golgg_matches(
     return exported
 
 
+def effective_release_day(match: Mapping[str, Any]) -> str:
+    """ISO day on which a series is released to the history: its latest map day.
+
+    Mirrors the ``latest_source_game_day_fallback`` of ``src/analysis/ev_asof_replay.py``
+    (``effective = max(latest map day, corrected release override)``); live DB series have no
+    override, so the latest map day is the release day. Series without maps use the match date.
+    """
+    days = [
+        str(g.get("date") or "")[:10]
+        for g in (match.get("games") or [])
+        if isinstance(g, Mapping)
+    ]
+    days = [d for d in days if d]
+    if not days:
+        return str(match.get("date") or "")[:10]
+    return max(days)
+
+
 def merge_c0_history(
     canonical_matches: Iterable[dict[str, Any]],
     db_matches: Iterable[dict[str, Any]],
     cutoff_date: date | str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Merge canonical frozen matches with DB matches, filtering strictly by cutoff."""
+    """Merge canonical frozen matches with DB matches under AGENTS.md section 5 release semantics.
+
+    A series is kept only if ``effective_release_day < cutoff_date`` (the prediction day is
+    exclusive); the day it was played is not used for the cutoff.
+    """
     cutoff_str = cutoff_date.isoformat() if isinstance(cutoff_date, date) else cutoff_date
 
     merged_by_id: dict[str, dict[str, Any]] = {}
@@ -319,8 +358,7 @@ def merge_c0_history(
     # 1. Ingest canonical matches
     for m in canonical_matches:
         mid = str(m.get("match_id") or "").strip()
-        m_date = str(m.get("date") or "")[:10]
-        if cutoff_str and m_date >= cutoff_str:
+        if cutoff_str and effective_release_day(m) >= cutoff_str:
             excluded_by_cutoff_count += 1
             continue
         if mid:
@@ -330,8 +368,7 @@ def merge_c0_history(
     # 2. Ingest DB matches (overrides or appends new)
     for m in db_matches:
         mid = str(m.get("match_id") or "").strip()
-        m_date = str(m.get("date") or "")[:10]
-        if cutoff_str and m_date >= cutoff_str:
+        if cutoff_str and effective_release_day(m) >= cutoff_str:
             excluded_by_cutoff_count += 1
             continue
         if mid:
@@ -342,7 +379,7 @@ def merge_c0_history(
     all_series = list(merged_by_id.values())
     all_series.sort(key=lambda m: (str(m.get("date", ""))[:10], str(m.get("match_id", ""))))
 
-    max_included_date = all_series[-1].get("date", "")[:10] if all_series else None
+    max_included_date = max((effective_release_day(m) for m in all_series), default=None)
     audit = {
         "canonical_count": canonical_count,
         "db_new_count": db_new_count,
@@ -350,6 +387,7 @@ def merge_c0_history(
         "total_series_count": len(all_series),
         "max_included_date": max_included_date,
         "cutoff_enforced": cutoff_str,
+        "cutoff_semantics": "effective_release_day < cutoff",
     }
     return all_series, audit
 
@@ -389,6 +427,28 @@ def build_extended_c0_history_file(
     return out_p, digest, audit
 
 
+def resolve_cutoff_day(cutoff_date: date | str | None) -> date:
+    """Return the exclusive prediction day; ``None`` means today (UTC), never an open-ended 'latest'."""
+    if cutoff_date is None:
+        return datetime.now(timezone.utc).date()
+    if isinstance(cutoff_date, datetime):
+        return cutoff_date.date()
+    if isinstance(cutoff_date, date):
+        return cutoff_date
+    return date.fromisoformat(str(cutoff_date)[:10])
+
+
+def _canonical_fingerprint(path: Path, with_db: bool) -> str:
+    """Short source fingerprint: canonical file identity (path, size, mtime) and DB participation."""
+    stat = path.stat()
+    token = f"{path}|{stat.st_size}|{stat.st_mtime_ns}|{'db' if with_db else 'nodb'}"
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+
+
+def extended_history_cache_name(cutoff: date, fingerprint: str) -> str:
+    return f"extended_history_{cutoff.isoformat()}_{fingerprint}.json"
+
+
 class LiveNativeFeatureBuilder:
     """Manages dynamic assembly of extended C0 history from PostgreSQL and disk."""
 
@@ -415,34 +475,43 @@ class LiveNativeFeatureBuilder:
         self,
         cutoff_date: date | str | None = None,
         force_refresh: bool = False,
+        max_age_seconds: float | None = DEFAULT_CACHE_MAX_AGE_SECONDS,
     ) -> tuple[Path, str, dict[str, Any]]:
-        """Return an extended history JSON file and its SHA-256 for the given cutoff."""
-        cutoff_str = cutoff_date.isoformat() if isinstance(cutoff_date, date) else (cutoff_date or "latest")
-        target_name = f"extended_history_{cutoff_str}.json"
-        out_file = self.cache_dir / target_name
+        """Return an extended history JSON file and its SHA-256 for the exclusive cutoff day.
 
-        if not force_refresh and out_file.is_file():
-            hasher = hashlib.sha256()
-            with out_file.open("rb") as f:
-                while chunk := f.read(65536):
-                    hasher.update(chunk)
-            digest = hasher.hexdigest()
-            # Fast return cached file
-            return out_file, digest, {"cached": True, "output_path": str(out_file), "output_sha256": digest}
+        Non-DB baseline histories are cacheable by cutoff and canonical source.
+        DB-backed histories are always rebuilt: without a source watermark, a
+        recent export cannot prove that the underlying database has not changed.
+        """
+        cutoff = resolve_cutoff_day(cutoff_date)
+        fingerprint = _canonical_fingerprint(self.canonical_history_path, self.session is not None)
+        out_file = self.cache_dir / extended_history_cache_name(cutoff, fingerprint)
+
+        # A DB session has no stable source watermark, so never trust a persisted
+        # extended history as current. Non-DB baseline histories remain cacheable.
+        if self.session is None and not force_refresh and out_file.is_file():
+            age = time.time() - out_file.stat().st_mtime
+            if max_age_seconds is None or age <= max_age_seconds:
+                hasher = hashlib.sha256()
+                with out_file.open("rb") as f:
+                    while chunk := f.read(65536):
+                        hasher.update(chunk)
+                digest = hasher.hexdigest()
+                return out_file, digest, {"cached": True, "output_path": str(out_file), "output_sha256": digest}
 
         db_matches: list[dict[str, Any]] = []
         if self.session is not None:
             db_matches = export_db_golgg_matches(
                 self.session,
                 min_date=DEFAULT_CANONICAL_CUTOFF.isoformat(),
-                max_date=cutoff_str if cutoff_str != "latest" else None,
+                max_date=cutoff.isoformat(),
             )
 
         return build_extended_c0_history_file(
             canonical_source=self.canonical_history_path,
             db_matches=db_matches,
             output_path=out_file,
-            cutoff_date=cutoff_date,
+            cutoff_date=cutoff,
         )
 
 
@@ -482,7 +551,10 @@ def main() -> int:
         "--cutoff",
         type=str,
         default=None,
-        help="Inclusive ISO cutoff date YYYY-MM-DD (default: latest)",
+        help=(
+            "Exclusive ISO prediction day YYYY-MM-DD: only series whose effective release day "
+            "is strictly before it are kept (default: today, UTC)"
+        ),
     )
     parser.add_argument(
         "--output",
@@ -491,18 +563,19 @@ def main() -> int:
         help="Output path for extended_matches.json",
     )
     args = parser.parse_args()
+    cutoff = resolve_cutoff_day(args.cutoff)
 
     with get_session() as session:
         db_matches = export_db_golgg_matches(
             session,
             min_date=DEFAULT_CANONICAL_CUTOFF.isoformat(),
-            max_date=args.cutoff,
+            max_date=cutoff.isoformat(),
         )
         out_p, digest, audit = build_extended_c0_history_file(
             canonical_source=PROJECT_ROOT / CANONICAL_HISTORY_RELATIVE,
             db_matches=db_matches,
             output_path=args.output,
-            cutoff_date=args.cutoff,
+            cutoff_date=cutoff,
         )
         reg_p = export_db_regional_offsets_state(session)
         print(f"Exported {audit['total_series_count']} series ({audit['db_new_count']} new from DB) -> {out_p} (SHA-256: {digest[:16]}...)")

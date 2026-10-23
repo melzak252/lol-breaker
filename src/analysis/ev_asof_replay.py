@@ -2426,6 +2426,7 @@ def _run_cli(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--research-root", type=Path)
     parser.add_argument("--raw-history", type=Path)

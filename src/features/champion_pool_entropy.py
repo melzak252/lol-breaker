@@ -7,9 +7,12 @@ Calculates parametric rating depletion decay when comfort champions are burned.
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date, datetime
 import math
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
+import os
 
 import numpy as np
 
@@ -23,6 +26,30 @@ EFFECTIVE_DEPTH_BASE: float = math.e
 
 # In-memory mock/test registry for deterministic unit tests and offline environments
 _PLAYER_POOL_REGISTRY: dict[str, dict[str, Any]] = {}
+_SCOPED_PLAYER_POOL_REGISTRY: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar(
+    "champion_pool_registry", default=None
+)
+
+
+def _player_pool_registry() -> dict[str, dict[str, Any]]:
+    """Return the current context's registry, or the process-wide default."""
+    scoped_registry = _SCOPED_PLAYER_POOL_REGISTRY.get()
+    return _PLAYER_POOL_REGISTRY if scoped_registry is None else scoped_registry
+
+
+@contextmanager
+def player_pool_registry_scope() -> Iterator[None]:
+    """Use a fresh player-pool registry for one simulation/context.
+
+    The previous context is restored even if the simulation raises, and nested
+    scopes restore their parent registry.
+    """
+    token = _SCOPED_PLAYER_POOL_REGISTRY.set({})
+    try:
+        yield
+    finally:
+        _SCOPED_PLAYER_POOL_REGISTRY.reset(token)
+
 
 # Default fallback meta champions per role (common LoL champion IDs)
 DEFAULT_ROLE_META: dict[str, list[int]] = {
@@ -71,14 +98,12 @@ def register_player_pool(
         "champion_frequencies": freqs,
         "comfort_champions": comfort,
     }
-    _PLAYER_POOL_REGISTRY[key] = data
+    _player_pool_registry()[key] = data
     return data
 
-
 def clear_player_pool_registry() -> None:
-    """Clear registered in-memory player pools."""
-    _PLAYER_POOL_REGISTRY.clear()
-
+    """Clear registered in-memory player pools in the current context."""
+    _player_pool_registry().clear()
 
 def compute_player_pool_metrics(
     player_id: str,
@@ -109,8 +134,9 @@ def compute_player_pool_metrics(
         - comfort_champions: list[int] (champions with pick rate >= 10%)
     """
     key = str(player_id).strip().lower()
-    if key in _PLAYER_POOL_REGISTRY:
-        return dict(_PLAYER_POOL_REGISTRY[key])
+    registry = _player_pool_registry()
+    if key in registry:
+        return dict(registry[key])
 
     # Convert as_of_date to string YYYY-MM-DD
     cutoff_str = "9999-12-31"
@@ -275,13 +301,12 @@ def ensure_player_pools_loaded(as_of_date: str = "2026-01-01", db: Any = None) -
     int
         Number of registered players in memory.
     """
-    if len(_PLAYER_POOL_REGISTRY) > 100:
-        return len(_PLAYER_POOL_REGISTRY)
+    registry = _player_pool_registry()
+    if len(registry) > 100:
+        return len(registry)
 
-    # Do not query truncated test DB during automated unit tests
-    import os
     if os.getenv("PYTEST_CURRENT_TEST") or "betting_test" in os.getenv("DATABASE_URL", ""):
-        return len(_PLAYER_POOL_REGISTRY)
+        return len(registry)
 
     try:
         if db is None:
@@ -319,6 +344,6 @@ def ensure_player_pools_loaded(as_of_date: str = "2026-01-01", db: Any = None) -
             for p_name, p_info in player_data.items():
                 register_player_pool(p_name, p_info["counts"], role=p_info["role"])
 
-        return len(_PLAYER_POOL_REGISTRY)
+        return len(registry)
     except Exception:
-        return len(_PLAYER_POOL_REGISTRY)
+        return len(registry)

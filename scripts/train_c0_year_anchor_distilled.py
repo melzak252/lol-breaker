@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 """Train and Evaluate the 18-Token Distilled Multi-Horizon History Attention Architecture.
 
-Adds each player's strictly causal 365-Day Whole-Year Anchor Token:
-- [empty_token, year_anchor_365d_token, map_1, ..., map_16] = 18 tokens in attention
-- YearAnchorCommonMapResidual(width=32): 6,638 parameters per seed (6,606 + 32)
+Adds each player's strictly prior 365-day whole-year anchor token:
+- [empty_token, year_anchor_365d_token, map_1, ..., map_16] = 18 tokens
 - Normalization: Exact same TRAIN HistoryNormalizer as C0 (z-scored coordinate alignment)
 - Distillation: 16 epochs on TRAIN (N=36,205) using Teacher B (Multi-Capacity Super-Teacher)
   with distillation_weight=0.6 (0.40 * Hard_Beta_NLL + 0.60 * Soft_Teacher_KL + 0.10 * Aux_SmoothL1)
-- Evaluates:
-  1. C0-Slim-Year (1 single seed 20260910, 6,638 neural params)
-  2. C0-D-Year-Core (3 seeds 20260910..12, 19,914 neural params)
-  3. C0-D-Year-HybridCore (CAL-fitted logit blend of C0-D-Year-Core + C0-D-Core)
-  4. C0-D-Year (0.50 * C0-D-Year-Core + 0.50 * c0_raw_connector + causal ONS)
-- Full Evaluation on ASSESS (N=3,103):
-  - LogLoss, Brier, ECE (10-bin), Tail count (LL >= 2.5), 6 C0 subgroup guards
-  - 5,000-draw paired monthly-block bootstrap 95% CIs vs C0 and vs C0-D-Core
-  - Longshot & Slump-Recovery Analysis
-  - Full Financial Simulations (10,000 PLN Bankroll, NO EXP-039, All Gates + DRO Active)
-    on Polish Production Cohort (50/45-bet), Longshot Subset, and Sharp Pinnacle T-1h (N=1,668)
+
+Bank provenance: ``scripts/build_year_anchor_bank.py`` rebuilds this token from the
+release-corrected bank resolved through ``data/research_root.txt``. Its 33-value
+map layout follows the historical ``temporal_player_features.py`` implementation
+in the canonical benchmark. The builder asserts chronological metadata order,
+retains stable metadata row alignment and uses only released maps strictly before
+the current day and within 365 days.
+Rebuild the bank with ``python scripts/build_year_anchor_bank.py`` before training.
 
 Outputs saved to:
 - data/08_reporting/c0_upgrade_and_distillation_20261017/year_anchor_distilled.json
@@ -73,13 +69,14 @@ OUTPUT_PARQUET_PATH = REPORT_DIR / "year_anchor_distilled_predictions.parquet"
 
 
 def resolve_research_root() -> Path:
+    configured = Path((PROJECT_ROOT / "data/research_root.txt").read_text().strip())
     candidates = [
+        configured if configured.is_absolute() else PROJECT_ROOT / configured,
         Path("/home/melzak/.codex/.chatgpt-projects/g-p-6944b69bdee08191acfcfeb7a38f372a"),
-        PROJECT_ROOT / "data/05_model_input/canonical_benchmark",
     ]
-    for c in candidates:
-        if (c / "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/metadata.parquet").is_file():
-            return c
+    for candidate in candidates:
+        if (candidate / "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/metadata.parquet").is_file():
+            return candidate
     raise FileNotFoundError("Could not find valid research root containing release_corrected_bank")
 
 
@@ -559,10 +556,11 @@ def main() -> int:
     ref_cal = joblib.load(PROJECT_ROOT / "data/06_models/a0_data_focus/a0_data_focus_20260929_192443/control/calibration/model.joblib")
     print("Loaded shared experts and reference calibration.")
 
-    # 2. Load Year Anchor Bank
     y_hist = np.load(BANK_DIR / "year_anchor_history.npy", mmap_mode="r")
     y_mask = np.load(BANK_DIR / "year_anchor_mask.npy", mmap_mode="r")
-    print(f"Loaded year anchor history {y_hist.shape} and mask {y_mask.shape}")
+    year_ids = np.load(BANK_DIR / "year_anchor_row_ids.npy", mmap_mode="r", allow_pickle=False)
+    np.testing.assert_array_equal(year_ids, frame["golgg_match_id"].astype(str).to_numpy(dtype=str))
+    print(f"Loaded year anchor history {y_hist.shape} and mask {y_mask.shape}; row IDs match metadata.")
     assert y_hist.shape == (40636, 2, 5, 1, 33)
     assert y_mask.shape == (40636, 2, 5, 1)
 

@@ -48,7 +48,9 @@ def replay_identity_sources(source_path, series, arrays, schema, *, output, root
     if len(targets) != len(series):
         raise ValueError("duplicate canonical target")
     overrides = old._release_overrides(tuple(Path(root) for root in roots))
-    observed_matches, observed_games, observed_events = set(), set(), set()
+    observed_matches = set()
+    observed_games = set()
+    observed_events = set()
     source_rows = []
     writer = None
     event_offset = 0
@@ -167,7 +169,7 @@ def replay_identity_sources(source_path, series, arrays, schema, *, output, root
         while release_position < len(release_days) and release_days[release_position] < day_string:
             release_string = release_days[release_position]
             rr = [pickle.loads(sources[rank][3]) for rank in sorted(
-                releases[release_string], key=lambda r: old._series_key(sources[r][0]))]
+                releases[release_string], key=lambda r, rows=sources: old._series_key(rows[r][0]))]
             rr = [record for record in rr if record.maps]
             if rr:
                 strength._consume_release_day(state, rr, date.fromisoformat(release_string))
@@ -185,7 +187,7 @@ def replay_identity_sources(source_path, series, arrays, schema, *, output, root
                     mean, variance = strength._player_team_strength(state, opponent, day, strength._PROCESS_SLOW)
                     own = ii[source_slots[ii] // 5 == side]
                     numeric[own, 16:18] = mean, math.sqrt(variance)
-    del sources, source_rows, state
+    del sources, state
     # Per-token event pointers retain right-alignment without repeated identity strings.
     shape = arrays["mask"].shape
     pointers = np.full(shape, -1, dtype=np.int64)

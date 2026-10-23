@@ -30,7 +30,7 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-from src.analysis.probability_metrics import binary_log_loss_vector as log_loss_vector
+from src.analysis.probability_metrics import binary_log_loss_vector as log_loss_vector, calculate_ece
 HELPER_SCRIPT = PROJECT_ROOT / "scripts" / "06_metamodel" / "06i_best_metamodel_config_search.py"
 OUTPUT_DIR = PROJECT_ROOT / "docs" / "assets" / "w20_binomial_lr_vs_extratrees"
 TARGET = "y_true"

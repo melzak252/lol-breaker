@@ -62,8 +62,7 @@ def attach_market(metadata, odds):
     valid=(same|swapped)
     d['market_alignment']=np.select([same,swapped],['same','swapped'],default='unresolved')
     day_ok=(pd.to_datetime(d.date)-pd.to_datetime(d.golgg_date)).abs().dt.days<=1
-    # bool strings must never use Python's bool('False').
-    result=d.t1_win.map({True:1,False:0,'True':1,'False':0,'true':1,'false':0,1:1,0:0})
+    result=d.t1_win.astype(str).str.lower().map({'true':1,'false':0,'1':1,'0':0})
     oriented=np.where(swapped,1-result,result)
     outcome_ok=oriented==d.y_true
     valid &= day_ok & outcome_ok

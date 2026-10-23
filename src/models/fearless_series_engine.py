@@ -3,7 +3,7 @@
 Implements sequential Markov map-by-map simulation under official Hard Fearless Draft
 rules (MSI 2025+, Worlds 2025+, LCK Cup, etc.):
 1. Side choice dynamics:
-   - Game 1: Higher seed (or team_a) gets Blue side choice.
+   - Game 1: explicit higher seed gets Blue; unknown side is randomized 50/50.
    - Game 2+: Loser of previous map chooses side (default Blue).
    - Blue side advantage: Delta_side = +-0.1242 in logit space (+25.0 rating points).
 2. Hard Fearless Draft champion pool depletion:
@@ -181,6 +181,59 @@ def series_prob_to_map_prob(series_prob: float, best_of: int = 5) -> float:
         return 0.5 * (low + high)
 
 
+def fearless_series_win_probability(
+    map_logit: float,
+    best_of: int,
+    first_blue_is_a: bool | None = None,
+) -> float:
+    """Exact P(Team A wins series) under the engine's side dynamics, zero depletion.
+
+    Map 1 side is ``first_blue_is_a`` (``None`` = unknown, averaged 50/50); in
+    maps 2+ the previous-map loser takes Blue. ``map_logit`` is the side-neutral
+    per-map logit for Team A; Blue adds ``+BLUE_SIDE_LOGIT_DELTA`` to its owner.
+    """
+    target = (int(best_of) // 2) + 1
+    memo: dict[tuple[int, int, bool], float] = {}
+
+    def win_prob(a: int, b: int, a_blue: bool) -> float:
+        if a == target:
+            return 1.0
+        if b == target:
+            return 0.0
+        key = (a, b, a_blue)
+        if key in memo:
+            return memo[key]
+        side = BLUE_SIDE_LOGIT_DELTA if a_blue else -BLUE_SIDE_LOGIT_DELTA
+        p_map = 1.0 / (1.0 + math.exp(-(map_logit + side)))
+        # Winner of the map is on the other side next map (loser picks Blue).
+        value = p_map * win_prob(a + 1, b, False) + (1.0 - p_map) * win_prob(a, b + 1, True)
+        memo[key] = value
+        return value
+
+    if first_blue_is_a is None:
+        return 0.5 * (win_prob(0, 0, True) + win_prob(0, 0, False))
+    return win_prob(0, 0, bool(first_blue_is_a))
+
+
+def calibrate_map_logit(series_prob: float, best_of: int) -> float:
+    """Side-neutral per-map logit whose side-averaged series probability equals ``series_prob``.
+
+    Unlike inverting a plain binomial, this accounts for the Blue-side bonus and the
+    loser-picks-Blue rule, so with zero depletion the simulated series win
+    probability reproduces the input and p(A,B) + p(B,A) = 1 exactly (the 50/50
+    map-1 side average is symmetric under swapping teams).
+    """
+    target = float(np.clip(series_prob, 1e-6, 1.0 - 1e-6))
+    low, high = -25.0, 25.0
+    for _ in range(100):
+        mid = 0.5 * (low + high)
+        if fearless_series_win_probability(mid, best_of) < target:
+            low = mid
+        else:
+            high = mid
+    return 0.5 * (low + high)
+
+
 def compute_team_depletion(
     players: Sequence[str],
     burned_champions: set[int] | frozenset[int] | Sequence[int],
@@ -346,7 +399,8 @@ def simulate_fearless_series_maps(
     best_of : int
         Series length format (typically 3 or 5; must be odd positive integer).
     higher_seed : str | None, optional
-        Name of the higher-seeded team receiving Game 1 side choice (defaults to team_a).
+        Name of the higher-seeded team receiving Game 1 Blue side; must be ``team_a`` or
+        ``team_b``. ``None`` (default): Game 1 side is unknown and drawn 50/50.
     base_series_prob : float | None, optional
         Unadjusted series win probability P(Team A wins series).
     base_rating_a : float | None, optional
@@ -390,15 +444,19 @@ def simulate_fearless_series_maps(
 
     # Derive base neutral logit
     if base_series_prob is not None:
-        p_map = series_prob_to_map_prob(base_series_prob, best_of)
-        p_clipped = float(np.clip(p_map, 1e-6, 1.0 - 1e-6))
-        base_logit = math.log(p_clipped / (1.0 - p_clipped))
+        # Side-aware calibration: with zero depletion the side-averaged series win
+        # probability equals ``base_series_prob`` exactly, and p(A,B) + p(B,A) = 1.
+        base_logit = calibrate_map_logit(base_series_prob, best_of)
     elif base_rating_a is not None or base_rating_b is not None:
         ra = 1500.0 if base_rating_a is None else float(base_rating_a)
         rb = 1500.0 if base_rating_b is None else float(base_rating_b)
         base_logit = (ra - rb) * RATING_TO_LOGIT_SCALE
     else:
         base_logit = 0.0
+
+    if higher_seed is not None and higher_seed not in (team_a, team_b):
+        raise ValueError(f"higher_seed must be team_a or team_b, got {higher_seed!r}")
+    first_blue_team = higher_seed if higher_seed is not None else (team_a if rng.random() < 0.5 else team_b)
 
     score_a = 0
     score_b = 0
@@ -409,10 +467,11 @@ def simulate_fearless_series_maps(
 
     while score_a < target_wins and score_b < target_wins:
         # Side choice sequence:
-        # Game 1: Higher seed (or team_a) gets Blue side choice.
+        # Game 1: explicit ``higher_seed`` gets Blue; otherwise the side is unknown
+        #   pre-match and drawn 50/50 (never silently assigned to team_a).
         # Game 2+: Loser of previous map chooses side for the next map (default Blue).
         if current_map == 1:
-            if higher_seed is not None and higher_seed == team_b:
+            if first_blue_team == team_b:
                 blue_team = team_b
                 red_team = team_a
             else:
@@ -504,7 +563,9 @@ __all__ = [
     "FearlessSeriesResult",
     "MapResult",
     "RATING_TO_LOGIT_SCALE",
+    "calibrate_map_logit",
     "compute_team_depletion",
+    "fearless_series_win_probability",
     "sample_fearless_map_draft",
     "series_prob_to_map_prob",
     "simulate_fearless_series_maps",

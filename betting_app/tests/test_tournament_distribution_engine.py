@@ -137,13 +137,20 @@ def test_pair_adapter_all_backends_bounds_and_anti_symmetry(model: str, tmp_path
         )
 
 
-def test_pair_adapter_temporal_cutoff_isolation() -> None:
+def test_pair_adapter_temporal_cutoff_isolation(tmp_path) -> None:
     """Verify that earlier cutoff excludes later matches."""
-    adapter = TournamentPairAdapter()
-    # At early 2021 vs late 2024
+    source = tmp_path / "series_results.csv"
+    source.write_text(
+        "status,scheduled_at_utc,team1,team2,winner_side,best_of\n"
+        "completed,2020-01-01T00:00:00Z,T1,G2,1,3\n"
+        "completed,2023-01-01T00:00:00Z,T1,G2,1,3\n",
+        encoding="utf-8",
+    )
+    adapter = TournamentPairAdapter(source)
+    # Later evidence changes ratings only after its strict cutoff.
     r_early = adapter.compute_team_ratings("2021-01-01T00:00:00Z")
     r_late = adapter.compute_team_ratings("2024-10-01T00:00:00Z")
-    # Teams have more experience and lower RD in late 2024
+    assert r_late["T1"].rating != r_early["T1"].rating
     assert r_late["T1"].rd < r_early["T1"].rd
 
 
@@ -153,14 +160,18 @@ def test_pair_adapter_temporal_cutoff_isolation() -> None:
 
 def test_bracket_simulator_swiss_mass_conservation() -> None:
     """Verify Swiss bracket simulation preserves exact participant flow."""
-    adapter = TournamentPairAdapter()
     teams = [
         "GEN", "BLG", "JDG", "NRG", "G2", "T1", "KT", "WBG",
         "LNG", "DK", "FNC", "MAD", "C9", "TL", "BDS", "GAM"
     ]
     cutoff = "2023-10-18T00:00:00Z"
     spec = instantiate_profile("worlds-2023-swiss-knockout", teams)
-    probs = adapter.predict_pair_table(teams, cutoff, model_kind="calibrated_regional_glicko_proxy")
+    probs = {
+        (a, b, bo): 0.5
+        for a, b in combinations(teams, 2)
+        for bo in (1, 3, 5)
+    }
+    probs.update({(b, a, bo): 0.5 for a, b, bo in list(probs)})
 
     simulator = TournamentBracketSimulator(simulations=50, seed=123)
     results = simulator.simulate(spec, probs)
@@ -183,11 +194,14 @@ def test_bracket_simulator_swiss_mass_conservation() -> None:
 
 def test_bracket_simulator_double_elimination_conservation() -> None:
     """Verify double elimination bracket simulation preserves probability mass."""
-    adapter = TournamentPairAdapter()
     teams = ["GEN", "JDG", "MAD", "C9", "T1", "BLG", "G2", "GG"]
-    cutoff = "2023-05-08T00:00:00Z"
     spec = instantiate_profile("msi-2023-2026-double-elimination", teams)
-    probs = adapter.predict_pair_table(teams, cutoff, model_kind="calibrated_regional_glicko_proxy")
+    probs = {
+        (a, b, bo): 0.5
+        for a, b in combinations(teams, 2)
+        for bo in (1, 3, 5)
+    }
+    probs.update({(b, a, bo): 0.5 for a, b, bo in list(probs)})
 
     simulator = TournamentBracketSimulator(simulations=50, seed=456)
     results = simulator.simulate(spec, probs)
@@ -388,6 +402,7 @@ def test_network_flow_conservation_detects_violations() -> None:
 # 5. Ground Truth and Scoring Rules
 # =========================================================================
 
+@pytest.mark.requires_artifacts(PROJECT_ROOT / "data/artifacts/leaguepedia-tournament-rules-20260908/series_results.csv")
 def test_ground_truth_extraction_worlds_2023() -> None:
     """Verify historical ground-truth extraction for Worlds 2023."""
     gt = extract_tournament_ground_truth("2023 Season World Championship/Main Event")
@@ -401,6 +416,7 @@ def test_ground_truth_extraction_worlds_2023() -> None:
     assert gt.swiss_records["TL"] == "0-3"
 
 
+@pytest.mark.requires_artifacts(PROJECT_ROOT / "data/artifacts/leaguepedia-tournament-rules-20260908/series_results.csv")
 def test_ground_truth_extraction_msi_2023() -> None:
     """Verify historical ground-truth extraction for MSI 2023."""
     gt = extract_tournament_ground_truth("2023 Mid-Season Invitational")

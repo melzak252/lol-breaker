@@ -426,7 +426,7 @@ class BettingRecommendation(BaseModel):
     thesis_guard_passed: bool | None = None
     guard_b_passed: bool | None = None
     logit_disagreement: float | None = None
-    raw_clv: float | None = None
+    current_market_edge: float | None = None
 
 class MatchDetailResponse(BaseModel):
     canonical_match_id: int
