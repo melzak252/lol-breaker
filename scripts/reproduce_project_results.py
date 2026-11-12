@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay project-report scores and flat-stake diagnostics from installed ledgers.
+"""Replay project scores, saved wallets, and recorded-price diagnostics.
 
 No fitting, model inference, database access, or network access is performed.
 """
@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import platform
+from decimal import Decimal
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Sequence
@@ -27,6 +28,11 @@ from src.analysis.long_term_market_evaluation import (
 )
 from src.analysis.metrics import binary_log_loss_vector, calculate_ece
 from src.analysis.production_market_benchmark import paired_cluster_interval
+from src.analysis.production_saved_evidence import (
+    pair_production_closes,
+    summarize_production_closes,
+    summarize_production_wallet,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 YEAR_RANGE = tuple(range(2021, 2027))
@@ -38,6 +44,11 @@ FIRST = "OPEN_OR_FIRST_OBSERVED"
 CONSENSUS_SEED = 20261023
 C20R_VERSION = "c0-native-fresh20-2026-10-21-v1-regional-v1"
 LEAD_BINS = ("[0,2)", "[2,6)", "[6,12)", "[12,24)", "[24,48)", "[48,96)", "[96,inf)")
+PRODUCTION_RUN = "c0_gate_optimizer_20261023_01"
+PRODUCTION_INPUT = f"data/05_model_input/c0_gate_optimizer/{PRODUCTION_RUN}"
+PRODUCTION_OUTPUT = f"data/08_reporting/c0_gate_optimizer/{PRODUCTION_RUN}"
+PRODUCTION_CLOSE = "data/08_reporting/production_zero_tax_clv/production_zero_tax_clv_20261023_01"
+PRODUCTION_WINDOWS = ("h0_2", "h2_6", "h6_12", "h12_24", "h24_48", "primary48")
 
 PATHS = {
     "model_predictions": "data/07_model_output/c0_model_improvement/c0_model_improvement_20261026_01/predictions.parquet",
@@ -57,6 +68,17 @@ PATHS = {
     "glicko_predictions": "data/artifacts/corrected-ratings-logloss-20260908-full/holdout_predictions.csv",
     "glicko_summary": "data/artifacts/corrected-ratings-logloss-20260908-full/summary.json",
     "glicko_verification": "data/artifacts/corrected-ratings-logloss-20260908-full/verification.json",
+    "production_protocol": f"{PRODUCTION_INPUT}/protocol.json",
+    "production_configurations": f"{PRODUCTION_INPUT}/configurations.json",
+    "production_fixtures": f"{PRODUCTION_INPUT}/fixtures.parquet",
+    "production_binding": f"{PRODUCTION_INPUT}/binding.json",
+    "production_verification": f"{PRODUCTION_OUTPUT}/final_verification.json",
+    "production_wallet_summary": f"{PRODUCTION_OUTPUT}/sweep/summary.parquet",
+    "production_selected": f"{PRODUCTION_OUTPUT}/sweep/selected.parquet",
+    "production_funded": f"{PRODUCTION_OUTPUT}/sweep/funded_ledger.parquet",
+    "production_entry_clv": f"{PRODUCTION_CLOSE}/clv/entry_clv_panel.parquet",
+    "production_clv_verification": f"{PRODUCTION_CLOSE}/verification/sealed_verification.json",
+    "production_saved_evidence_source": "src/analysis/production_saved_evidence.py",
     "production_market_source": "src/analysis/production_market_benchmark.py",
     "selection_source": "src/analysis/long_term_market_evaluation.py",
     "score_source": "src/analysis/metrics.py",
@@ -602,6 +624,149 @@ def _check_additional_bindings(paths: dict[str, Path]) -> dict[str, Any]:
     return summary
 
 
+def _production_evidence(paths: dict[str, Path]) -> dict[str, Any]:
+    """Recompute twelve fixed saved portfolios, without rerunning policy selection."""
+    seal = json.loads(paths["production_verification"].read_text(encoding="utf-8"))
+    binding = json.loads(paths["production_binding"].read_text(encoding="utf-8"))
+    closing_seal = json.loads(paths["production_clv_verification"].read_text(encoding="utf-8"))
+    if seal.get("status") != "COMPLETED" or seal.get("input_binding_sha256") != _sha256(paths["production_binding"]):
+        raise ValueError("production wallet seal or input binding is invalid")
+    if closing_seal.get("status") != "COMPLETED_HISTORICAL_CONDITIONAL_DIAGNOSTIC":
+        raise ValueError("unexpected production closing-reference seal")
+    for source, keys in (
+        (binding, ("production_protocol", "production_configurations", "production_fixtures")),
+        (seal, ("production_wallet_summary", "production_selected", "production_funded")),
+        (closing_seal, ("production_entry_clv",)),
+    ):
+        for key in keys:
+            if source.get("files", {}).get(PATHS[key], {}).get("sha256") != _sha256(paths[key]):
+                raise ValueError(f"production source SHA-256 mismatch: {PATHS[key]}")
+    protocol = json.loads(paths["production_protocol"].read_text(encoding="utf-8"))
+    if protocol.get("model") != C20R_VERSION or protocol.get("sports_share") != 0.5:
+        raise ValueError("production evidence has an unexpected model or sports share")
+    configurations = json.loads(paths["production_configurations"].read_text(encoding="utf-8"))
+    baseline = [item for item in configurations if item["config_id"] == "baseline"]
+    if len(baseline) != 1 or baseline[0]["changes"] or baseline[0]["disabled_groups"]:
+        raise ValueError("production baseline must retain its frozen policy")
+
+    case_ids = [f"tax{tax:g}__logit__baseline__{window}"
+                for tax in (0.0, 0.12) for window in PRODUCTION_WINDOWS]
+    query = [("case_id", "in", case_ids)]
+    references = pd.read_parquet(paths["production_wallet_summary"], filters=query)
+    selected = pd.read_parquet(paths["production_selected"], filters=query)
+    funded = pd.read_parquet(paths["production_funded"], filters=query)
+    if references.case_id.duplicated().any() or set(references.case_id) != set(case_ids):
+        raise ValueError("production evidence must contain exactly the twelve fixed cases")
+    if not selected.event_id.eq(selected.opportunity_id).all():
+        raise ValueError("production selected event and opportunity identities differ")
+    selected = selected.set_index(["case_id", "opportunity_id"])
+    funded = funded.set_index(["case_id", "opportunity_id"])
+    if not selected.index.is_unique or not funded.index.is_unique:
+        raise ValueError("production selected/funded ticket identities must be unique")
+    if set(selected.index) != set(funded.index):
+        raise ValueError("selected and funded production ticket identities differ")
+    selected = selected.reindex(funded.index)
+    for column in ("canonical_match_id", "decision_at", "settle_at", "side", "bookmaker", "y"):
+        left, right = selected[column], funded[column]
+        if not (left.eq(right) | (left.isna() & right.isna())).all():
+            raise ValueError(f"selected/funded production mismatch: {column}")
+    if any(Decimal(str(left)) != Decimal(str(right))
+           for left, right in zip(selected.odds, funded.odds, strict=True)):
+        raise ValueError("selected and funded Decimal odds differ")
+    if not np.allclose(selected.ev_net.to_numpy(float), funded.model_ev.to_numpy(float), rtol=0, atol=1e-12):
+        raise ValueError("selected and funded expected returns differ")
+    funded["start"] = selected.start
+    funded["snapshot_id"] = selected.snapshot_id
+    funded = funded.reset_index()
+    references = references.set_index("case_id")
+    funded["tax_rate"] = funded.case_id.map(references.tax)
+
+    fixtures = pd.read_parquet(paths["production_fixtures"])
+    if (fixtures.canonical_match_id.isna().any() or fixtures.canonical_match_id.duplicated().any()
+            or not isinstance(fixtures.start.dtype, pd.DatetimeTZDtype)):
+        raise ValueError("production fixture identities and aware start clocks are required")
+    fixture_months = fixtures.start.dt.tz_convert("UTC").dt.strftime("%Y-%m")
+    months = sorted(fixture_months.unique())
+    entries = pd.read_parquet(paths["production_entry_clv"])
+    windows = {item["window_id"]: item for item in protocol["windows"]}
+    portfolios = []
+    for case_id in case_ids:
+        reference = references.loc[case_id]
+        if reference.method != "logit" or reference.config_id != "baseline":
+            raise ValueError("production policy identity differs from the fixed baseline")
+        ledger = funded.loc[funded.case_id.eq(case_id)].copy()
+        window = windows[reference.window_id]
+        lead_hours = (ledger.start - ledger.decision_at).dt.total_seconds() / 3600
+        if not ((lead_hours >= window["lo"]) & (lead_hours < window["hi"])).all():
+            raise ValueError(f"production tickets fall outside {reference.window_id}")
+        if int(reference.fixture_denominator) != len(fixtures):
+            raise ValueError("production fixture denominator was reduced")
+        wallet = summarize_production_wallet(ledger, months, draws=DRAWS, seed=CONSENSUS_SEED)
+        for actual_key, saved_key in (
+            ("bets", "funded_count"), ("settled_bets", "settled_count"), ("pending_bets", "pending_count"),
+        ):
+            if wallet[actual_key] != int(reference[saved_key]):
+                raise ValueError(f"production wallet count mismatch: {case_id}/{saved_key}")
+        if len(selected.loc[case_id]) != int(reference.selected_count):
+            raise ValueError("production selected-ticket count mismatch")
+        for actual_key, saved_key, tolerance in (
+            ("settled_profit", "profit", 1e-8), ("settled_turnover", "turnover", 1e-8),
+            ("settled_roi", "roi", 1e-12),
+        ):
+            if not np.isclose(wallet[actual_key], float(reference[saved_key]), rtol=0, atol=tolerance):
+                raise ValueError(f"production wallet arithmetic mismatch: {case_id}/{saved_key}")
+        closes = {
+            age: summarize_production_closes(
+                pair_production_closes(ledger, entries, reference=age),
+                months, draws=DRAWS, seed=CONSENSUS_SEED)
+            for age in ("300", "3600", "anyage")
+        }
+        portfolios.append({
+            "case_id": case_id, "tax_rate": float(reference.tax), "window_id": reference.window_id,
+            "hours_before_start": {"lower_inclusive": window["lo"], "upper_exclusive": window["hi"]},
+            "source_price_fixtures": int(reference.source_window_fixture_count),
+            "source_loo_fixtures": int(reference.source_loo_window_fixture_count),
+            "selected_bets": int(reference.selected_count), "wallet": wallet,
+            "closing_reference_proxies": closes,
+        })
+    first_reference = references.iloc[0]
+    for field in ("source_matched_fixture_count", "source_matched_quotes",
+                  "source_loo_global_quotes", "source_loo_global_fixture_count"):
+        if references[field].nunique() != 1:
+            raise ValueError(f"production cohort changes across fixed cases: {field}")
+    return {
+        "model": protocol["model"], "status": "HISTORICAL_COUNTERFACTUAL_NOT_RECORDED_BETS",
+        "cohort": {
+            "fixtures": len(fixtures), "quotes": int(first_reference.source_matched_quotes),
+            "entry_loo_quotes": int(first_reference.source_loo_global_quotes),
+            "entry_loo_fixtures": int(first_reference.source_loo_global_fixture_count),
+            "fixture_start_min": fixtures.start.min().isoformat(),
+            "fixture_start_max": fixtures.start.max().isoformat(),
+            "fixture_start_months": months,
+            "fixtures_by_start_month": fixture_months.value_counts().sort_index().to_dict(),
+        },
+        "policy": {
+            "configuration": baseline[0], "method": "logit", "sports_share": protocol["sports_share"],
+            "taxes_requalified_independently": [0.0, 0.12], "portfolio": protocol["portfolio"],
+            "selection": "first eligible recorded observation per fixture within each half-open interval",
+            "unassessed_guards": ["rating_disagreement", "contemporaneous_clv_drift"],
+        },
+        "portfolios": portfolios, "true_clv": None,
+        "true_clv_status": "not_available_no_certified_close_or_fill",
+        "closing_reference_ages_seconds": {"300": 300, "3600": 3600, "anyage": None},
+        "scope_limits": [
+            "Production-collected prices and saved counterfactual C20R probabilities, not authenticated issued forecasts or actual bets.",
+            "Reference ages are seconds before conservative recorded start, not elapsed seconds after entry.",
+            "Two-hour collection cadence does not authenticate actual start, a complete close, source permission, or fills.",
+            "Closing metrics are conditional on covered entries; missing references are not zero CLV.",
+            "Gross LOO proxy excludes stake tax; net LOO proxy includes the scenario's stake tax.",
+            "The original per-ticket free-cash exposure cap is not a 25% aggregate exposure cap.",
+            "Independent interval wallets overlap; do not sum them or select a winning interval after scoring.",
+            "Monthly intervals reuse retained funded stakes, not newly simulated wallet paths or refitted policies.",
+        ],
+    }
+
+
 def replay() -> tuple[dict[str, Any], dict[str, str]]:
     paths = _check_inputs()
     glicko_source = _check_additional_bindings(paths)
@@ -745,6 +910,7 @@ def replay() -> tuple[dict[str, Any], dict[str, str]]:
             ("samebook_50_50_requalified_tax_12_percent", samebook_requalified_tax),
         )
     }
+    production_betting = _production_evidence(paths)
 
     hashes = {key: _sha256(path) for key, path in paths.items()}
     bootstrap_by_domain = {
@@ -766,9 +932,16 @@ def replay() -> tuple[dict[str, Any], dict[str, str]]:
             "month_universe": glicko["cohort"]["months"],
             "estimand": "equal series; equal-month sensitivity",
         },
+        "production_betting": {
+            "resamples": DRAWS, "seed": CONSENSUS_SEED, "confidence_level": 0.95,
+            "blocks": "complete preselection fixture-start UTC months; zero-action months retained",
+            "month_universe": production_betting["cohort"]["fixture_start_months"],
+            "estimand": "saved-stake ROI ratio; equal-ticket closing proxies, stake-weighted sensitivity",
+            "undefined_draws": "retained; any zero-denominator draw withholds the interval",
+        },
     }
     snapshot = {
-        "schema": "project_results_replay_v2",
+        "schema": "project_results_replay_v3",
         "status": "REPLAYED_FROM_INSTALLED_SAVED_ARTIFACTS",
         "reproduction": {
             "bootstrap_by_domain": bootstrap_by_domain,
@@ -796,11 +969,13 @@ def replay() -> tuple[dict[str, Any], dict[str, str]]:
         "glicko2_comparison": glicko,
         "financial_scenarios": financial,
         "later_price_proxies": later_price_proxies,
+        "production_betting": production_betting,
         "scope_limits": [
             "Historical development results; no prospective or held-out confirmation.",
             "ROI is known-label return per unit stake (turnover), not bankroll growth.",
             "Unknown labels leave whole-portfolio P&L and ROI undefined.",
-            "First observed is not certified opening price; no authenticated activity, fills, two-other-book hybrid, or full application-gate replay.",
+            "OddsPortal scenarios use a focal-book blend, not a two-other-book hybrid or full application-gate replay.",
+            "Production scenarios use a two-other-book logit blend but leave rating/drift guards unassessed; no authenticated activity or fills.",
             "Endpoint policy portfolios overlap and are not additive.",
             "Later-price statistic is a recorded-price proxy, not true CLV or executable close.",
             "No fit, inference, acquisition, database access, or network access in this replay.",
@@ -819,7 +994,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise FileExistsError(f"exclusive output directory already exists: {output_dir}")
     summary, hashes = replay()
     receipt = {
-        "schema": "project_results_replay_receipt_v2",
+        "schema": "project_results_replay_receipt_v3",
         "status": "PASS",
         "bootstrap_by_domain": summary["reproduction"]["bootstrap_by_domain"],
         "source_sha256": hashes,

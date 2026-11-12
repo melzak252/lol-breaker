@@ -92,6 +92,59 @@ nominal 95% CI across 30 monthly blocks. This supports a historical comparison o
 rating controls, **not a cross-cohort C20R/market ranking** or promotion.
 [Raw controls, updates and calibration](docs/PROJECT_REPORT.md#player-versus-organization-glicko-2).
 
+## Production-collected betting results
+
+Audited Polish-bookmaker export: **482 fixtures / 100,949 quotes**, with fixture starts
+**2026-05-29–2026-10-22**. This is not data through today.
+Entry-time consensus covers 400 fixtures / 51,208 quotes with at least **two other fresh books**.
+These are saved **C20R counterfactual simulations, not recorded bets or live-issued forecasts**.
+
+### Betting by time to recorded start
+
+Fixed 50/50 sports/other-book **logit** blend; first eligible observed quote per fixture in each
+half-open interval, never the future-best price. Each wallet starts with PLN10,000, uses quarter
+Kelly, PLN2–150 stakes and reserves open stakes. The 0% and 12% cases requalify independently;
+0% retains the same Polish prices, **not actual UK or Pinnacle prices**.
+
+| Lead hours | LOO-ready fixtures | 0% bets | 0% P&L, PLN | 0% ROI | 12% bets | 12% P&L, PLN | 12% ROI |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| [0,2) | 291 | 31 | +83.50 | +2.08% | 3 | +50.20 | +13.92% |
+| [2,6) | 325 | 39 | +1,289.76 | +24.67% | 5 | +74.10 | +12.24% |
+| [6,12) | 328 | 49 | +962.59 | +14.37% | 5 | +73.11 | +11.04% |
+| [12,24) | 304 | 44 | -515.87 | -8.42% | 8 | -1,055.75 | -100.00% |
+| [24,48) | 249 | 42 | +0.87 | +0.02% | 6 | -523.74 | -61.44% |
+| Full [0,48) | 370 | 82 | +1,728.80 | +15.40% | 16 | -397.69 | -18.46% |
+
+ROI is profit/stake turnover, not bankroll growth. All displayed portfolios are fully settled;
+the same fixture can appear in several wallets, so **do not sum rows or choose a winning band**.
+The zero-tax full-window nominal 95% ROI interval is **[-4.22%, +48.59%]**.
+The 12% interval is withheld: 8/5,000 monthly resamples have no bets.
+Six start-month blocks include zero-action months; this is not independent edge confirmation.
+Rating-disagreement and contemporaneous drift safeguards remain **not assessed**.
+[Wins, turnover, all intervals and exact frozen gates](docs/PROJECT_REPORT.md#production-collected-interval-wallets).
+
+### Production closing-price proxies
+
+**True closing CLV is unavailable.** Roughly two-hour collection does not guarantee a quote at
+the actual close or an executable fill. Below, every other-book contributor is within **five
+minutes before conservative recorded start**, excludes the selected book, and at least one is
+strictly later than entry. Missing references remain missing, not zero.
+
+| Entry lead hours | 0% covered / bets | 0% net fair-price proxy | 12% covered / bets | 12% net fair-price proxy |
+|---|---:|---:|---:|---:|
+| [0,2) | 7/31 | -1.16% | 1/3 | -8.28% |
+| [2,6) | 9/39 | +0.71% | 1/5 | -8.28% |
+| [6,12) | 12/49 | -1.81% | 1/5 | -8.28% |
+| [12,24) | 11/44 | +3.02% | 4/8 | +0.12% |
+| [24,48) | 12/42 | +1.54% | 1/6 | -13.24% |
+| Full [0,48) | 19/82 | +1.82% | 4/16 | -1.12% |
+
+Equal-ticket proxy on **covered selections only**:
+`(1-tax)*entry_odds*later_other_book_fair_probability - 1`.
+It is not whole-portfolio CLV, realized ROI or guaranteed edge; the reference's age is measured
+before start, not after entry. Later prices are assessment references, not entry-time shrinkage.
+[Same-book raw price moves, gross/net separation, 60-minute and uncapped-age sensitivities](docs/PROJECT_REPORT.md#production-recorded-price-references).
+
 ## Historical betting results
 
 Annual year-eligible fresh20+regional forecasts, OddsPortal 2021–2026 first-observed study;
@@ -121,6 +174,7 @@ including the strict (5%,10%] band. [Same-ticket and near-band evidence](docs/PR
 
 ## CLV and execution evidence
 
+Separate **2021–2026 OddsPortal** evidence, not the production export above.
 **Authenticated closing prices and executable fills are unavailable.** These are same-book,
 strictly later recorded pre-start prices, paired separately to each portfolio's actual entries.
 The table uses **matched-known tickets**, not each full portfolio.

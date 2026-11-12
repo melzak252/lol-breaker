@@ -2,10 +2,11 @@
 
 ## Saved-ledger replay
 
-[`scripts/reproduce_project_results.py`](../scripts/reproduce_project_results.py) recomputes four
-separate evidence domains: standalone C20R scores, hierarchical other-book consensus scores,
-matched player/organization Glicko-2 controls and selected-ticket financial/later-price diagnostics.
-It reuses tracked scoring, selectors, EV, guards and bootstrap functions.
+[`scripts/reproduce_project_results.py`](../scripts/reproduce_project_results.py) recomputes five
+evidence domains: standalone C20R scores, hierarchical other-book consensus scores,
+matched player/organization Glicko-2 controls, multi-year ticket/later-price diagnostics,
+and saved production interval wallets with conditional closing-price proxies.
+It reuses tracked scoring, selectors, EV, guards, saved-wallet and bootstrap functions.
 **No training, inference, data acquisition, database connection or network access.**
 The checked-in [summary snapshot](results/project_summary.json) is output, never a fallback input.
 
@@ -17,7 +18,7 @@ From the repository root, with the bound artifacts installed:
 
 The directory must be **new**. If occupied, choose an unused numbered suffix; never overwrite or
 delete an existing run. Output is aggregate-only `project_summary.json` and `replay_receipt.json`,
-using schemas `project_results_replay_v2` and `project_results_replay_receipt_v2`.
+using schemas `project_results_replay_v3` and `project_results_replay_receipt_v3`.
 All required identities, receipts and numerical prerequisites are checked before output writing.
 Missing inputs, required hash mismatches, duplicated curated identities and inconsistent labels
 fail explicitly; no replacement probabilities, prices or convenient smaller cohorts are invented.
@@ -92,6 +93,42 @@ within 300 seconds of the paired clock; naive clocks and ambiguous duplicates re
 The historical zero-tax `first_observed_quote_proxies.parquet` is **not consumed or modified**;
 it cannot supply the independently requalified 12% portfolio's pairs.
 
+### Production wallet and closing-reference inputs
+
+| Key | Required path |
+|---|---|
+| `production_protocol` | `data/05_model_input/c0_gate_optimizer/c0_gate_optimizer_20261023_01/protocol.json` |
+| `production_configurations` | `data/05_model_input/c0_gate_optimizer/c0_gate_optimizer_20261023_01/configurations.json` |
+| `production_fixtures` | `data/05_model_input/c0_gate_optimizer/c0_gate_optimizer_20261023_01/fixtures.parquet` |
+| `production_binding` | `data/05_model_input/c0_gate_optimizer/c0_gate_optimizer_20261023_01/binding.json` |
+| `production_verification` | `data/08_reporting/c0_gate_optimizer/c0_gate_optimizer_20261023_01/final_verification.json` |
+| `production_wallet_summary` | `data/08_reporting/c0_gate_optimizer/c0_gate_optimizer_20261023_01/sweep/summary.parquet` |
+| `production_selected` | `data/08_reporting/c0_gate_optimizer/c0_gate_optimizer_20261023_01/sweep/selected.parquet` |
+| `production_funded` | `data/08_reporting/c0_gate_optimizer/c0_gate_optimizer_20261023_01/sweep/funded_ledger.parquet` |
+| `production_entry_clv` | `data/08_reporting/production_zero_tax_clv/production_zero_tax_clv_20261023_01/clv/entry_clv_panel.parquet` |
+| `production_clv_verification` | `data/08_reporting/production_zero_tax_clv/production_zero_tax_clv_20261023_01/verification/sealed_verification.json` |
+
+The wallet seal must be `COMPLETED`; its input-binding SHA-256 and the binding's protocol,
+configuration and fixture hashes are checked, along with the three saved wallet data hashes.
+The closing seal must be `COMPLETED_HISTORICAL_CONDITIONAL_DIAGNOSTIC`; its entry-panel hash
+must match. Original study source/doc hashes are not rewritten to match the new replay.
+Current numerical closure additionally includes `src/analysis/production_saved_evidence.py`.
+
+Read exactly `tax{0,0.12}__logit__baseline__{h0_2,h2_6,h6_12,h12_24,h24_48,primary48}`:
+twelve fixed existing cases, not a new optimizer sweep. Selected/funded tickets join one-to-one
+by case and opportunity, with fixture, side, book, clocks, odds and outcome checked.
+Saved stakes and Decimal payouts are verified; the current wallet engine is not called to
+replace the archived per-ticket free-cash cap with a different aggregate exposure rule.
+
+Each selected-side entry is paired independently to 300-second, 3,600-second and uncapped-age
+recorded references. JSON contributor books, IDs, clocks and ages are decoded and checked;
+the focal book is excluded and at least one other contributor must be later than entry.
+Reference ages run backward from conservative recorded start, not forward from entry.
+Same-book movement, gross LOO and tax-adjusted net LOO proxies remain distinct.
+Missing entries/references retain reasons; no reference is manufactured or counted as zero.
+Saved fair q is reused from the sealed panel, not independently reconstructed from all raw
+closing states. This establishes neither authentic closes nor fills.
+
 ### Sealed consensus inputs
 
 | Key | Required path |
@@ -150,13 +187,15 @@ none is a correction for the project's complete adaptive research history.
 | Finance and later prices | 70 preselection months, January 2021–October 2026 | 20261111 | Equal-unit-stake ratio of sums; zero-action months retained |
 | Consensus | 6 fixture scheduled-start months, May–October 2026 | 20261023 | Equal fixture after hierarchical quote/book loss aggregation |
 | Ratings | 30 match-date months, January 2024–June 2026 | 20261111 | Equal series on the identical four-column ledger |
+| Production wallets and closing proxies | All 6 fixture-start months, May–October 2026 | 20261023 | Saved-stake ROI; equal-ticket covered price metrics and stake-weighted sensitivity |
 
 Standalone sports scores cover 2026-01-08–2026-09-08; market scores use
 51,208 quote cases / 400 fixtures; ratings cover 2024-01-01–2026-06-14.
 Financial mapped targets span 2021-01-09–2026-09-07, not the entire resampling calendar.
+The production export's fixture starts span 2026-05-29–2026-10-22, not later captures.
 
 Consensus and ratings intervals return both fixture/series-weighted and equal-month differences.
-Finance JSON retains active-block counts, equal-active-month estimates, empty/valid replicates,
+Multi-year finance JSON retains active-block counts, equal-active-month estimates, empty/valid replicates,
 statuses, known-label and near-band EV−return intervals. Empty selections have null conditional
 metrics; unresolved outcomes remain selected and leave whole-portfolio return null.
 Later-price statistics separately expose all-price-pair and matched-known scopes and
@@ -164,9 +203,12 @@ active-month-only bootstrap sensitivities. Genuine closing CLV stays null with s
 `not_available_no_certified_close_or_fill`.
 
 The summary and receipt use `bootstrap_by_domain`; there is no global one-seed convention.
-The v2 snapshot replaces the old zero-tax `later_quote_proxy` alias with `later_price_proxies`,
-keyed independently by `samebook_50_50_zero_tax` and
-`samebook_50_50_requalified_tax_12_percent`.
+The v3 snapshot adds `production_betting` without replacing the separate multi-year
+`financial_scenarios` and `later_price_proxies`.
+Production resampling pads all six preselection start months with zero-action totals and uses
+NumPy's default integer draw dtype. The archived optimizer-family `int16` draw matrix is a
+different random sequence and is not substituted. Any zero-denominator draw withholds its CI;
+later-price coverage never stands in for whole-portfolio CLV.
 
 ## Verification performed
 
@@ -177,17 +219,23 @@ TEST_DATABASE_URL=postgresql://task:task@127.0.0.1:9/task_test \
 DATABASE_URL=postgresql://task:task@127.0.0.1:9/task_test \
 .venv/bin/python -m pytest -q \
   betting_app/tests/test_reproduce_project_results.py \
-  betting_app/tests/test_long_term_market_evaluation.py \
-  betting_app/tests/test_production_market_benchmark.py
+  betting_app/tests/test_production_saved_evidence.py
 ```
 
-**79 passed**, one existing Starlette/httpx deprecation warning. No PostgreSQL, application,
-collector or scheduler was started. The complete v2 CLI succeeded; final exclusive output:
-`/tmp/c20r-trader-readme-replay-2`. The checked-in snapshot is byte-identical to that generated summary.
-Saved reference checks: 528 consensus values, maximum error
-1.11e-16; 12 ratings N/LL/Brier checks, error zero.
-The separate 127-assertion acceptance check covered specified counts, dates, seeds, finance/price
-values, retained prior sports scores and shared input hashes.
+**66 passed**, one existing Starlette/httpx deprecation warning. No PostgreSQL, application,
+collector or scheduler was started. The complete v3 CLI succeeded; exclusive output:
+`/tmp/c20r-production-readme-replay`. The checked-in snapshot is byte-identical to that summary
+(SHA-256 `5d455a9530fdacabe87ce9d5f4cf7d67ddc9e1e522d2abfc6b548b930c42fe49`).
+The five previous numeric evidence domains are unchanged, including all 528 consensus and
+12 ratings reference comparisons.
+
+An independently computed saved-data oracle for all twelve portfolios / 330 repeated ticket
+rows agrees on wallet counts/money, closing-price coverage/formulas and monthly intervals:
+2,603 comparisons, 1,935 numeric, maximum absolute error 1.14e-13.
+The local comparison receipt is `/tmp/c20r-production-readme-replay/oracle_comparison.json`.
+It does not independently reconstruct every contributor's mean-logit q or neural inference.
+Pre-publication join/Decimal/empty-reference schema failures were corrected without changing
+source inputs, model, policy or numerical tolerances; the original failed oracle receipt is retained.
 
 SHA-256 establishes byte identity, not source authenticity or correctness. The snapshot inventories
 current consumed artifacts and the listed numerical source closure, including

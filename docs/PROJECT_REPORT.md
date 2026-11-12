@@ -5,7 +5,7 @@ odds-analysis application. It records manual betting decisions; **it does not pl
 This report replays saved evidence, not training, forecast issuance or live execution.
 All results are **historical development**, with no new adoption or profitability certification.
 
-## Four separate evidence cohorts
+## Separate evidence domains
 
 | Domain | Population | Period | Headline weighting / uncertainty |
 |---|---|---|---|
@@ -13,10 +13,13 @@ All results are **historical development**, with no new adoption or profitabilit
 | Market prediction | 400 fixtures / 1,496 fixture-book cells / 51,208 cases | Scheduled-start months May–October 2026 | Mean quote loss within book; equal books within fixture; equal fixtures; 6 monthly blocks |
 | Glicko-2 controls | 10,578 identical series, all four predictions present | 2024-01-01–2026-06-14 | Equal series; 30 match-date monthly blocks |
 | Financial policies | Independently selected first-observed tickets, counts below | Mapped target dates 2021-01-09–2026-09-07 | Equal unit stakes; all 70 preselection UTC months January 2021–October 2026 |
+| Production interval wallets | 482 source fixtures / 100,949 quotes; 12 fixed portfolios | Fixture starts 2026-05-29–2026-10-22 | Saved-stake ROI and conditional price proxies; all 6 start-month blocks, including zero-action months |
 
 Do not rank C20R against ratings or market numbers from a different population.
 The multi-year focal-book finance study is **not** the independent other-book market panel.
 Financial portfolios overlap; their ticket counts and returns must not be summed.
+Production wallets reuse the production market source; these are different estimands, not
+independent replication. Their export does not include later production captures.
 
 ## Standalone sports model
 
@@ -152,6 +155,112 @@ Intervals use 30 match-date UTC months, 5,000 draws, seed `20261111`.
 The calibrated comparison favors this player control historically; it is neither a cross-cohort
 C20R ranking nor held-out/prospective promotion evidence.
 
+## Production-collected interval wallets
+
+The bound export contains **482 fixtures / 100,949 Polish-bookmaker quotes**, with fixture starts
+from **2026-05-29 05:00 UTC to 2026-10-22 12:00 UTC**. Entry LOO eligibility retains
+51,208 quotes / 400 fixtures. Start-month fixture counts are May 14, June 46, July 78,
+August 232, September 94 and October 18; the edge months are partial.
+These are **saved counterfactual C20R probabilities and simulated tickets**, not authenticated
+forecast issuance, recorded bets, actual UK prices or data through today.
+
+### Frozen selection and wallet assumptions
+
+Exactly twelve existing cases are read: `logit` / `baseline`, tax 0 or 0.12, and
+`h0_2`, `h2_6`, `h6_12`, `h12_24`, `h24_48`, `primary48`.
+Each half-open interval uses its own first eligible recorded observation per fixture,
+not a future-best quote, exact two-hour grid or post-score choice of the best interval.
+The full [0,48) wallet overlaps the five narrower wallets; the tax scenarios also overlap.
+Do not add ticket counts, profits or bootstrap evidence across them.
+
+The sports share is fixed at 0.50 in logit space. Entry consensus requires at least two other
+books, each no more than 300 seconds old at the entry clock. The frozen baseline retains
+EV≥5%, short-odds dynamic hurdle (cutoff 2.2, penalty scale 0.08), DRO ε=0.025,
+25% global/longshot EV caps, longshot cutoff 3.5, odds≤4, Tier-1 positive market gap≤8pp,
+BO1 absolute gap≤12pp and unshrunk sports/market logit gap≤0.85.
+Identity, non-live, pre-start and input-availability rules are not disabled.
+Rating disagreement and contemporaneous negative CLV drift remain **NOT_ASSESSED**,
+not successful complete-application safeguards.
+
+Each portfolio starts with PLN10,000, quarter Kelly, minimum PLN2, maximum PLN150,
+and stakes reserved until recorded result availability. Tax scenarios requalify and restake
+independently on the same Polish prices. The archived `max_portfolio_exposure=0.25`
+means a **per-new-ticket free-cash cap, not a 25% aggregate exposure limit**.
+This replay validates retained stakes and Decimal payouts; it does not substitute today's
+wallet engine or resimulate capital paths under changed risk rules.
+
+### Results by entry lead
+
+All 330 retained ticket rows across the twelve portfolios are settled; these are repeated
+hypothetical selections, not 330 independent actual bets. ROI is P&L/stake turnover.
+
+| Tax | Lead hours | Wins / bets | Turnover, PLN | P&L, PLN | ROI | Nominal 95% ROI interval |
+|---|---|---:|---:|---:|---:|---|
+| 0% | [0,2) | 12/31 | 4,019.13 | +83.50 | +2.08% | [-26.04%, +46.37%] |
+| 0% | [2,6) | 18/39 | 5,227.40 | +1,289.76 | +24.67% | [-23.74%, +38.54%] |
+| 0% | [6,12) | 21/49 | 6,700.40 | +962.59 | +14.37% | [-2.18%, +90.22%] |
+| 0% | [12,24) | 16/44 | 6,124.41 | -515.87 | -8.42% | withheld (1/5,000 undefined) |
+| 0% | [24,48) | 16/42 | 5,630.38 | +0.87 | +0.02% | [-22.71%, +38.01%] |
+| 0% | Full [0,48) | 36/82 | 11,227.02 | +1,728.80 | +15.40% | [-4.22%, +48.59%] |
+| 12% | [0,2) | 1/3 | 360.68 | +50.20 | +13.92% | withheld (92/5,000 undefined) |
+| 12% | [2,6) | 2/5 | 605.16 | +74.10 | +12.24% | withheld (458/5,000 undefined) |
+| 12% | [6,12) | 2/5 | 662.05 | +73.11 | +11.04% | withheld (77/5,000 undefined) |
+| 12% | [12,24) | 0/8 | 1,055.75 | -1,055.75 | -100.00% | withheld (92/5,000 undefined) |
+| 12% | [24,48) | 1/6 | 852.42 | -523.74 | -61.44% | withheld (444/5,000 undefined) |
+| 12% | Full [0,48) | 5/16 | 2,154.85 | -397.69 | -18.46% | withheld (8/5,000 undefined) |
+
+Intervals resample all six fixture-start UTC months, including zero-action months:
+5,000 draws, seed `20261023`, NumPy's default integer dtype. A zero-denominator draw is
+retained and withholds the interval; it is not deleted or converted to zero ROI.
+These are retained-stake ratios, not new wallet-path simulations, and are not corrected
+for the full historical timing/configuration search. Positive point ROI does not establish an edge.
+
+### Production recorded-price references
+
+**True CLV remains null**, status `not_available_no_certified_close_or_fill`.
+Roughly two-hour collection cannot authenticate actual start, the complete market close
+or executable fills. The sealed entry-reference panel is joined to each selected snapshot,
+fixture, book, aware entry/start clocks and actual selected-side price.
+Side-B results and prices are not flipped a second time.
+
+The default later reference allows at most 300 seconds before conservative recorded start;
+60-minute and uncapped-age results below are explicitly separate sensitivities.
+The latest recorded book state is used, not an outcome-picked state. Same-book prices must
+be strictly later than entry and before start. LOO references need at least two distinct
+other books, all contributor clocks before start and within the declared age limit, with
+at least one contributor strictly after entry. Invalid latest states are not revived
+by falling back to an older valid quote.
+
+For actual selected-side odds `O` and later fair probability `q`:
+
+- Raw same-book movement: `O / later_samebook_selected_odds - 1`.
+- Gross other-book proxy: `O*q - 1`.
+- Net other-book proxy: `(1-tax)*O*q - 1`.
+
+The new replay decodes and validates reference contributor identities, clocks and ages,
+then recomputes selected-side price formulas from the sealed fair-q panel.
+It does **not** independently reconstruct every contributor's raw-price mean-logit consensus.
+Closing references are assessment-only, not the entry-time shrinkage input or a timing oracle.
+
+Full [0,48) portfolio sensitivity; every mean is conditional on its own covered subset:
+
+| Tax | Maximum age before start | Same-book pairs / bets | Raw move | LOO pairs / bets | Gross LOO proxy | Net LOO proxy | Net LOO nominal 95% CI |
+|---|---|---:|---:|---:|---:|---:|---|
+| 0% | ≤5 min | 17/82 | +3.77% | 19/82 | +1.82% | +1.82% | withheld (8/5,000 undefined) |
+| 0% | ≤60 min | 41/82 | +7.16% | 47/82 | +0.60% | +0.60% | [-0.99%, +9.04%] |
+| 0% | Uncapped age | 74/82 | +8.77% | 80/82 | +2.30% | +2.30% | [-0.30%, +7.13%] |
+| 12% | ≤5 min | 2/16 | +5.30% | 4/16 | +12.36% | -1.12% | withheld (458/5,000 undefined) |
+| 12% | ≤60 min | 5/16 | +3.78% | 8/16 | +10.29% | -2.95% | withheld (458/5,000 undefined) |
+| 12% | Uncapped age | 10/16 | +11.39% | 15/16 | +10.69% | -2.59% | withheld (8/5,000 undefined) |
+
+Raw same-book movement is tax-independent; different tax rows select different tickets.
+Gross fair-price movement must not be presented as a net tax-adjusted edge.
+Uncapped age increases coverage by admitting stale references, not by recovering a certified close.
+Missing references retain reasons and never become zero CLV; covered estimates are not extrapolated
+to whole portfolios. The [README](../README.md#production-closing-price-proxies) shows the default
+five-minute proxy by entry interval; JSON includes all twelve cases, three age limits, equal-ticket
+and stake-weighted metrics, absences and complete interval statuses.
+
 ## Historical financial policies
 
 Annual year-eligible fresh20+regional probabilities, OddsPortal 2021–2026 first-observed endpoints.
@@ -271,13 +380,20 @@ it never substitutes the checked-in snapshot. Model/financial bindings and the c
 receipts remain unchanged. Current consumed numerical source hashes are recorded separately.
 No raw tickets, datasets or weights are published with the aggregate JSON.
 
-Executed locally: **79 arithmetic tests passed**, one existing Starlette/httpx deprecation warning;
-complete v2 CLI replay passed. All 528 saved consensus score/contrast comparisons
-(including all seven bands) agree within absolute 1e-12, maximum error
-1.11e-16; all 12 ratings N/LL/Brier reference checks agree exactly.
-A separate 127-assertion snapshot check covered the specified counts, periods, seeds, acceptance
-values and unchanged prior sports scores/input hashes. These are bounded saved-evidence checks,
-not independent neural internals, source authentication, training replay or a full application suite.
+Executed locally: **66 focused arithmetic tests passed**, one existing Starlette/httpx warning;
+complete **v3** CLI replay passed. Twelve fixed portfolios / 330 saved tickets reproduce the
+bound counts, stakes, payouts and ROI. A separate saved-data oracle agrees across **2,603
+comparisons (1,935 numeric)**, maximum absolute error **1.14e-13**, covering wallet aggregates,
+conditional same-book/LOO formulas, coverage and monthly intervals.
+All five prior numeric evidence domains remain exactly unchanged, including the existing
+528 consensus reference comparisons and 12 ratings checks. The checked-in JSON is byte-identical
+to the generated summary.
+
+Pre-publication source-join/Decimal-type and empty-reference schema errors were corrected in
+replay/verifier code only, without changing frozen data, policies, models or tolerances.
+The oracle's original source-identity failure receipt is retained locally, not counted as a pass.
+These are bounded saved-evidence checks, not independent neural internals, complete raw-price
+consensus reconstruction, source authentication, training replay or a full application suite.
 
 Raw-data acquisition, causal feature construction, original fitting and forecast generation require
 additional original artifacts. A clean clone does not supply these ignored/local inputs.
