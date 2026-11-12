@@ -1,3 +1,5 @@
+For the current overview and saved-ledger replay, see the [project report](PROJECT_REPORT.md), [reproduction guide](REPRODUCING.md) and [aggregate snapshot](results/project_summary.json). **C20R** is the documentation name for the locally configured fresh20 + regional model, not a new runtime selector. The 12% same-book replay is a historical diagnostic, not a change to prior study decisions or the application hybrid.
+
 ## 2026-10-23 — Selection-bias mitigation: gates, DRO and EV reliability
 
 **COMPLETED / NO RELIABLE FIX ESTABLISHED / NOT ADOPTED.** Study `selection_bias_mitigation_20261023_01` under `data/08_reporting/selection_bias_mitigation/` reuses unchanged C0-D-20 fresh20+regional, fixed logit 50/50, primary [0,48)h source selection and all 88 existing configurations at both taxes: **176 cases / 12,216 repeated selected rows**. No new sweep, fitting, inference, collection, wallet simulation, policy mutation or deployment. Protocol frozen before follow-up scoring; all six source months remain development-exposed.

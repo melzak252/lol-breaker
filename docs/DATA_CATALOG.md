@@ -2,7 +2,7 @@
 
 **Version:** 1.0.0 (Kedro 8-Layer + DVC Orchestration)  
 **Last Updated:** 2026-10-15  
-**Remote Storage:** Google Drive ([`gdrive://1Koo0-3d-1BssznDWXzz9PactUfmZbn7g`](https://drive.google.com/drive/folders/1Koo0-3d-1BssznDWXzz9PactUfmZbn7g))
+**Recorded remote:** Google Drive ([`gdrive://1Koo0-3d-1BssznDWXzz9PactUfmZbn7g`](https://drive.google.com/drive/folders/1Koo0-3d-1BssznDWXzz9PactUfmZbn7g)); availability and contents have not been freshly verified.
 **Declarative Catalogs:** [`conf/base/catalog.yml`](../conf/base/catalog.yml), [`conf/base/parameters.yml`](../conf/base/parameters.yml)  
 **DVC Pipeline:** [`dvc.yaml`](../dvc.yaml), [`dvc.lock`](../dvc.lock)
 
@@ -10,13 +10,12 @@
 
 ## 1. Executive Summary & Storage Architecture
 
-This catalog is the definitive reference for all datasets, model inputs, out-of-time probability panels, feature tensors, and verification receipts tracked across **LoL-Breaker**.
+This is a **historical inventory as of 2026-10-15**, not a complete catalog of later C20R or OddsPortal artifacts. For current reproduction requirements and artifact availability, see the [reproduction guide](REPRODUCING.md).
 
-To support offline reproduction of tracked data and workflows without committing heavy dumps into Git, the repository uses the Kedro 8-Layer Data Engineering Architecture with DVC (Data Version Control). Raw bytes and archives are content-addressed in a Google Drive remote, with pointer files (`*.dvc`, `dvc.lock`) tracked in Git. These pointers and hashes establish byte identity for a particular object, not its provenance, measurement validity, or the validity of financial claims; the ledger entry below documents a version mismatch.
-The remote storage folder contains:
-1. **`files/`**: DVC content-addressed storage (`files/md5/...`) matching `dvc.lock` for automated `dvc pull` synchronization.
-2. **`curated_data/`**: Human-readable directory tree for browsing individual CSV and Parquet files directly in Google Drive.
-3. **`lol_breaker_complete_data_bundle.zip` (77.7 MB)**: Single-click full archive download for instant setup.
+The recorded pipeline uses DVC pointers and a Kedro-style layered data layout. Pointers and hashes establish byte identity for a particular object, not its provenance, measurement validity, or the validity of financial claims; the ledger entry below documents a version mismatch. The historical inventory described the remote as containing:
+1. **`files/`**: DVC content-addressed storage (`files/md5/...`) matching `dvc.lock`.
+2. **`curated_data/`**: Human-readable directory tree of CSV and Parquet files.
+3. **`lol_breaker_complete_data_bundle.zip` (recorded as 77.7 MB)**: a historical bundle, not a guarantee that later artifacts are included.
 
 ```text
 Google Drive Remote Storage (gdrive://1Koo0-3d-1BssznDWXzz9PactUfmZbn7g)

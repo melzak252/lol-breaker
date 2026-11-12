@@ -4,6 +4,8 @@ Lokalna aplikacja do ręcznej bukmacherki/analityki LoL. Aplikacja **nie stawia 
 
 > Local checkout status after the 2026-10-23 serving-default change: **fresh20 C0 + regional input correction** is the local default, with a separate fresh20-plus-market shrinkage identity. This is a local selector/configuration change, not a deployment, restart, live acquisition, prediction refresh, user-database change, research-study adoption, promotion, or financial certification.
 
+**C20R** is the documentation name for this fresh20 + regional sports model; it does not change the `Causal-C0` runtime identity or selectors. See the [model catalog](../docs/MODEL_CATALOG.md) and [documentation index](../docs/README.md).
+
 ## Current C0 serving contract
 
 | Path | Name | Exact version |

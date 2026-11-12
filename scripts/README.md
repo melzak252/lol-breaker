@@ -16,6 +16,7 @@ Use the **[model/study catalog](../docs/MODEL_CATALOG.md)** to choose a retained
 
 | Purpose | Interface | Boundary |
 |---|---|---|
+| Project aggregate replay | `reproduce_project_results.py --output-dir NEW_DIR` | Recomputes saved-ledger scores and diagnostics only; no fitting or inference. See [reproduction prerequisites](../docs/REPRODUCING.md). |
 | Historical 5-stage orchestration | `run_simulation_pipeline.py --stage all` / `dvc repro` | Historical tool, not the current policy benchmark or authorization to collect/train; older financial and normalization claims are withdrawn/unverified |
 | Native pre-match matchup prediction | `predict_matchup.py <TeamA> <TeamB> [--bo 1\|3\|5] [--model C0]` | C0 is the default. Legacy BO slopes require `--allow-research-surrogate`; cached regional transforms require `--research-cross-region-norm`. Neither is genuine distilled inference or causal confirmation; use the saved-weight interfaces below |
 | Live PostgreSQL GOL.GG extended history & regional state exporter | `python -m betting_app.services.live_native_feature_builder [--cutoff YYYY-MM-DD]` | Exports post-cutoff DB matches to `extended_matches.json` and `FamilyCalibratedGlicko2` state to `regional_offsets_state.json` |
@@ -27,7 +28,7 @@ Use the **[model/study catalog](../docs/MODEL_CATALOG.md)** to choose a retained
 | Closed challenger experiments below | Their exact study runners and saved protocols | Archive/reproducibility tools; NOT_ADOPTED and gated NOT_RUN studies do not resume automatically |
 | Chronological year-anchor diagnostic builder | `build_year_anchor_bank.py [--verify] [--output-dir DIR] [--research-root DIR]` | Reconstructs 365-day anchor bank from supplied feature bank; read-only `--verify` fails if historical mismatch; requires nonexistent `--output-dir` (default `year_anchor_bank_rebuilt`); no original 365-day bank certification, full old bank mismatch observed; research-only, no automatic training or adoption |
 
-The original prop run and its selected bundle stay in place. [Recovery ZIP, digest and proof](../docs/MODEL_CATALOG.md#3-preserved-standalone-prop-model-recovery-bundle) include all five study stages plus source dependencies and environment metadata. Actual create/verify and restored-source inference completed; old scientific receipts and retained failures are unchanged.
+The original prop run and its selected bundle stay in place. The [model catalog](../docs/MODEL_CATALOG.md#specialists-and-research-tools) identifies the recovery ZIP; its digest and verification command are below. Actual create/verify and restored-source inference completed; old scientific receipts and retained failures are unchanged.
 
 ```bash
 .venv/bin/python scripts/preserve_prop_model.py verify \
