@@ -1,230 +1,143 @@
 # LoL-Breaker
 
-## What it does
+Player-based League of Legends probability modeling, bookmaker benchmarking and manual betting analysis.
+The project asks whether sports information adds value beyond market prices—not whether a selected
+historical backtest can look profitable. **It does not place bets automatically.**
 
-League of Legends pre-match probabilities, tournament research and betting analytics.
-Player-history models and saved-market studies support a local application for reviewing odds,
-recording manual bets and tracking wallets. **It does not place bets automatically.**
+- Sports-only pre-match BO1/BO3/BO5 series-win probabilities.
+- Separately identified market-assisted forecasts and odds-review tools.
+- Tournament/prop research; FastAPI and React tools for manual bets and wallets.
 
-- Sports-only BO1/BO3/BO5 series-win probabilities.
-- Model, bookmaker-consensus and selected-ticket EV comparisons.
-- Tournament scenarios, map/series props and historical betting simulations.
-- FastAPI and React tools for odds, signals, manual decisions and wallets.
+## Current evidence
 
-## Main model: C20R
+**Historical predictive signal; no established general bookmaker superiority or confirmed live betting edge.**
+The raw model has better point scores at some first-observed prices, but not consistently at later
+prices. Fixed shrinkage improves the Polish-panel point scores; its primary improvement intervals
+include zero. All results below are development-exposed historical evidence, not prospective confirmation.
 
-**C20R** is a three-seed ensemble using 20-token player histories plus prior regional context.
-It predicts whole-series BO1/BO3/BO5 probabilities **without odds**; organization history is optional.
-The 20 inputs comprise 19 history slots and 1 learned token.
+## Model
 
-C20R is a display name, not a new artifact. The [model catalog](docs/MODEL_CATALOG.md#main-model-and-local-policy)
-and [serving configuration](conf/base/c0_serving.json) identify the local runtime.
-Local configuration is not a deployment or an adoption decision.
+**C20R** is a three-seed, player-history ensemble with prior regional context: 19 history input slots
+plus one learned token. It predicts whole-series probabilities **without odds**; organization history
+is optional. The multi-year replay uses year-eligible annual counterparts, not a 2026 model backcast.
 
-## Prediction quality and shrinkage
+The [model catalog](docs/MODEL_CATALOG.md#main-model-and-local-policy) and
+[configuration](conf/base/c0_serving.json) identify the local artifact; configuration is not deployment.
+The standalone C20R study improved aggregate scores but **failed BO5/LPL replacement guards**;
+that study remains not adopted. [Standalone benchmark](docs/PROJECT_REPORT.md#standalone-sports-model).
 
-**All results below are historical development evidence, not prospective confirmation.**
-The [factorial audit](reports/c0_regional_factorial_audit_20261022.md) compares the same
-**3,083 supported / 3,103 requested 2026 series**.
-Lower LL and Brier are better.
+## Three market datasets
 
-| Model | Log loss | Brier | Accuracy | AUC |
-|---|---:|---:|---:|---:|
-| Historical C0 | 0.536947 | 0.181576 | 71.94% | 0.798037 |
-| C20R | 0.533023 | 0.180030 | 72.40% | 0.801652 |
+| Dataset | Fixture-date coverage | Source / usable comparison |
+|---|---|---|
+| OddsPortal archive | 2021-01-09–2026-09-07 mapped | 13,473 source events; 125,322 endpoint quote records; 9,132 first / 9,805 last scored fixtures |
+| Pinnacle history | 2026-01-14–2026-09-28 source | 2,182 source fixtures; 1,040 first / 993 last model-paired fixtures |
+| Production-collected Polish prices | 2026-05-29–2026-10-22 | 482 model-scorable fixtures / 100,949 quote records; 400 fixtures / 51,208 eligible entry-LOO records |
 
-The 20 unsupported regional rows remain missing, not imputed.
-The combined paired comparison favors C20R, but required **BO5 and LPL guards failed**;
-the study was **not adopted**. Local configuration does not overturn that result.
+These sources can overlap; they are **not three independent replications**. The Polish panel is a
+bound analysis subset, not every raw fixture ever collected or data through today. Quoted records
+are not independent matches. Pinnacle model-paired fixtures end on 2026-09-07.
+[Coverage, exclusions and matching](docs/PROJECT_REPORT.md#three-market-datasets).
 
-### Matched bookmaker comparison
+## Model versus bookmaker probabilities
 
-Separate cohort: **400 fixtures, 1,496 fixture-book cells, 51,208 quote cases**,
-May–October 2026. LOO excludes the focal book and requires at least two other fresh books;
-consensus is the equal-weight mean of their fair **logits**, not probabilities.
-Quote losses are averaged within fixture/book, then equally across books and fixtures.
+Every row compares identical fixtures, labels and orientations at its declared endpoint.
+Score cells are **log loss / Brier**; lower is better. Negative ΔLL favors the sports model.
+Markets use two-sided no-vig probabilities; benchmark construction differs by dataset.
 
-| Recipe | Log loss | Brier | ΔLL vs consensus, nominal 95% CI |
-|---|---:|---:|---|
-| C20R | 0.585025 | 0.202815 | +0.004727 [-0.019232, +0.019035] |
-| Other-book consensus | 0.580298 | 0.199347 | reference |
-| Hybrid-50 | 0.576162 | 0.198601 | -0.004136 [-0.016001, +0.002928] |
+| Dataset / endpoint | Fixtures | Sports LL / Brier | Market LL / Brier | ΔLL versus market [interval] |
+|---|---:|---:|---:|---|
+| OddsPortal, first observed | 9,132 | 0.583438 / 0.199523 | 0.586991 / 0.200994 | -0.003554 [-0.008530, +0.001372] |
+| OddsPortal, last retained | 9,805 | 0.582592 / 0.199201 | 0.577945 / 0.197117 | +0.004647 [+0.000931, +0.008507] |
+| Pinnacle, first observed | 1,040 | 0.558802 / 0.189400 | 0.578937 / 0.197194 | -0.020135 [-0.042401, +0.001336] |
+| Pinnacle, last retained | 993 | 0.560559 / 0.190288 | 0.548674 / 0.184349 | +0.011885 [-0.017119, +0.031245] |
+| Polish entry LOO | 400 | 0.585025 / 0.202815 | 0.580298 / 0.199347 | +0.004727 [-0.019232, +0.019035] |
 
-Fixed logit shrinkage: `p_H = expit(0.5*logit(p_sports) + 0.5*logit(p_market))`.
-No alpha was selected in this replay. Hybrid-50 has lower point loss, but its primary
-paired LL intervals versus consensus **and C20R include zero**; versus C20R:
--0.008863 [-0.016018, +0.003657].
+Intervals are nominal **95%**, except Pinnacle's **98.75% four-contrast-family** LL intervals;
+neither adjusts for all prior adaptive research. Resampling uses 70 / 9 / 6 monthly blocks for
+OddsPortal / Pinnacle / Polish comparisons. First observed is not certified market opening;
+last retained is not necessarily the final market price. Endpoint cohorts differ, so their
+aggregate scores do not identify a causal timing advantage.
 
-Intervals use 6 scheduled-start monthly blocks, 5,000 draws;
-nominal, not a correction for wider adaptive research. Of 100,949 focal cases across
-482 fixtures, 49,741 lack eligible consensus. [Coverage and contrasts](docs/PROJECT_REPORT.md#market-consensus-and-fixed-shrinkage).
+### What fixed shrinkage changes
 
-<details>
-<summary>Forecast scores by time to scheduled start</summary>
+The same **400 Polish-panel fixtures** use entry-time LOO consensus: at least two other books,
+each no more than five minutes old. Losses are averaged within fixture/book, then over books and fixtures.
 
-| Lead hours | Fixture N | Consensus LL | C20R LL | Hybrid-50 LL |
-|---|---:|---:|---:|---:|
-| [0,2) | 291 | 0.591644 | 0.590224 | 0.585922 |
-| [2,6) | 325 | 0.582057 | 0.582640 | 0.576787 |
-| [6,12) | 328 | 0.576932 | 0.578070 | 0.571809 |
-| [12,24) | 304 | 0.568443 | 0.572756 | 0.564460 |
-| [24,48) | 249 | 0.575792 | 0.594537 | 0.578886 |
-| [48,96) | 230 | 0.575465 | 0.586390 | 0.574458 |
-| [96,inf) | 169 | 0.563134 | 0.565161 | 0.557140 |
+| Forecast | Log loss | Brier |
+|---|---:|---:|
+| Fixed Hybrid-50 | 0.576162 | 0.198601 |
 
-Fixture populations overlap across bands; do not sum them.
-These use scheduled starts, not certified actual starts or an optimal timing policy.
+`p_H = expit(0.5*logit(p_sports) + 0.5*logit(p_market))`—fixed, not fitted here.
+Hybrid−consensus ΔLL: **-0.004136 [-0.016001, +0.002928]**.
+Its primary intervals versus consensus and C20R include zero: lower point loss is not proven superiority.
+This is market-assisted prediction, not evidence that the sports-only model beat the market.
 
-</details>
+## Betting opportunities—not a live bet ledger
 
-## Player vs team Glicko-2
+Saved C20R counterfactuals on collected Polish prices; zero tax and unit returns, **no new bankroll simulation**.
+The original fixed policy and the exploratory repeated-check study answer different questions:
 
-Separate **10,578-series** ratings-only cohort, 2024-01-01–2026-06-14.
-Both controls use saved BO-projected probabilities and separate preceding-year calibration.
+| View | Suggested observations | Distinct fixtures | Mean expected EV | Realized unit yield [95% CI] |
+|---|---:|---:|---:|---|
+| First eligible [0,48)h | 82 | 82 | +10.54% | +11.76% [-6.63%, +42.41%] |
+| Time-stratified snapshot checks | 451 | 74 | +11.01% | -4.99% [-21.96%, +17.69%] |
 
-| Calibrated control | N | Log loss | Brier |
-|---|---:|---:|---:|
-| Player Glicko-2 | 10,578 | 0.574096 | 0.195826 |
-| Team / organization Glicko-2 | 10,578 | 0.607321 | 0.210434 |
+The snapshot study samples 2,000 recorded fixture/timestamps in each of
+0–2, 2–6, 6–12, 12–24, 24–48 and **48h+**: 12,000 checks across 471 fixtures,
+451 suggestions (3.76%). It evaluates offers recorded exactly then,
+not a complete carried-forward bookmaker board. Repeated suggestions share outcomes; do not count
+them as independent bets or replace them with a better-looking post-hoc one-per-fixture sample.
+[Selection, time profiles and uncertainty](docs/PROJECT_REPORT.md#snapshot-opportunities-and-unit-returns).
 
-Player−organization ΔLL **-0.033225 [-0.045580, -0.024346]**,
-nominal 95% CI across 30 monthly blocks. This supports a historical comparison of these
-rating controls, **not a cross-cohort C20R/market ranking** or promotion.
-[Raw controls, updates and calibration](docs/PROJECT_REPORT.md#player-versus-organization-glicko-2).
+### CLV versus last recorded pre-start prices
 
-## Production-collected betting results
+Closing reference = the **latest recorded strictly pre-start state**, with **no age cap** and no hidden
+requirement that it be later than entry. Invalid latest states stay missing; no favorable fallback.
+Same entry/closing state is allowed. Price CLV does **not** require an executed fill or a known outcome.
 
-Audited Polish-bookmaker export: **482 fixtures / 100,949 quotes**, with fixture starts
-**2026-05-29–2026-10-22**. This is not data through today.
-Entry-time consensus covers 400 fixtures / 51,208 quotes with at least **two other fresh books**.
-These are saved **C20R counterfactual simulations, not recorded bets or live-issued forecasts**.
+| View | Same-book raw mean (covered) | Other-book fair mean [95% CI] (covered) | Fair median |
+|---|---:|---|---:|
+| First eligible [0,48)h | +8.32% (78/82) | +2.17% [-0.33%, +6.17%] (82/82) | +1.08% |
+| Time-stratified snapshot checks | +6.43% (421/451) | -0.30% [-1.46%, +1.08%] (451/451) | -2.12% |
 
-### Betting by time to recorded start
+Raw price CLV: `entry_odds / same_book_recorded_close_odds - 1`.
+Fair LOO CLV: `entry_odds * closing_other_book_fair_probability - 1`; at least two other books,
+equal-weight fair logits. Means are conditional on their displayed coverage; missing prices are not zero.
+In the snapshot study, 205/451 fair references contain a contributor at least two hours old;
+the oldest-contributor age has median 1.08h and p95 57.08h.
+Favorable same-book shortening is not proof of positive fair value or profit. These are recorded closes,
+not authenticated final market quotes; fill evidence is a separate limitation.
+[Definitions, ages and distributions](docs/PROJECT_REPORT.md#recorded-close-clv).
 
-Fixed 50/50 sports/other-book **logit** blend; first eligible observed quote per fixture in each
-half-open interval, never the future-best price. Each wallet starts with PLN10,000, uses quarter
-Kelly, PLN2–150 stakes and reserves open stakes. The 0% and 12% cases requalify independently;
-0% retains the same Polish prices, **not actual UK or Pinnacle prices**.
+## Evidence boundaries
 
-| Lead hours | LOO-ready fixtures | 0% bets | 0% P&L, PLN | 0% ROI | 12% bets | 12% P&L, PLN | 12% ROI |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| [0,2) | 291 | 31 | +83.50 | +2.08% | 3 | +50.20 | +13.92% |
-| [2,6) | 325 | 39 | +1,289.76 | +24.67% | 5 | +74.10 | +12.24% |
-| [6,12) | 328 | 49 | +962.59 | +14.37% | 5 | +73.11 | +11.04% |
-| [12,24) | 304 | 44 | -515.87 | -8.42% | 8 | -1,055.75 | -100.00% |
-| [24,48) | 249 | 42 | +0.87 | +0.02% | 6 | -523.74 | -61.44% |
-| Full [0,48) | 370 | 82 | +1,728.80 | +15.40% | 16 | -397.69 | -18.46% |
-
-ROI is profit/stake turnover, not bankroll growth. All displayed portfolios are fully settled;
-the same fixture can appear in several wallets, so **do not sum rows or choose a winning band**.
-The zero-tax full-window nominal 95% ROI interval is **[-4.22%, +48.59%]**.
-The 12% interval is withheld: 8/5,000 monthly resamples have no bets.
-Six start-month blocks include zero-action months; this is not independent edge confirmation.
-Rating-disagreement and contemporaneous drift safeguards remain **not assessed**.
-[Wins, turnover, all intervals and exact frozen gates](docs/PROJECT_REPORT.md#production-collected-interval-wallets).
-
-### Production closing-price proxies
-
-**True closing CLV is unavailable.** Roughly two-hour collection does not guarantee a quote at
-the actual close or an executable fill. Below, every other-book contributor is within **five
-minutes before conservative recorded start**, excludes the selected book, and at least one is
-strictly later than entry. Missing references remain missing, not zero.
-
-| Entry lead hours | 0% covered / bets | 0% net fair-price proxy | 12% covered / bets | 12% net fair-price proxy |
-|---|---:|---:|---:|---:|
-| [0,2) | 7/31 | -1.16% | 1/3 | -8.28% |
-| [2,6) | 9/39 | +0.71% | 1/5 | -8.28% |
-| [6,12) | 12/49 | -1.81% | 1/5 | -8.28% |
-| [12,24) | 11/44 | +3.02% | 4/8 | +0.12% |
-| [24,48) | 12/42 | +1.54% | 1/6 | -13.24% |
-| Full [0,48) | 19/82 | +1.82% | 4/16 | -1.12% |
-
-Equal-ticket proxy on **covered selections only**:
-`(1-tax)*entry_odds*later_other_book_fair_probability - 1`.
-It is not whole-portfolio CLV, realized ROI or guaranteed edge; the reference's age is measured
-before start, not after entry. Later prices are assessment references, not entry-time shrinkage.
-[Same-book raw price moves, gross/net separation, 60-minute and uncapped-age sensitivities](docs/PROJECT_REPORT.md#production-recorded-price-references).
-
-## Historical betting results
-
-Annual year-eligible fresh20+regional forecasts, OddsPortal 2021–2026 first-observed study;
-mapped target dates **2021-01-09–2026-09-07**.
-Here shrinkage uses the **focal book's own no-vig price**, not independent LOO consensus.
-
-| Portfolio | Tax | Known / selected | Mean EV | Realized yield, 95% CI | EV−yield, 95% CI (pp) |
-|---|---:|---:|---:|---|---|
-| Sports only | 0% | 4,482 / 4,484 | 19.72% | 6.00% [+2.54%, +9.34%] | +13.72 [+10.36, +17.26] |
-| Focal-book 50/50 | 0% | 1,967 / 1,968 | 12.90% | 13.69% [+8.42%, +18.94%] | -0.79 [-6.06, +4.40] |
-| Focal-book 50/50, requalified | 12% | 315 / 315 | 13.64% | 22.81% [+9.31%, +36.42%] | -9.16 [-22.93, +4.30] |
-
-Each row is independently qualified: EV≥5%, a 2.5pp probability stress haircut,
-odds≤4, one-unit stakes and at most one ticket per fixture. Yield is profit/stake turnover,
-not bankroll growth; this is **not the complete application gate stack**.
-Intervals retain all 70 preselection UTC months, January 2021–October 2026, including zero-action months.
-
-The 12% portfolio is **reselected**, not a tax-only improvement or a causal shrinkage estimate.
-Tax reduces the full winning payout: `O*(1-tax)-1`.
-Sports only has 2 unresolved outcomes, zero-tax shrinkage 1, taxed requalification 0;
-unknowns leave whole-portfolio returns undefined. Portfolios overlap and are not additive.
-The [fixed-original-ticket tax audit](docs/PROJECT_REPORT.md#fixed-original-ticket-tax-audit) remains available separately.
-
-EV−yield is selected-ticket forecast error, not an identified optimizer's-curse component.
-Neither shrinkage tax regime establishes the project's **±2pp EV-reliability target**,
-including the strict (5%,10%] band. [Same-ticket and near-band evidence](docs/PROJECT_REPORT.md#near-band-reliability).
-
-## CLV and execution evidence
-
-Separate **2021–2026 OddsPortal** evidence, not the production export above.
-**Authenticated closing prices and executable fills are unavailable.** These are same-book,
-strictly later recorded pre-start prices, paired separately to each portfolio's actual entries.
-The table uses **matched-known tickets**, not each full portfolio.
-
-| Scenario | Matched known / known selected | Raw later-price move | Net no-vig proxy, 95% CI | Median later quote lead |
-|---|---:|---:|---|---:|
-| 0% focal-book 50/50 | 1,708 / 1,967 | +12.68% | +4.82% [+3.53%, +6.03%] | 1.71h |
-| 12% requalified | 268 / 315 | +24.68% | +2.09% [-1.73%, +5.99%] | 1.48h |
-
-Raw move: `O_entry/O_later_selected - 1`.
-Net proxy: `(1-tax)*O_entry*q_later_selected - 1`, recomputing no-vig q from both later prices.
-Finance's same 70-month bootstrap applies; raw movement does not change with tax.
-
-Price-only coverage is 1,709/1,968 and 268/315, respectively.
-Only 111 and 20 matched-known later quotes are within five minutes of recorded start.
-These proxies are **not true CLV or guaranteed edge**; yield minus proxy is not identified pure sporting luck.
-[Coverage, absences and matched-ticket returns](docs/PROJECT_REPORT.md#clv-and-execution-evidence).
+- Historical years are development-exposed; prior rosters/release clocks are scenarios, not authenticated issuance.
+- Missing model/market coverage stays explicit. Neither repeated quotes nor bootstrap draws create new matches.
+- DRO is a probability stress gate, not a calibrated confidence bound. Rating/drift safeguards were not assessed.
+- Positive historical yield does not establish reliable displayed EV. Full tax, wallet, Glicko and calibration
+  evidence remains in the [detailed report](docs/PROJECT_REPORT.md), separate from these headline comparisons.
 
 ## Reproduce and run
 
-With the [exact local artifact prerequisites](docs/REPRODUCING.md#required-artifacts-and-evidence-checking) installed,
-run from the repository root, choosing an **unused output directory**:
+With the [bound local artifacts](docs/REPRODUCING.md#required-artifacts-and-evidence-checking) installed,
+choose an **unused output directory**:
 
 ```bash
-.venv/bin/python scripts/reproduce_project_results.py --output-dir /tmp/c20r-trader-readme-replay
+.venv/bin/python scripts/reproduce_project_results.py --output-dir /tmp/c20r-readme-evidence-replay
 ```
 
-This scores saved artifacts; no fitting, inference, collection, database or network access.
-A clean checkout does **not** include the ignored data/model inputs.
-Full-precision results, domain-specific seeds and hashes: [aggregate snapshot](docs/results/project_summary.json).
-Python 3.11+ is required; the [guide](docs/REPRODUCING.md) records the exercised environment.
+Saved-only scoring: no fitting, inference, collection, database or network access. A clean clone does
+not contain ignored datasets/model bundles. [Full-precision snapshot](docs/results/project_summary.json)
+includes source hashes, periods, counts, weighting and domain-specific bootstrap conventions.
 
-For the local application, use the [application guide](betting_app/README.md).
-Review database, secrets and scheduler precautions first; default Compose is not a disposable offline setup.
+## Documentation
 
-## Project and documentation
-
-| Area | Start here |
-|---|---|
-| Detailed evidence and limitations | [Project report](docs/PROJECT_REPORT.md) |
-| Replay and artifact prerequisites | [Reproduction guide](docs/REPRODUCING.md) |
-| Models and local serving identity | [Model catalog](docs/MODEL_CATALOG.md) |
-| Architecture and entry points | [Architecture](docs/PROJECT_ARCHITECTURE.md) |
-| Data, research history and scripts | [Documentation index](docs/README.md) |
-| Application and manual workflows | [Application guide](betting_app/README.md) |
+[Detailed evidence](docs/PROJECT_REPORT.md) · [Reproduction](docs/REPRODUCING.md) ·
+[Model catalog](docs/MODEL_CATALOG.md) · [Architecture](docs/PROJECT_ARCHITECTURE.md) ·
+[Application setup](betting_app/README.md) · [Research index](docs/README.md)
 
 ## License and disclaimer
 
-Released under the [MIT License](LICENSE). Research and education only, not financial advice.
-Historical simulations do not guarantee future returns.
-
-LoL-Breaker is not endorsed by Riot Games. League of Legends and Riot Games are trademarks
-or registered trademarks of Riot Games, Inc.
+[MIT License](LICENSE). Research and education, not financial advice. Historical results do not guarantee future returns.
+LoL-Breaker is not endorsed by Riot Games. League of Legends and Riot Games are Riot Games trademarks.

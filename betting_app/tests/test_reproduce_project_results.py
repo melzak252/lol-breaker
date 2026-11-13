@@ -374,3 +374,47 @@ def test_later_price_matching_preserves_saved_300_second_side_freshness():
     pair = replay.pair_later_quotes(selected, endpoints)
     assert pair.loc[0, "later_quote_pair_status"] == "matched_later_prestart_scenario"
     assert pair.loc[0, "raw_price_movement_proxy"] == pytest.approx(0.25)
+
+
+def test_snapshot_opportunities_keep_checks_and_repeated_fixture_outcomes_separate():
+    checks = pd.DataFrame({
+        "canonical_match_id": ["1", "1", "2"],
+        "entry_clock": pd.to_datetime(["2026-01-02T09:00:00Z", "2026-01-02T10:00:00Z", "2026-01-02T09:00:00Z"]),
+        "fixture_start_utc": pd.to_datetime(["2026-01-02T12:00:00Z"] * 3),
+        "band": ["2-6", "2-6", "2-6"],
+        "hours": [3., 2., 3.],
+    })
+    events = pd.DataFrame({
+        "canonical_match_id": ["1", "1", "2"], "snapshot_id": ["a", "b", "c"],
+        "event_id": ["a:team_a", "b:team_a", "c:team_a"], "bookmaker": ["book"] * 3,
+        "decision_at": checks.entry_clock, "start": checks.fixture_start_utc,
+        "side": ["team_a"] * 3, "sports_p": [.65, .65, .45], "q": [.5] * 3,
+        "odds": [2., 2., 1.6], "best_of": [3] * 3, "y": [0, 0, 1],
+    })
+    policy = {"tax_rate": 0., "min_ev_net": .05, "wasserstein_epsilon": .025, "max_odds": 4.}
+    selected = replay.select_sampled_opportunities(checks, events, policy)
+    summary = replay.summarize_sampled_opportunities(checks, selected, ["2026-01"], draws=100)
+    assert selected.event_id.tolist() == ["a:team_a", "b:team_a"]
+    assert summary["checks"] == 3
+    assert summary["suggestions"] == 2
+    assert summary["unique_fixtures"] == 1
+    assert summary["suggestion_rate"] == pytest.approx(2 / 3)
+    assert summary["realized_unit_yield"]["estimate"] == pytest.approx(-1.)
+    assert summary["known_outcome_observations"] == 2
+
+
+def test_snapshot_selection_is_not_conditioned_on_closing_price_availability():
+    checks = pd.DataFrame({
+        "canonical_match_id": ["1"], "entry_clock": pd.to_datetime(["2026-01-01T10:00:00Z"]),
+        "fixture_start_utc": pd.to_datetime(["2026-01-03T12:00:00Z"]), "band": ["48+"], "hours": [50.],
+    })
+    events = pd.DataFrame({
+        "canonical_match_id": ["1"], "snapshot_id": ["a"], "event_id": ["a:team_a"],
+        "bookmaker": ["book"], "decision_at": checks.entry_clock, "start": checks.fixture_start_utc,
+        "side": ["team_a"], "sports_p": [.65], "q": [.5], "odds": [2.], "best_of": [3], "y": [np.nan],
+    })
+    selected = replay.select_sampled_opportunities(checks, events, {"tax_rate": 0., "min_ev_net": .05})
+    summary = replay.summarize_sampled_opportunities(checks, selected, ["2026-01"], draws=100)
+    assert summary["suggestions"] == 1
+    assert summary["known_outcome_observations"] == 0
+    assert summary["realized_unit_yield"]["estimate"] is None

@@ -21,6 +21,7 @@ from sklearn.metrics import roc_auc_score
 
 from betting_app.core.ev import expected_value
 from src.analysis.bootstrap import block_ratio_interval
+from src.analysis.c0_edge_policy_audit import vectorized_gate_passes
 from src.analysis.long_term_market_evaluation import (
     _month_universe,
     select_fixed_policy,
@@ -29,9 +30,15 @@ from src.analysis.long_term_market_evaluation import (
 from src.analysis.metrics import binary_log_loss_vector, calculate_ece
 from src.analysis.production_market_benchmark import paired_cluster_interval
 from src.analysis.production_saved_evidence import (
+    pair_latest_recorded_closes,
     pair_production_closes,
     summarize_production_closes,
+    summarize_latest_recorded_closes,
     summarize_production_wallet,
+)
+from src.analysis.saved_market_comparisons import (
+    summarize_oddsportal_comparisons,
+    summarize_pinnacle_comparisons,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +56,10 @@ PRODUCTION_INPUT = f"data/05_model_input/c0_gate_optimizer/{PRODUCTION_RUN}"
 PRODUCTION_OUTPUT = f"data/08_reporting/c0_gate_optimizer/{PRODUCTION_RUN}"
 PRODUCTION_CLOSE = "data/08_reporting/production_zero_tax_clv/production_zero_tax_clv_20261023_01"
 PRODUCTION_WINDOWS = ("h0_2", "h2_6", "h6_12", "h12_24", "h24_48", "primary48")
+PINNACLE_RUN = "pinnacle_model_comparison_20261112_043418"
+PINNACLE_OUTPUT = f"data/08_reporting/pinnacle_model_comparison/{PINNACLE_RUN}"
+SAMPLING_INPUT = "data/08_reporting/audit/model_betting_reconciliation_20261113_01"
+SAMPLING_SEED = 20261113
 
 PATHS = {
     "model_predictions": "data/07_model_output/c0_model_improvement/c0_model_improvement_20261026_01/predictions.parquet",
@@ -59,6 +70,12 @@ PATHS = {
     "odds_protocol": "data/05_model_input/fresh20_oddsportal/fresh20_oddsportal_20261111_02/protocol.json",
     "odds_evaluation": "data/08_reporting/fresh20_oddsportal/fresh20_oddsportal_20261111_02/evaluation/oddsportal_annual_endpoint_ledger.parquet",
     "odds_binding": "data/08_reporting/fresh20_oddsportal/fresh20_oddsportal_20261111_02/evaluation/execution_binding.json",
+    "odds_quality_reference": f"data/08_reporting/fresh20_oddsportal/{FINANCE_RUN}/evaluation/probability_quality.parquet",
+    "odds_evaluation_receipt": f"data/08_reporting/fresh20_oddsportal/{FINANCE_RUN}/evaluation/evaluation_receipt.json",
+    "pinnacle_ledger": f"data/07_model_output/pinnacle_model_comparison/{PINNACLE_RUN}/comparison_ledger.parquet",
+    "pinnacle_scores_reference": f"{PINNACLE_OUTPUT}/scores.csv",
+    "pinnacle_summary_reference": f"{PINNACLE_OUTPUT}/summary.json",
+    "pinnacle_verification": f"{PINNACLE_OUTPUT}/verification.json",
     "events": "data/04_feature/long_term_market_edge/long_term_market_edge_20261022_01/oddsportal_identity_complete_v3/events.parquet",
     "loo_panel": "data/08_reporting/production_probability/production_probability_20261023_02/shrinkage/loo_matched_panel.parquet",
     "loo_case_accounting": "data/08_reporting/production_probability/production_probability_20261023_02/shrinkage/loo_case_accounting.parquet",
@@ -72,12 +89,19 @@ PATHS = {
     "production_configurations": f"{PRODUCTION_INPUT}/configurations.json",
     "production_fixtures": f"{PRODUCTION_INPUT}/fixtures.parquet",
     "production_binding": f"{PRODUCTION_INPUT}/binding.json",
+    "production_events": f"{PRODUCTION_INPUT}/events.parquet",
     "production_verification": f"{PRODUCTION_OUTPUT}/final_verification.json",
     "production_wallet_summary": f"{PRODUCTION_OUTPUT}/sweep/summary.parquet",
     "production_selected": f"{PRODUCTION_OUTPUT}/sweep/selected.parquet",
     "production_funded": f"{PRODUCTION_OUTPUT}/sweep/funded_ledger.parquet",
     "production_entry_clv": f"{PRODUCTION_CLOSE}/clv/entry_clv_panel.parquet",
     "production_clv_verification": f"{PRODUCTION_CLOSE}/verification/sealed_verification.json",
+    "production_closing_states": f"{PRODUCTION_CLOSE}/clv/closing_states.parquet",
+    "sampled_checks": f"{SAMPLING_INPUT}/sampled_checks.parquet",
+    "sampled_suggestions_reference": f"{SAMPLING_INPUT}/checked_suggestions.parquet",
+    "sampling_reference": f"{SAMPLING_INPUT}/results.json",
+    "market_comparisons_source": "src/analysis/saved_market_comparisons.py",
+    "gate_vectorization_source": "src/analysis/c0_edge_policy_audit.py",
     "production_saved_evidence_source": "src/analysis/production_saved_evidence.py",
     "production_market_source": "src/analysis/production_market_benchmark.py",
     "selection_source": "src/analysis/long_term_market_evaluation.py",
@@ -524,21 +548,22 @@ def pair_later_quotes(selected: pd.DataFrame, endpoint_panel: pd.DataFrame) -> p
     pairs.loc[valid, "later_selected_novig_probability"] = q
     pairs.loc[valid, "raw_price_movement_proxy"] = matched.odds / matched.selected_side_later_odds - 1
     pairs.loc[valid, "net_no_vig_later_price_proxy"] = (1 - matched.tax_rate) * matched.odds * q - 1
-    pairs["genuine_clv_status"] = "not_available_no_certified_close_or_fill"
+    pairs["authenticated_final_market_quote"] = False
     return pairs
 
 
-def _finance_mean_interval(frame: pd.DataFrame, column: str, months: Sequence[str]) -> dict[str, Any]:
+def _finance_mean_interval(frame: pd.DataFrame, column: str, months: Sequence[str], *,
+                           draws: int = DRAWS, seed: int = SEED) -> dict[str, Any]:
     labels = pd.to_datetime(frame.canonical_date, errors="raise").dt.strftime("%Y-%m")
     values = frame[column].to_numpy(float)
     if not np.isfinite(values).all() or labels.isna().any() or not set(labels).issubset(months):
         raise ValueError("price statistics require finite values and dates within the finance month universe")
     totals = pd.DataFrame({"month": labels.to_numpy(), "value": values, "n": np.ones(len(frame))})
     totals = totals.groupby("month").sum().reindex(months, fill_value=0.0)
-    interval = block_ratio_interval(totals.value, totals.n, totals.index, draws=DRAWS, seed=SEED)
+    interval = block_ratio_interval(totals.value, totals.n, totals.index, draws=draws, seed=seed)
     active = totals.loc[totals.n.gt(0)]
     interval["active_month_sensitivity"] = block_ratio_interval(
-        active.value, active.n, active.index, draws=DRAWS, seed=SEED)
+        active.value, active.n, active.index, draws=draws, seed=seed)
     return interval
 
 
@@ -576,11 +601,256 @@ def summarize_later_price_pairs(pairs: pd.DataFrame, months: Sequence[str]) -> d
         "unmatched_prices": len(pairs) - len(matched),
         "absence_counts": pairs.loc[~pairs.index.isin(matched.index), "later_quote_pair_status"].value_counts().to_dict(),
         "all_price_pairs": statistics(matched), "matched_known": matched_known,
-        "genuine_clv": None,
-        "genuine_clv_status": "not_available_no_certified_close_or_fill",
-        "scope": "same selected entry/book/side; strictly later recorded pre-start two-side quote; not certified close or fill",
+        "authenticated_final_market_quote": False,
+        "execution_evidence": "not_recorded",
+        "scope": "historical strictly-later same-book price diagnostic; separate from the latest-recorded closing convention",
         "interval_scope": "unit-stake ratio on all finance preselection months; active-month sensitivity separate",
     }
+
+
+def select_sampled_opportunities(checks: pd.DataFrame, events: pd.DataFrame,
+                                 policy: dict[str, Any]) -> pd.DataFrame:
+    """Replay the fixed observed-timestamp checks, without closing-price admission."""
+    _unique_identities(checks, ["canonical_match_id", "entry_clock"], "sampled checks")
+    _unique_identities(events, ["event_id"], "production events")
+    _require_columns(checks, ["fixture_start_utc", "band", "hours"], "sampled checks")
+    _require_columns(events, ["snapshot_id", "bookmaker", "decision_at", "start", "side",
+                             "sports_p", "q", "odds", "best_of", "y"], "production events")
+    sampled = checks.copy()
+    sampled["entry_clock"] = sampled.entry_clock.map(lambda value: _aware_clock(value, "entry clock"))
+    sampled["fixture_start_utc"] = sampled.fixture_start_utc.map(lambda value: _aware_clock(value, "sample start"))
+    source = events.copy()
+    source["decision_at"] = source.decision_at.map(lambda value: _aware_clock(value, "event clock"))
+    source["start"] = source.start.map(lambda value: _aware_clock(value, "event start"))
+    joined = source.merge(sampled, left_on=["canonical_match_id", "decision_at"],
+                          right_on=["canonical_match_id", "entry_clock"], how="inner",
+                          validate="many_to_one")
+    if not joined.start.eq(joined.fixture_start_utc).all() or not (joined.decision_at < joined.start).all():
+        raise ValueError("sample/event fixture clocks conflict or are not prestart")
+    if not joined.side.isin(["team_a", "team_b"]).all():
+        raise ValueError("production events have an invalid selected side")
+    for column in ("sports_p", "q"):
+        values = joined[column].to_numpy(float)
+        if not (np.isfinite(values) & (values > 0) & (values < 1)).all():
+            raise ValueError("snapshot probabilities must be finite and interior")
+    blended = expit(.5 * logit(joined.sports_p) + .5 * logit(joined.q))
+    if "p_logit" in joined:
+        if not np.allclose(joined.p_logit, blended, rtol=0, atol=1e-12):
+            raise ValueError("saved snapshot probability differs from fixed logit shrinkage")
+    else:
+        joined["p_logit"] = blended
+    joined["prob_model"] = joined.p_logit
+    joined["prob_base"] = joined.sports_p
+    joined["prob_market_novig"] = joined.q
+    joined["rating_disagreement"] = np.nan
+    joined["prob_market_close_novig"] = np.nan
+    joined["ev_net"] = joined.prob_model * joined.odds - 1
+    passes = vectorized_gate_passes(joined, {**policy, "tax_rate": 0.0})
+    eligible = np.logical_and.reduce(list(passes.values()))
+    ordered = joined.loc[eligible].sort_values(
+        ["canonical_match_id", "decision_at", "ev_net", "odds", "bookmaker", "side"],
+        ascending=[True, True, False, False, True, True], kind="stable")
+    return ordered.drop_duplicates(["canonical_match_id", "decision_at"]).reset_index(drop=True)
+
+
+def _unit_offer_summary(selected: pd.DataFrame, months: Sequence[str], *,
+                        draws: int = DRAWS, seed: int = SAMPLING_SEED) -> dict[str, Any]:
+    data = selected.copy()
+    data["canonical_date"] = pd.to_datetime(data.start, errors="raise").dt.strftime("%Y-%m-%d")
+    known = data.loc[data.y.isin([0, 1])].copy()
+    known["unit_return"] = known.y * known.odds - 1
+    counts = data.groupby("canonical_match_id").size()
+    return {
+        "observations": len(data), "unique_fixtures": int(data.canonical_match_id.nunique()),
+        "known_outcome_observations": len(known),
+        "known_outcome_fixtures": int(known.canonical_match_id.nunique()),
+        "unknown_outcome_observations": len(data) - len(known),
+        "actual_wins": int(known.y.sum()),
+        "expected_hybrid_wins": float(known.p_logit.sum()) if len(known) else None,
+        "expected_sports_wins": float(known.sports_p.sum()) if len(known) else None,
+        "mean_expected_ev": float(data.ev_net.mean()) if len(data) else None,
+        "mean_expected_ev_known_outcomes": float(known.ev_net.mean()) if len(known) else None,
+        "realized_unit_yield": _finance_mean_interval(known, "unit_return", months, draws=draws, seed=seed),
+        "maximum_observations_per_fixture": int(counts.max()) if len(counts) else 0,
+        "unit": "zero-tax unit return, observation-weighted; repeated fixtures share outcomes",
+    }
+
+
+def summarize_sampled_opportunities(checks: pd.DataFrame, selected: pd.DataFrame,
+                                    months: Sequence[str], *, draws: int = DRAWS,
+                                    seed: int = SAMPLING_SEED) -> dict[str, Any]:
+    _unique_identities(checks, ["canonical_match_id", "entry_clock"], "sampled checks")
+    _unique_identities(selected, ["canonical_match_id", "decision_at"], "sampled suggestions")
+    return {
+        "checks": len(checks), "checked_fixtures": int(checks.canonical_match_id.nunique()),
+        "suggestions": len(selected), "abstentions": len(checks) - len(selected),
+        "suggestion_rate": len(selected) / len(checks) if len(checks) else None,
+        **_unit_offer_summary(selected, months, draws=draws, seed=seed),
+    }
+
+
+def _sampled_evidence(paths: dict[str, Path], months: Sequence[str]) -> dict[str, Any]:
+    binding = json.loads(paths["production_binding"].read_text(encoding="utf-8"))
+    if binding["files"][PATHS["production_events"]]["sha256"] != _sha256(paths["production_events"]):
+        raise ValueError("production event SHA-256 differs from the frozen policy binding")
+    reference = json.loads(paths["sampling_reference"].read_text(encoding="utf-8"))
+    for key in ("production_events", "production_configurations", "production_closing_states"):
+        if reference["source_hashes"].get(PATHS[key]) != _sha256(paths[key]):
+            raise ValueError(f"sampling source differs from reconciliation: {PATHS[key]}")
+    checks = pd.read_parquet(paths["sampled_checks"])
+    events = pd.read_parquet(paths["production_events"])
+    expected = pd.read_parquet(paths["sampled_suggestions_reference"])
+    configurations = json.loads(paths["production_configurations"].read_text(encoding="utf-8"))
+    baseline = next(item for item in configurations if item["config_id"] == "baseline")
+    selected = select_sampled_opportunities(checks, events, baseline["policy"])
+    if (len(checks) != reference["sampling"]["sampled_unique_fixture_timestamps"]
+            or checks.groupby("band").size().ne(reference["sampling"]["draws_per_band"]).any()):
+        raise ValueError("saved sample differs from its fixed time-stratified contract")
+    _unique_identities(expected, ["event_id"], "saved suggestion reference")
+    if set(selected.event_id) != set(expected.event_id):
+        raise ValueError("replayed snapshot suggestions differ from the saved sample")
+    left, right = selected.set_index("event_id"), expected.set_index("event_id")
+    right = right.reindex(left.index)
+    for column in ("odds", "p_logit", "sports_p", "q", "ev_net", "y"):
+        if not np.allclose(left[column], right[column], rtol=0, atol=1e-12, equal_nan=True):
+            raise ValueError(f"snapshot suggestion source mismatch: {column}")
+    states = pd.read_parquet(paths["production_closing_states"])
+    pairs = pair_latest_recorded_closes(selected, states)
+    result = summarize_sampled_opportunities(checks, selected, months)
+    result["recorded_close_clv"] = summarize_latest_recorded_closes(pairs, months)
+    result["by_lead_band"] = []
+    for band in checks.band.unique():
+        band_checks = checks.loc[checks.band.eq(band)]
+        band_selected = selected.loc[selected.band.eq(band)]
+        band_result = summarize_sampled_opportunities(band_checks, band_selected, months)
+        band_result["band"] = band
+        band_result["recorded_close_clv"] = summarize_latest_recorded_closes(pairs.loc[pairs.band.eq(band)], months)
+        result["by_lead_band"].append(band_result)
+    fixed_tickets = pd.read_parquet(
+        paths["production_selected"], filters=[("case_id", "==", "tax0__logit__baseline__primary48")])
+    fixed = events.set_index("event_id").loc[fixed_tickets.event_id].reset_index()
+    if fixed.canonical_match_id.duplicated().any():
+        raise ValueError("fixed chronological policy must select one ticket per fixture")
+    fixed["ev_net"] = fixed.p_logit * fixed.odds - 1
+    fixed_result = _unit_offer_summary(fixed, months)
+    fixed_result["recorded_close_clv"] = summarize_latest_recorded_closes(
+        pair_latest_recorded_closes(fixed, states), months)
+    return {
+        "status": "HISTORICAL_EXPLORATORY_COUNTERFACTUAL",
+        "sampling": reference["sampling"],
+        "snapshot_weighted": result,
+        "fixed_first_eligible_48h": fixed_result,
+        "closing_definition": {
+            "reference": "latest recorded strictly prestart state per fixture/book",
+            "maximum_age_seconds": None, "requires_later_than_entry": False,
+            "same_entry_state_allowed": True, "invalid_latest_state_fallback": False,
+            "loo": "at least two other books; equal-weight mean fair logits from raw two-sided prices",
+            "tax_rate": 0.0, "authenticated_final_market_quote": False,
+            "execution_evidence": "not_recorded; not required for price CLV",
+        },
+        "unassessed_guards": ["rating_disagreement", "contemporaneous_clv_drift"],
+        "scope": "offers recorded exactly at sampled clocks, not a complete carried-forward bookmaker board",
+        "sample_provenance": "saved checks and suggestions hashed in this replay; not independently sealed",
+    }
+
+
+def _market_evidence(paths: dict[str, Path], endpoints: pd.DataFrame, months: Sequence[str],
+                     consensus: dict[str, Any], source_events: pd.DataFrame) -> dict[str, Any]:
+    receipt = json.loads(paths["odds_evaluation_receipt"].read_text(encoding="utf-8"))
+    if (receipt.get("run_id") != FINANCE_RUN or
+            receipt.get("status") != "HISTORICAL_INDIVIDUAL_BOOK_ENDPOINT_SCENARIOS_COMPLETE"):
+        raise ValueError("unexpected annual OddsPortal evaluation receipt")
+    annual = summarize_oddsportal_comparisons(endpoints, list(months))
+    references = pd.read_parquet(paths["odds_quality_reference"])
+    references = references.loc[references.year.astype(str).eq("2021-2026")]
+    annual_errors = []
+    for horizon, result in annual["endpoints"].items():
+        rows = references.loc[references.horizon.eq(horizon)]
+        if len(rows) != 1:
+            raise ValueError("expected one pooled annual quality reference per endpoint")
+        reference = rows.iloc[0]
+        for name, prefix in (("sports_model", ""), ("market", "market_")):
+            for metric in ("n", "log_loss", "brier"):
+                expected = reference["n" if metric == "n" else prefix + metric]
+                annual_errors.append(_check_reference_value(result["scores"][name][metric], expected,
+                                                             f"OddsPortal/{horizon}/{name}/{metric}"))
+        for key in ("estimate", "ci_lower", "ci_upper", "equal_block_estimate", "blocks",
+                    "active_blocks", "valid_replicates", "empty_replicates"):
+            annual_errors.append(_check_reference_value(
+                result["contrasts"]["log_loss"][key], reference.delta_vs_market[key],
+                f"OddsPortal/{horizon}/delta/{key}"))
+    inventory = source_events.loc[source_events.source_year.isin(YEAR_RANGE)]
+    _unique_identities(inventory, ["source", "source_event_id"], "annual OddsPortal source inventory")
+    source_ids = set(zip(inventory.source, inventory.source_event_id))
+    quoted_ids = set(zip(endpoints.source, endpoints.source_event_id))
+    if not quoted_ids.issubset(source_ids):
+        raise ValueError("annual endpoint quote is outside the retained source inventory")
+    annual["source_coverage"] = {
+        "source_events": len(inventory),
+        "quoted_source_events": len(quoted_ids),
+        "events_without_retained_quotes": len(source_ids - quoted_ids),
+        "source_events_missing_canonical_mapping": int(inventory.golgg_match_id.isna().sum()),
+        "retained_endpoint_quote_rows": len(endpoints),
+        "mapped_unique_fixtures": int(endpoints.golgg_match_id.nunique()),
+        "mapped_fixture_first_date": endpoints.canonical_date.dropna().min(),
+        "mapped_fixture_last_date": endpoints.canonical_date.dropna().max(),
+    }
+    annual["model_scope"] = "year-eligible annual fresh20+regional models 2021–2026, not one 2026 checkpoint backcast"
+    annual["saved_reference_verification"] = {
+        "status": "PASS", "absolute_tolerance": 1e-12, "numeric_comparisons": len(annual_errors),
+        "maximum_absolute_error": max(annual_errors),
+        "binding_limit": "endpoint ledger and reference scores hashed here; not independently sealed outputs",
+    }
+
+    seal = json.loads(paths["pinnacle_verification"].read_text(encoding="utf-8"))
+    source = json.loads(paths["pinnacle_summary_reference"].read_text(encoding="utf-8"))
+    if (seal.get("status") != "PASS" or seal.get("run_id") != PINNACLE_RUN or
+            source.get("run_id") != PINNACLE_RUN):
+        raise ValueError("Pinnacle evidence has an unexpected verification or run identity")
+    for key in ("pinnacle_ledger", "pinnacle_scores_reference"):
+        if seal.get("sha256", {}).get(PATHS[key]) != _sha256(paths[key]):
+            raise ValueError(f"Pinnacle saved-output SHA-256 mismatch: {PATHS[key]}")
+    ledger = pd.read_parquet(paths["pinnacle_ledger"])
+    pinnacle = summarize_pinnacle_comparisons(ledger)
+    score_reference = pd.read_csv(paths["pinnacle_scores_reference"])
+    pin_errors = []
+
+    def check_scores(result, horizon, cohort, models):
+        for key, model in models.items():
+            rows = score_reference.loc[(score_reference.horizon.eq(horizon))
+                                       & score_reference.cohort.eq(cohort)
+                                       & score_reference.model.eq(model)]
+            if len(rows) != 1:
+                raise ValueError("missing or ambiguous Pinnacle score reference")
+            for metric, column in (("n", "n"), ("log_loss", "logloss"), ("brier", "brier")):
+                pin_errors.append(_check_reference_value(result["scores"][key][metric], rows.iloc[0][column],
+                                                         f"Pinnacle/{horizon}/{cohort}/{model}/{metric}"))
+
+    for horizon, result in pinnacle["endpoints"].items():
+        check_scores(result, horizon, "c20r_pinnacle_pairs", {"sports_model": "C20R", "market": "Pinnacle"})
+        saved = source["c20r_vs_pinnacle"][horizon]["paired_contrast"]
+        for actual_name, saved_name in (("log_loss", "logloss"), ("brier", "brier"),
+                                        ("familywise_98_75_log_loss", "logloss_98_75_four_contrast_family")):
+            for key in ("n", "blocks", "delta", "ci_lower", "ci_upper", "equal_block_delta",
+                        "equal_block_ci_lower", "equal_block_ci_upper"):
+                pin_errors.append(_check_reference_value(result["contrasts"][actual_name][key], saved[saved_name][key],
+                                                         f"Pinnacle/{horizon}/{actual_name}/{key}"))
+        secondary = pinnacle["secondary_scopes"][horizon]
+        check_scores(secondary["polish_vs_pinnacle"], horizon, "polish_pinnacle_pairs",
+                     {"sports_model": "Polish consensus", "market": "Pinnacle"})
+        check_scores(secondary["three_way"], horizon, "three_way_common",
+                     {"sports_model": "C20R", "market": "Polish consensus", "pinnacle": "Pinnacle"})
+    if len(ledger) != source["scope"]["retained_endpoint_rows"] or ledger.source_event_id.nunique() != source["scope"]["source_fixtures"]:
+        raise ValueError("Pinnacle source population differs from retained scope")
+    pinnacle["source_coverage"] = source["scope"]
+    pinnacle["source_decision"] = source["decision"]
+    pinnacle["metadata"]["period_months"] = sorted(ledger.loc[ledger.c20r_pair_eligible, "month"].unique())
+    pinnacle["secondary_scope_limits"] = "Fortuna and Superbet only; 2 months; not the entire Polish market or independent confirmation"
+    pinnacle["saved_reference_verification"] = {
+        "status": "PASS", "absolute_tolerance": 1e-12, "numeric_comparisons": len(pin_errors),
+        "maximum_absolute_error": max(pin_errors),
+    }
+    return {"oddsportal": annual, "pinnacle": pinnacle, "polish": consensus}
 
 
 def _check_inputs() -> dict[str, Path]:
@@ -751,8 +1021,8 @@ def _production_evidence(paths: dict[str, Path]) -> dict[str, Any]:
             "selection": "first eligible recorded observation per fixture within each half-open interval",
             "unassessed_guards": ["rating_disagreement", "contemporaneous_clv_drift"],
         },
-        "portfolios": portfolios, "true_clv": None,
-        "true_clv_status": "not_available_no_certified_close_or_fill",
+        "portfolios": portfolios, "authenticated_final_market_quote": False,
+        "execution_evidence": "not_recorded",
         "closing_reference_ages_seconds": {"300": 300, "3600": 3600, "anyage": None},
         "scope_limits": [
             "Production-collected prices and saved counterfactual C20R probabilities, not authenticated issued forecasts or actual bets.",
@@ -911,6 +1181,8 @@ def replay() -> tuple[dict[str, Any], dict[str, str]]:
         )
     }
     production_betting = _production_evidence(paths)
+    bookmaker_comparisons = _market_evidence(paths, endpoints, months, consensus, events)
+    production_opportunities = _sampled_evidence(paths, production_betting["cohort"]["fixture_start_months"])
 
     hashes = {key: _sha256(path) for key, path in paths.items()}
     bootstrap_by_domain = {
@@ -939,9 +1211,26 @@ def replay() -> tuple[dict[str, Any], dict[str, str]]:
             "estimand": "saved-stake ROI ratio; equal-ticket closing proxies, stake-weighted sensitivity",
             "undefined_draws": "retained; any zero-denominator draw withholds the interval",
         },
+        "oddsportal_prediction": {
+            "resamples": DRAWS, "seed": SEED, "confidence_level": 0.95,
+            "month_universe": list(months),
+            "estimand": "equal fixture; earliest eligible focal quote within each retained endpoint",
+        },
+        "pinnacle_prediction": {
+            "resamples": DRAWS, "seed": 20261112, "confidence_level": 0.95,
+            "four_contrast_family_confidence_level": 0.9875,
+            "month_universe": bookmaker_comparisons["pinnacle"]["metadata"]["period_months"],
+            "estimand": "paired equal fixture; equal-month sensitivity",
+        },
+        "production_opportunities": {
+            "resamples": DRAWS, "seed": SAMPLING_SEED, "confidence_level": 0.95,
+            "month_universe": production_betting["cohort"]["fixture_start_months"],
+            "estimand": "selected-observation mean; fixed one-per-fixture policy separate",
+            "undefined_draws": "retained; any zero-denominator draw withholds the interval",
+        },
     }
     snapshot = {
-        "schema": "project_results_replay_v3",
+        "schema": "project_results_replay_v4",
         "status": "REPLAYED_FROM_INSTALLED_SAVED_ARTIFACTS",
         "reproduction": {
             "bootstrap_by_domain": bootstrap_by_domain,
@@ -965,11 +1254,12 @@ def replay() -> tuple[dict[str, Any], dict[str, str]]:
             "historical_evaluation_environment": model_binding.get("environment", {}),
         },
         "model_scores": model_scores,
-        "consensus_prediction_quality": consensus,
+        "bookmaker_comparisons": bookmaker_comparisons,
         "glicko2_comparison": glicko,
         "financial_scenarios": financial,
         "later_price_proxies": later_price_proxies,
         "production_betting": production_betting,
+        "production_opportunities": production_opportunities,
         "scope_limits": [
             "Historical development results; no prospective or held-out confirmation.",
             "ROI is known-label return per unit stake (turnover), not bankroll growth.",
@@ -977,7 +1267,7 @@ def replay() -> tuple[dict[str, Any], dict[str, str]]:
             "OddsPortal scenarios use a focal-book blend, not a two-other-book hybrid or full application-gate replay.",
             "Production scenarios use a two-other-book logit blend but leave rating/drift guards unassessed; no authenticated activity or fills.",
             "Endpoint policy portfolios overlap and are not additive.",
-            "Later-price statistic is a recorded-price proxy, not true CLV or executable close.",
+            "Recorded-close CLV uses latest saved prestart prices, not certified final quotes; fills are a separate question.",
             "No fit, inference, acquisition, database access, or network access in this replay.",
         ],
     }
@@ -994,7 +1284,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise FileExistsError(f"exclusive output directory already exists: {output_dir}")
     summary, hashes = replay()
     receipt = {
-        "schema": "project_results_replay_receipt_v3",
+        "schema": "project_results_replay_receipt_v4",
         "status": "PASS",
         "bootstrap_by_domain": summary["reproduction"]["bootstrap_by_domain"],
         "source_sha256": hashes,

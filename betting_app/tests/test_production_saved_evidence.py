@@ -108,8 +108,6 @@ def test_production_closes_use_actual_selected_side_and_keep_tax_separate():
     assert result["loo_covered"] == result["samebook_covered"] == 2
     assert result["loo_gross_proxy"]["estimate"] == pytest.approx(0.35)
     assert result["stake_weighted_loo_gross_proxy"]["estimate"] == pytest.approx(0.4)
-    assert result["true_clv"] is None
-    assert result["true_clv_status"] == "not_available_no_certified_close_or_fill"
 
 
 def test_production_closes_preserve_missing_references_and_unknown_outcomes():

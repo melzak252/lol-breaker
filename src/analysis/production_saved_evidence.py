@@ -13,7 +13,6 @@ import pandas as pd
 from src.analysis.bootstrap import block_ratio_interval
 
 
-_TRUE_CLV_STATUS = "not_available_no_certified_close_or_fill"
 
 
 def _aware(value, name: str) -> pd.Timestamp:
@@ -251,5 +250,171 @@ def summarize_production_closes(pairs: pd.DataFrame, months: Sequence[str], *, d
             "loo_net_proxy": metric("loo_net_proxy"),
             "stake_weighted_loo_gross_proxy": metric("loo_gross_proxy", "stake"),
             "stake_weighted_loo_net_proxy": metric("loo_net_proxy", "stake"),
-            "true_clv": None, "true_clv_status": _TRUE_CLV_STATUS,
+            "authenticated_final_market_quote": False, "execution_evidence": "not_recorded",
             "reference_scope": "covered recorded prestart references; unknown outcomes retained"}
+
+def pair_latest_recorded_closes(entries: pd.DataFrame, states: pd.DataFrame) -> pd.DataFrame:
+    """Pair selected prices with the single latest recorded prestart state per book."""
+    entry_fields = ["event_id", "snapshot_id", "canonical_match_id", "bookmaker", "side",
+                    "decision_at", "start", "odds"]
+    state_fields = ["canonical_match_id", "bookmaker", "snapshot_id", "clock",
+                    "fixture_start_utc", "odds_team_a", "odds_team_b", "state_reason"]
+    if not set(entry_fields).issubset(entries.columns):
+        raise ValueError("entries missing required price identity fields")
+    if not set(state_fields).issubset(states.columns):
+        raise ValueError("states missing required latest-state fields")
+    data = entries.copy()
+    source = states.copy()
+    if data.event_id.isna().any() or data.event_id.duplicated().any():
+        raise ValueError("event_id must be present and unique")
+    if data[entry_fields].isna().any().any():
+        raise ValueError("entry identity and price fields must be present")
+    if source[["canonical_match_id", "bookmaker"]].isna().any().any():
+        raise ValueError("state identity must be present")
+    if source.duplicated(["canonical_match_id", "bookmaker"]).any():
+        raise ValueError("ambiguous latest fixture/book endpoint")
+    if not data.side.isin(["team_a", "team_b"]).all():
+        raise ValueError("side must be team_a or team_b")
+
+    def odds(value, field):
+        try:
+            result = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid {field}") from exc
+        if not math.isfinite(result) or result <= 1:
+            raise ValueError(f"invalid {field}")
+        return result
+
+    index = {}
+    by_fixture = {}
+    for row in source.itertuples(index=False):
+        key = (row.canonical_match_id, row.bookmaker)
+        parsed = None
+        if row.state_reason == "eligible":
+            clock = _aware(row.clock, "state clock")
+            state_start = _aware(row.fixture_start_utc, "fixture_start_utc")
+            try:
+                oa, ob = odds(row.odds_team_a, "latest team_a odds"), odds(row.odds_team_b, "latest team_b odds")
+            except ValueError:
+                pass
+            else:
+                parsed = (clock, state_start, oa, ob)
+        index[key] = (row, parsed)
+        by_fixture.setdefault(row.canonical_match_id, []).append((row, parsed))
+    out = []
+    if data.empty:
+        result = data.copy()
+        for name, default in {
+            "fixture_month": pd.Series(dtype="object"),
+            "samebook_status": pd.Series(dtype="object"), "loo_status": pd.Series(dtype="object"),
+            "samebook_price_clv": pd.Series(dtype="float64"), "samebook_fair_clv": pd.Series(dtype="float64"),
+            "loo_fair_clv": pd.Series(dtype="float64"), "samebook_reference_age_seconds": pd.Series(dtype="float64"),
+            "loo_reference_age_seconds": pd.Series(dtype="float64"), "loo_reference_ages_seconds": pd.Series(dtype="object"),
+            "loo_n_books": pd.Series(dtype="int64"), "loo_contributor_books": pd.Series(dtype="object"),
+            "loo_contributor_ages_seconds": pd.Series(dtype="object"),
+        }.items():
+            result[name] = default
+        return result
+    for entry in data.itertuples(index=False):
+        record = entry._asdict()
+        decision = _aware(entry.decision_at, "decision_at")
+        start = _aware(entry.start, "start")
+        entry_odds = odds(entry.odds, "entry odds")
+        if decision >= start:
+            raise ValueError("entry decision must precede fixture start")
+        record["fixture_month"] = start.strftime("%Y-%m")
+        record.update(samebook_status="missing_latest_state", loo_status="insufficient_other_books",
+                      samebook_price_clv=np.nan, samebook_fair_clv=np.nan, loo_fair_clv=np.nan,
+                      samebook_reference_age_seconds=np.nan, loo_reference_age_seconds=np.nan,
+                      loo_reference_ages_seconds=[], loo_n_books=0, loo_contributor_books=[])
+        fixture_states = by_fixture.get(entry.canonical_match_id, [])
+        if fixture_states and any(parsed is not None and parsed[1] != start for _, parsed in fixture_states):
+            raise ValueError("state fixture start does not match entry start")
+        own_pair = index.get((entry.canonical_match_id, entry.bookmaker))
+        own = own_pair[0] if own_pair else None
+        own_values = own_pair[1] if own_pair else None
+        if own is None:
+            record["samebook_status"] = "missing_latest_state"
+        elif own_values is None or own_values[1] != start or own_values[0] >= start:
+            record["samebook_status"] = "invalid_or_poststart_latest_state"
+        else:
+            clock, _, oa, ob = own_values
+            close_odds = oa if entry.side == "team_a" else ob
+            selected_q = ob / (oa + ob) if entry.side == "team_a" else oa / (oa + ob)
+            record.update(samebook_status="matched_latest_prestart_state",
+                          samebook_price_clv=entry_odds / close_odds - 1,
+                          samebook_fair_clv=entry_odds * selected_q - 1,
+                          samebook_reference_age_seconds=(start - clock).total_seconds())
+        peers, peer_books, peer_ages = [], [], []
+        for state, values in fixture_states:
+            if state.bookmaker == entry.bookmaker or values is None:
+                continue
+            clock, state_start, oa, ob = values
+            if state_start != start or clock >= start:
+                continue
+            q_a = ob / (oa + ob)
+            logit = math.log(q_a / (1 - q_a))
+            peers.append(logit)
+            peer_books.append(state.bookmaker)
+            peer_ages.append((start - clock).total_seconds())
+        if len(peers) < 2:
+            record["loo_status"] = "insufficient_other_books"
+        else:
+            mean_logit = sum(peers) / len(peers)
+            q_a = 1 / (1 + math.exp(-mean_logit))
+            q_selected = q_a if entry.side == "team_a" else 1 - q_a
+            record.update(loo_status="matched_latest_prestart_state", loo_fair_clv=entry_odds * q_selected - 1,
+                          loo_reference_age_seconds=max(peer_ages), loo_reference_ages_seconds=peer_ages,
+                          loo_n_books=len(peers), loo_contributor_books=peer_books,
+                          loo_contributor_ages_seconds=peer_ages)
+
+        out.append(record)
+    return pd.DataFrame(out)
+
+
+def summarize_latest_recorded_closes(pairs: pd.DataFrame, months: Sequence[str], *,
+                                     draws=5000, seed=20261113) -> dict:
+    """Summarize latest-state price CLV, resampling every supplied calendar month."""
+    month_values = _months(months)
+    required = {"fixture_month", "canonical_match_id", "samebook_status", "loo_status",
+                "samebook_price_clv", "loo_fair_clv"}
+    if not required.issubset(pairs.columns):
+        raise ValueError("pairs missing latest-close summary fields")
+    data = pairs.copy()
+    if data.fixture_month.isna().any() or (~data.fixture_month.isin(month_values)).any():
+        raise ValueError("pair month outside supplied month universe")
+
+    def summarize(domain, value_col, age_col):
+        status_col = f"{domain}_status"
+        status = data[status_col].astype(str)
+        covered_mask = status.eq("matched_latest_prestart_state").to_numpy()
+        values = pd.to_numeric(data[value_col], errors="coerce").to_numpy(float)
+        if not np.array_equal(np.isfinite(values), covered_mask):
+            raise ValueError(f"{value_col} availability inconsistent with status")
+        selected = values[covered_mask]
+        ages = pd.to_numeric(data.loc[covered_mask, age_col], errors="coerce").to_numpy(float) if age_col in data else np.array([])
+        if len(ages) and (not np.isfinite(ages).all() or (ages < 0).any()):
+            raise ValueError("invalid reference ages")
+        interval = _ratio(selected.tolist(), np.ones(len(selected)).tolist(),
+                          data.loc[covered_mask, "fixture_month"].tolist(), month_values,
+                          draws=draws, seed=seed)
+        absences = status.value_counts().to_dict()
+        positive, zero, negative = int((selected > 0).sum()), int((selected == 0).sum()), int((selected < 0).sum())
+        direction = ({"shortened": positive, "unchanged": zero, "lengthened": negative}
+                     if domain == "samebook" else {"positive": positive, "zero": zero, "negative": negative})
+        return {"covered": int(covered_mask.sum()),
+                "unique_fixtures": int(data.loc[covered_mask, "canonical_match_id"].nunique()),
+                "absences": {str(k): int(v) for k, v in absences.items() if k != "matched_latest_prestart_state"},
+                "mean": float(selected.mean()) if len(selected) else None,
+                "median": float(np.median(selected)) if len(selected) else None,
+                "quantiles": {str(q): float(np.quantile(selected, q)) for q in (.05, .25, .75, .95)} if len(selected) else None,
+                "mean_interval": interval, **direction,
+                "reference_age_median_seconds": float(np.median(ages)) if len(ages) else None,
+                "reference_age_p95_seconds": float(np.quantile(ages, .95)) if len(ages) else None,
+                "reference_age_max_seconds": float(np.max(ages)) if len(ages) else None,
+                "age_at_least_2h": int((ages >= 7200).sum()),
+                "age_at_least_2h_coverage": float((ages >= 7200).mean()) if len(ages) else None,
+                "reference_age_scope": "own latest quote" if domain == "samebook" else "oldest eligible other-book quote per entry"}
+    return {"entries": len(data), "samebook": summarize("samebook", "samebook_price_clv", "samebook_reference_age_seconds"),
+            "loo": summarize("loo", "loo_fair_clv", "loo_reference_age_seconds"),
+            "source_scope": "entry-snapshot weighted latest recorded strictly prestart prices; no outcome, fill, or stake required"}
