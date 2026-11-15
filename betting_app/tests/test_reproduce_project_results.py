@@ -455,20 +455,59 @@ def test_readme_scorecard_values_match_saved_replay_summary():
         assert row in readme
 
     polish = summary["bookmaker_comparisons"]["polish"]
-    for label, recipe, ci_name in (
-        ("C20R", "C20R", "C20R_minus_consensus"),
-        ("Other-book consensus", "consensus", None),
-        ("**Hybrid-50**", "Hybrid-50", "Hybrid-50_minus_consensus"),
-    ):
-        score = polish["scores"][recipe]["log_loss"]
-        fixtures = polish["coverage"]["fixtures"]
-        if ci_name is None:
-            row = f"| {label} | {fixtures} | {score:.4f} | Reference |"
-        else:
-            contrast = polish["contrasts"][ci_name]["log_loss"]
-            ci = f"[{contrast['ci_lower']:+.4f}, {contrast['ci_upper']:+.4f}]"
-            if label.startswith("**"):
-                row = f"| {label} | {fixtures} | **{score:.4f}** | **{ci}** |"
-            else:
-                row = f"| {label} | {fixtures} | {score:.4f} | {ci} |"
+    contrast = polish["contrasts"]["Hybrid-50_minus_consensus"]["log_loss"]
+    aggregate_summary = (
+        f"Across the full {polish['coverage']['fixtures']}-fixture panel, fixed 50/50 logit "
+        f"shrinkage scores **{polish['scores']['Hybrid-50']['log_loss']:.4f} LL** versus "
+        f"**{polish['scores']['consensus']['log_loss']:.4f}** for LOO consensus. "
+        f"The fixture-weighted 95% ΔLL interval is **[{contrast['ci_lower']:+.4f}, "
+        f"{contrast['ci_upper']:+.4f}]** and crosses zero; the equal-month interval is "
+        f"**[{contrast['equal_block_ci_lower']:+.4f}, {contrast['equal_block_ci_upper']:+.4f}]**."
+    )
+    assert aggregate_summary in readme
+
+
+def test_readme_lead_time_and_recorded_price_metrics_match_replay_summary():
+    summary = json.loads((replay.ROOT / "docs/results/project_summary.json").read_text(encoding="utf-8"))
+    readme = (replay.ROOT / "README.md").read_text(encoding="utf-8")
+    polish = summary["bookmaker_comparisons"]["polish"]
+    lead_labels = {
+        "[0,2)": "0–2h",
+        "[2,6)": "2–6h",
+        "[6,12)": "6–12h",
+        "[12,24)": "12–24h",
+        "[24,48)": "24–48h",
+        "[48,96)": "48–96h",
+        "[96,inf)": "96h+",
+    }
+    for band, label in lead_labels.items():
+        result = polish["by_lead_bin"][band]
+        scores = result["scores"]
+        row = (
+            f"| {label} | {result['coverage']['fixtures']:,} | "
+            f"{scores['consensus']['log_loss']:.4f} | "
+            f"{scores['C20R']['log_loss']:.4f} | "
+            f"{scores['Hybrid-50']['log_loss']:.4f} |"
+        )
         assert row in readme
+
+    snapshot = summary["production_opportunities"]["snapshot_weighted"]
+    suggestion_count = snapshot["suggestions"]
+    fixture_count = snapshot["unique_fixtures"]
+    assert f"{summary['production_opportunities']['sampling']['sampled_unique_fixture_timestamps']:,} sampled timestamp checks" in readme
+    assert f"{suggestion_count} recorded recommendations across {fixture_count} fixtures" in readme
+    clv = snapshot["recorded_close_clv"]
+    for label, key in (
+        ("Same-book recorded price move", "samebook"),
+        ("Other-book fair-price reference", "loo"),
+    ):
+        metric = clv[key]
+        row = (
+            f"| {label} | {metric['covered']} / {suggestion_count} | "
+            f"{metric['mean']:+.1%} | "
+            f"[{metric['mean_interval']['ci_lower']:+.1%}, "
+            f"{metric['mean_interval']['ci_upper']:+.1%}] |"
+        )
+        assert row in readme
+    assert "same-entry quote is allowed" in readme
+    assert "not authenticated official closes or actual fills" in readme
