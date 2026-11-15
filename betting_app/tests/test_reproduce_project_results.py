@@ -418,3 +418,57 @@ def test_snapshot_selection_is_not_conditioned_on_closing_price_availability():
     assert summary["suggestions"] == 1
     assert summary["known_outcome_observations"] == 0
     assert summary["realized_unit_yield"]["estimate"] is None
+
+
+def test_readme_scorecard_values_match_saved_replay_summary():
+    summary = json.loads((replay.ROOT / "docs/results/project_summary.json").read_text(encoding="utf-8"))
+    readme = (replay.ROOT / "README.md").read_text(encoding="utf-8")
+    model_scores = summary["model_scores"]["regional_supported_3083"]
+    for label, key in (
+        ("Annual A0", "annual_A0"),
+        ("Historical C0", "historical_C0"),
+        ("Fresh20 without regional", "fresh20_without_regional"),
+        ("**C20R** (fresh20 + regional)", "C20R"),
+    ):
+        score = model_scores[key]
+        row = (f"| {label} | **{score['n']:,}** | **{score['log_loss']:.4f}** | "
+               f"**{score['brier']:.4f}** | **{score['ece10']:.1%}** |"
+               if label.startswith("**C20R**")
+               else f"| {label} | {score['n']:,} | {score['log_loss']:.4f} | "
+                    f"{score['brier']:.4f} | {score['ece10']:.1%} |")
+        assert row in readme
+
+    for market, endpoint, label, confidence in (
+        ("OddsPortal", "OPEN_OR_FIRST_OBSERVED", "First observed", "log_loss"),
+        ("OddsPortal", "LAST_CHANGE_OR_LAST_PRESTART", "Last retained", "log_loss"),
+        ("Pinnacle", "OPEN_OR_FIRST_OBSERVED", "First observed", "familywise_98_75_log_loss"),
+        ("Pinnacle", "LAST_CHANGE_OR_LAST_PRESTART", "Last retained", "familywise_98_75_log_loss"),
+    ):
+        result = summary["bookmaker_comparisons"][market.lower()]["endpoints"][endpoint]
+        interval = result["contrasts"][confidence]
+        row = (
+            f"| {market} | {label} | {result['scores']['sports_model']['n']:,} | "
+            f"{result['scores']['sports_model']['log_loss']:.4f} | "
+            f"{result['scores']['market']['log_loss']:.4f} | "
+            f"[{interval['ci_lower']:+.4f}, {interval['ci_upper']:+.4f}] |"
+        )
+        assert row in readme
+
+    polish = summary["bookmaker_comparisons"]["polish"]
+    for label, recipe, ci_name in (
+        ("C20R", "C20R", "C20R_minus_consensus"),
+        ("Other-book consensus", "consensus", None),
+        ("**Hybrid-50**", "Hybrid-50", "Hybrid-50_minus_consensus"),
+    ):
+        score = polish["scores"][recipe]["log_loss"]
+        fixtures = polish["coverage"]["fixtures"]
+        if ci_name is None:
+            row = f"| {label} | {fixtures} | {score:.4f} | Reference |"
+        else:
+            contrast = polish["contrasts"][ci_name]["log_loss"]
+            ci = f"[{contrast['ci_lower']:+.4f}, {contrast['ci_upper']:+.4f}]"
+            if label.startswith("**"):
+                row = f"| {label} | {fixtures} | **{score:.4f}** | **{ci}** |"
+            else:
+                row = f"| {label} | {fixtures} | {score:.4f} | {ci} |"
+        assert row in readme
