@@ -694,8 +694,8 @@ stages:
       size: 52824
     - path: pyproject.toml
       hash: md5
-      md5: f7f25b5ca4b14fab246740c2a9caa55d
-      size: 959
+      md5: bc28445752f609f02d87dcbbc3ff2938
+      size: 930
     - path: scripts/reproduce_project_results.py
       hash: md5
       md5: 1e7fa79ea8655f64ad062a9fa8051606
@@ -981,8 +981,8 @@ stages:
       size: 12034
     - path: uv.lock
       hash: md5
-      md5: b5ee68e3d8368ab17c1057ccff94bc21
-      size: 609117
+      md5: 96e1e9e299a17608006ff86e2bcf6013
+      size: 592847
     outs:
     - path: data/08_reporting/project_results_replay_v4_dvc_20261116
       hash: md5

@@ -30,13 +30,17 @@ The current saved-ledger replay has a dedicated DVC target. Run only this stage;
 
 ```bash
 python -m pip install -e '.[replay]'
-DVC_NO_ANALYTICS=1 DVC_CHECK_UPDATE=false .venv/bin/dvc pull --with-deps project_results_replay_v4
+bundle=$(mktemp -d)
+curl -fL https://github.com/melzak252/lol-breaker/releases/download/readme-replay-v4/dvc-cache-transfer.zip -o "$bundle/replay.zip"
+echo "eed54979bfde38920b53bf2fe7d2d393ab74111cac8720cee6003bdf896cde97  $bundle/replay.zip" | sha256sum -c -
+unzip -n "$bundle/replay.zip" -d "$(.venv/bin/dvc cache dir)"
+.venv/bin/dvc checkout --with-deps project_results_replay_v4
 DVC_NO_ANALYTICS=1 DVC_CHECK_UPDATE=false .venv/bin/dvc repro --force project_results_replay_v4
 ```
 
 It writes to `data/08_reporting/project_results_replay_v4_dvc_20261116`, an exclusive DVC-owned output directory. Standard DVC stage reruns remove only that declared output before invoking the existing runner, which still refuses any occupied `--output-dir`.
 
-The 37 input `.dvc` pointers, stage, lock, and code must be published together. Drive access additionally requires Google authentication and permission to the configured folder; pointer presence does not establish remote object availability. Never commit authentication files or copy another machine's DVC cache as proof of online restoration.
+The 37 input `.dvc` pointers, stage, lock, and code are versioned together. The release ZIP supplies only the corresponding content-addressed cache objects. Its SHA-256 is pinned above; verify it before extraction. No Google authentication, Drive plugin, original worktree cache, or GitHub login is needed to download the public asset. The legacy Drive remote is retained for older studies, not used by this workflow.
 
 This stage covers saved-ledger aggregate replay only; it does not version the complete C20R inference/training closure or the prop-v2/draft model artifacts.
 
@@ -57,11 +61,11 @@ An isolated workspace restored all 37 inputs (56,803,982 bytes) from local DVC c
 
 ## Environment prerequisite
 
-Install `.[replay]` for the recorded numerical stack: `numpy==2.4.4`, `pandas==3.0.3`, `pyarrow==24.0.0`, `scipy==1.17.1`, and `scikit-learn==1.8.0`, exercised on Python 3.12.3. It also pins `dvc[gdrive]==3.67.1` and `pyOpenSSL==24.2.1`. An unconstrained Drive installation resolved pyOpenSSL 22.0.0 with cryptography 50.0.2 and failed at import (`GEN_EMAIL`); the replay extra resolves a compatible pair. The separate `.[demo]` extra does not include replay dependencies or research data.
+Install `.[replay]` for the recorded numerical stack: `numpy==2.4.4`, `pandas==3.0.3`, `pyarrow==24.0.0`, `scipy==1.17.1`, and `scikit-learn==1.8.0`, exercised on Python 3.12.3. It includes DVC 3.67.1 core, without the Google Drive plugin or its legacy OpenSSL constraints. The download commands additionally require a POSIX shell, `curl`, `unzip`, and `sha256sum`. The separate `.[demo]` extra does not include replay dependencies or research data.
 
 ## Required artifacts and evidence checking
 
-The 37 consumed `data/` files remain Git-ignored payloads with individual DVC pointers. The replay receipt records SHA-256 values for the 52 paths in `PATHS`. Use the named-stage pull above, not an unrestricted pull of historical datasets. A complete online reproduction requires a successful Drive pull into an empty cache followed by an independently executed replay matching the checked summary; failure or missing authorization must remain explicit.
+The 37 consumed `data/` files remain Git-ignored payloads with individual DVC pointers. The replay receipt records SHA-256 values for the 52 paths in `PATHS`. The named-stage checkout restores only this replay and its dependencies, not all historical datasets. A complete online reproduction requires downloading the public ZIP into an empty cache, checking out the inputs, and independently executing the replay to match the checked summary.
 
 | Domain | Key | Repository-relative required path |
 |---|---|---|

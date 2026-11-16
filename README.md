@@ -103,13 +103,17 @@ The numeric scorecards above come from `scripts/reproduce_project_results.py`. I
 
 ```bash
 python -m pip install -e '.[replay]'
-DVC_NO_ANALYTICS=1 DVC_CHECK_UPDATE=false .venv/bin/dvc pull --with-deps project_results_replay_v4
+bundle=$(mktemp -d)
+curl -fL https://github.com/melzak252/lol-breaker/releases/download/readme-replay-v4/dvc-cache-transfer.zip -o "$bundle/replay.zip"
+echo "eed54979bfde38920b53bf2fe7d2d393ab74111cac8720cee6003bdf896cde97  $bundle/replay.zip" | sha256sum -c -
+unzip -n "$bundle/replay.zip" -d "$(.venv/bin/dvc cache dir)"
+.venv/bin/dvc checkout --with-deps project_results_replay_v4
 .venv/bin/python scripts/reproduce_project_results.py \
   --output-dir /tmp/lol-breaker-readme-replay
 ```
 
 The README tables use `model_scores.regional_supported_3083`, `bookmaker_comparisons.{oddsportal,pinnacle}.endpoints`, `bookmaker_comparisons.polish.by_lead_bin`, and `production_opportunities.snapshot_weighted.recorded_close_clv` in the replay output. Reproduction requires bound local study artifacts under `data/`; they are not all in Git or downloaded by the script. `docs/results/project_summary.json` is the checked-in reference snapshot, not a fallback input. Reproduction checks saved-output consistency; it does not authenticate source clocks, forecast issuance, market closes, fills, or prospective performance.
 
-Drive access requires Google authentication and permission to the configured folder. The `replay` extra pins the numerical stack and a compatible OpenSSL dependency pair; installing bare `dvc[gdrive]` can resolve an incompatible legacy pyOpenSSL. A failed download is not a successful reproduction. Use the `dev` branch for this workflow; the default `main` branch retains the older project version.
+The replay bundle downloads anonymously from GitHub Releases; Google Drive and Google authentication are not required. The commands above use a POSIX shell with `curl`, `unzip`, and `sha256sum`. Use the `dev` branch for this workflow; the default `main` branch retains the older project version until the publication pull request is merged.
 
 MIT-licensed original source; third-party data and artifacts remain subject to their source terms and are not granted under this license. Research and education only; not financial advice. LoL-Breaker is not endorsed by Riot Games.
