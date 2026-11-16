@@ -49,6 +49,8 @@ This stage covers saved-ledger aggregate replay only; it does not version the co
 
 An isolated workspace restored all 37 inputs (56,803,982 bytes) from local DVC cache, then ran the stage and a forced DVC-owned rerun; both summaries matched `docs/results/project_summary.json` byte-for-byte (SHA-256 `cdd7d8f420d04f07445dcf5d11f31841628924271083a5bc47ae4fc9407090c3`). This proves only the local cache/replay path—not remote object coverage, GitHub-clone restoration, or model-weight/inference availability. The earlier 115-test suite was not rerun.
 
+**Published-clone verification:** GitHub `dev` revision `75f090c389340d37898dbb69563052ff84da0ff2` was cloned into a new temporary directory and installed into a fresh Python 3.12 environment. With no DVC cache and no Google Drive plugin, an anonymous `curl` download of the release ZIP passed its pinned SHA-256; named-stage checkout restored all 37 inputs. An independently executed CLI replay matched the checked summary byte-for-byte with the SHA-256 above, and the synthetic demo passed. No original checkout data/cache or Google login was used. This verifies saved-results reproduction, not full model training or the database-backed application. GitHub Actions jobs were not started because the account reports a billing lock.
+
 ## Aggregate contract & scope
 
 
