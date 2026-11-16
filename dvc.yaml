@@ -1,6 +1,6 @@
-# DVC Pipeline Specification for LoL-Breaker Kedro 8-Layer Simulation Pipeline
-# Run end-to-end via: dvc repro
-# View metrics via:   dvc metrics show
+# DVC pipeline: historical Kedro simulation stages plus the current saved-ledger replay.
+# Current entry point: .venv/bin/dvc repro project_results_replay_v4
+# All other stages below are historical; bare `dvc repro` also traverses them.
 
 stages:
   verify_inputs:
@@ -112,3 +112,144 @@ stages:
     metrics:
       - data/08_reporting/simulation_pipeline/summary_metrics.json:
           cache: false
+
+  project_results_replay_v4:
+    cmd: .venv/bin/python scripts/reproduce_project_results.py --output-dir data/08_reporting/project_results_replay_v4_dvc_20261116
+    deps:
+      - betting_app/core/config.py
+      - betting_app/core/db.py
+      - betting_app/core/ev.py
+      - betting_app/core/matching.py
+      - betting_app/core/models/__init__.py
+      - betting_app/core/models/contract.py
+      - betting_app/core/models/engine.py
+      - betting_app/core/models/native_c0.py
+      - betting_app/core/models/registry.py
+      - betting_app/core/staking.py
+      - betting_app/models/base.py
+      - betting_app/models/prediction.py
+      - betting_app/scrapers/lineup_scraper.py
+      - betting_app/services/__init__.py
+      - betting_app/services/bet_qualification_service.py
+      - betting_app/services/c0_inference.py
+      - betting_app/services/c0_shadow_readiness.py
+      - betting_app/services/canonical_match_service.py
+      - betting_app/services/current_roster_service.py
+      - betting_app/services/forecast_evidence.py
+      - betting_app/services/mapping_service.py
+      - betting_app/services/prematch_quote_service.py
+      - betting_app/services/team_alias_service.py
+      - betting_app/services/thesis_inference_service.py
+      - betting_app/services/upcoming_inference_service.py
+      - conf/base/c0_serving.json
+      - data/04_feature/long_term_market_edge/long_term_market_edge_20261022_01/oddsportal_identity_complete_v3/events.parquet
+      - data/05_model_input/c0_gate_optimizer/c0_gate_optimizer_20261023_01/binding.json
+      - data/05_model_input/c0_gate_optimizer/c0_gate_optimizer_20261023_01/configurations.json
+      - data/05_model_input/c0_gate_optimizer/c0_gate_optimizer_20261023_01/events.parquet
+      - data/05_model_input/c0_gate_optimizer/c0_gate_optimizer_20261023_01/fixtures.parquet
+      - data/05_model_input/c0_gate_optimizer/c0_gate_optimizer_20261023_01/protocol.json
+      - data/05_model_input/c0_model_improvement/c0_model_improvement_20261026_01/execution_binding.json
+      - data/05_model_input/c0_model_improvement/c0_model_improvement_20261026_01/protocol.json
+      - data/05_model_input/fresh20_oddsportal/fresh20_oddsportal_20261111_02/protocol.json
+      - data/07_model_output/c0_model_improvement/c0_model_improvement_20261026_01/predictions.parquet
+      - data/07_model_output/pinnacle_model_comparison/pinnacle_model_comparison_20261112_043418/comparison_ledger.parquet
+      - data/08_reporting/audit/model_betting_reconciliation_20261113_01/checked_suggestions.parquet
+      - data/08_reporting/audit/model_betting_reconciliation_20261113_01/results.json
+      - data/08_reporting/audit/model_betting_reconciliation_20261113_01/sampled_checks.parquet
+      - data/08_reporting/c0_gate_optimizer/c0_gate_optimizer_20261023_01/final_verification.json
+      - data/08_reporting/c0_gate_optimizer/c0_gate_optimizer_20261023_01/sweep/funded_ledger.parquet
+      - data/08_reporting/c0_gate_optimizer/c0_gate_optimizer_20261023_01/sweep/selected.parquet
+      - data/08_reporting/c0_gate_optimizer/c0_gate_optimizer_20261023_01/sweep/summary.parquet
+      - data/08_reporting/c0_model_improvement/c0_model_improvement_20261026_01/sealed_verification.json
+      - data/08_reporting/fresh20_oddsportal/fresh20_oddsportal_20261111_02/evaluation/evaluation_receipt.json
+      - data/08_reporting/fresh20_oddsportal/fresh20_oddsportal_20261111_02/evaluation/execution_binding.json
+      - data/08_reporting/fresh20_oddsportal/fresh20_oddsportal_20261111_02/evaluation/oddsportal_annual_endpoint_ledger.parquet
+      - data/08_reporting/fresh20_oddsportal/fresh20_oddsportal_20261111_02/evaluation/probability_quality.parquet
+      - data/08_reporting/pinnacle_model_comparison/pinnacle_model_comparison_20261112_043418/scores.csv
+      - data/08_reporting/pinnacle_model_comparison/pinnacle_model_comparison_20261112_043418/summary.json
+      - data/08_reporting/pinnacle_model_comparison/pinnacle_model_comparison_20261112_043418/verification.json
+      - data/08_reporting/production_probability/production_probability_20261023_02/shrinkage/loo_case_accounting.parquet
+      - data/08_reporting/production_probability/production_probability_20261023_02/shrinkage/loo_consensus_paired_contrasts.csv
+      - data/08_reporting/production_probability/production_probability_20261023_02/shrinkage/loo_consensus_scores.csv
+      - data/08_reporting/production_probability/production_probability_20261023_02/shrinkage/loo_matched_panel.parquet
+      - data/08_reporting/production_probability/production_probability_20261023_02/verification/sealed_verification.json
+      - data/08_reporting/production_zero_tax_clv/production_zero_tax_clv_20261023_01/clv/closing_states.parquet
+      - data/08_reporting/production_zero_tax_clv/production_zero_tax_clv_20261023_01/clv/entry_clv_panel.parquet
+      - data/08_reporting/production_zero_tax_clv/production_zero_tax_clv_20261023_01/verification/sealed_verification.json
+      - data/artifacts/corrected-ratings-logloss-20260908-full/holdout_predictions.csv
+      - data/artifacts/corrected-ratings-logloss-20260908-full/summary.json
+      - data/artifacts/corrected-ratings-logloss-20260908-full/verification.json
+      - pyproject.toml
+      - scripts/reproduce_project_results.py
+      - scripts/train_c0_multiscale_20token.py
+      - scripts/train_c0_year_anchor_distilled.py
+      - src/analysis/__init__.py
+      - src/analysis/a0_capacity_experiment.py
+      - src/analysis/betting_guards_a_to_d.py
+      - src/analysis/bootstrap.py
+      - src/analysis/c0_betting_development.py
+      - src/analysis/c0_betting_development_evaluation.py
+      - src/analysis/c0_distilled_reproduction_evaluation.py
+      - src/analysis/c0_edge_alpha_audit.py
+      - src/analysis/c0_edge_policy_audit.py
+      - src/analysis/c0_ev_loss_evaluation.py
+      - src/analysis/c0_ev_loss_study.py
+      - src/analysis/c0_input_aligned_data.py
+      - src/analysis/c0_input_aligned_forward.py
+      - src/analysis/c0_input_aligned_study.py
+      - src/analysis/c0_policy_data.py
+      - src/analysis/c0_region_factorial.py
+      - src/analysis/c0_region_finance.py
+      - src/analysis/devig_comparison.py
+      - src/analysis/ev_approach_data.py
+      - src/analysis/ev_approach_evaluation.py
+      - src/analysis/ev_approach_policies.py
+      - src/analysis/ev_approach_risk.py
+      - src/analysis/ev_approach_runner.py
+      - src/analysis/ev_asof_replay.py
+      - src/analysis/financial_benchmark.py
+      - src/analysis/historical_production_simulator.py
+      - src/analysis/long_term_market_evaluation.py
+      - src/analysis/metrics.py
+      - src/analysis/model_benchmark.py
+      - src/analysis/odds_bracket_benchmark.py
+      - src/analysis/probability_metrics.py
+      - src/analysis/production_market_benchmark.py
+      - src/analysis/production_saved_evidence.py
+      - src/analysis/quote_provenance.py
+      - src/analysis/replacement_guards.py
+      - src/analysis/research_benchmark.py
+      - src/analysis/roster_provenance.py
+      - src/analysis/saved_market_comparisons.py
+      - src/analysis/shin_devig.py
+      - src/analysis/thesis_metrics.py
+      - src/analysis/unified_evaluation_engine.py
+      - src/models/__init__.py
+      - src/models/a0_accelerator.py
+      - src/models/a0_capacity_experiment.py
+      - src/models/a0_capacity_runner.py
+      - src/models/a0_data_focus.py
+      - src/models/a0_history_reconstruction.py
+      - src/models/a0_native_refit.py
+      - src/models/a0_target_experiment.py
+      - src/models/a0_target_objectives.py
+      - src/models/a0_uncertainty.py
+      - src/models/c0_betting_price_head.py
+      - src/models/c0_causal_anchor_bank.py
+      - src/models/c0_distilled_proof.py
+      - src/models/c0_distilled_replay.py
+      - src/models/c0_distilled_reproduction.py
+      - src/models/c0_edge_model_audit.py
+      - src/models/c0_ev_loss_head.py
+      - src/models/c0_live_query.py
+      - src/models/c0_regional_replay.py
+      - src/models/competition_tiers.py
+      - src/models/cross_region_input_normalizer.py
+      - src/models/ev_approach_models.py
+      - src/models/symmetric_series.py
+      - src/ratings/competition_adjustment.py
+      - src/ratings/family_calibrated_glicko2.py
+      - src/ratings/glicko2_core.py
+      - uv.lock
+    outs:
+      - data/08_reporting/project_results_replay_v4_dvc_20261116

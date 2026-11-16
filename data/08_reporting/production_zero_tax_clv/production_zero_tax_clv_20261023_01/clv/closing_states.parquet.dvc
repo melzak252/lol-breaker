@@ -1,0 +1,5 @@
+outs:
+- md5: 8d2e323f6d120fd84f78944c7c8494fd
+  size: 161593
+  hash: md5
+  path: closing_states.parquet

@@ -1,0 +1,5 @@
+outs:
+- md5: 5ddf547d0e67a123d361fa3099e16ca9
+  size: 5289576
+  hash: md5
+  path: entry_clv_panel.parquet

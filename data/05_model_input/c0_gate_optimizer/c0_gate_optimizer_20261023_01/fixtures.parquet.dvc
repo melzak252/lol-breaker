@@ -1,0 +1,5 @@
+outs:
+- md5: 480184b5e169249360de35dacc0c6b32
+  size: 14677
+  hash: md5
+  path: fixtures.parquet

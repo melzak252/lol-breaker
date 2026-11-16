@@ -1,0 +1,5 @@
+outs:
+- md5: 9db9765ec9fb75cf35f96814a247b6d0
+  size: 4631
+  hash: md5
+  path: evaluation_receipt.json

@@ -159,8 +159,6 @@ export async function fetchFinancialAnalysis(options: {
   minEv: number;
   initialBankroll: number;
   fixedStake: number;
-  modelName: string;
-  modelVersion: string;
   dataScope: string;
 }, signal?: AbortSignal): Promise<FinancialAnalysisResponse> {
   const params = new URLSearchParams({
@@ -170,8 +168,6 @@ export async function fetchFinancialAnalysis(options: {
     min_ev: options.minEv.toString(),
     initial_bankroll: options.initialBankroll.toString(),
     fixed_stake: options.fixedStake.toString(),
-    model_name: options.modelName,
-    model_version: options.modelVersion,
     data_scope: options.dataScope,
   });
   const response = await fetch(`${API_BASE}/financial/analysis?${params}`, { signal });

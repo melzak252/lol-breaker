@@ -1,0 +1,5 @@
+outs:
+- md5: 123c61f3a8b153ba6285776e40186c7c
+  size: 27851
+  hash: md5
+  path: summary.json

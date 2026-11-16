@@ -1,0 +1,5 @@
+outs:
+- md5: 3e9937c0b6028519aafbef2a4e039ea5
+  size: 11844921
+  hash: md5
+  path: oddsportal_annual_endpoint_ledger.parquet

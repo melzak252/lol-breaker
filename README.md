@@ -4,6 +4,21 @@ LoL-Breaker is a League of Legends forecasting and research project: causal pre-
 
 > **Evidence status:** the locally configured C20R sports model is a historical-development candidate, not an adopted or prospectively certified model. The project has not established general bookmaker superiority, a live betting edge, or reliable ±2 percentage-point EV calibration. Local configuration is not deployment.
 
+## Quick start: synthetic portfolio scenario
+
+From a fresh clone, with Python 3.11+:
+
+```bash
+git clone --branch dev https://github.com/melzak252/Lol-breaker.git
+cd Lol-breaker
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install -e '.[demo]'
+python scripts/run_unified_betting_evaluation.py --demo
+```
+
+This deterministic in-memory example needs no research artifacts, database, network, or model fitting. Its output is marked `SYNTHETIC_SCENARIO_NOT_MODEL_EVIDENCE`; it demonstrates abstentions, tax, overlapping reservations, and a portfolio trace—not sports performance or a trading edge. Study replays below require separate local research data.
+
 ## What the project contains
 
 - **Pre-match forecasting:** sports-only BO1/BO3/BO5 series probabilities from player history and regional context.
@@ -43,7 +58,7 @@ OddsPortal intervals are nominal 95%; Pinnacle intervals are 98.75% family-adjus
 
 ### Bookmaker scores by lead time
 
-Polish leave-one-out (LOO) consensus uses at least two distinct other books. Each row is a separate historical lead-time cohort; differences across rows are descriptive, not a causal timing effect.
+For the lead-time scorecard, we use the Polish leave-one-out (LOO) consensus: it excludes the focal book and requires at least two distinct other books within 300 seconds. The broader individual-book comparison answers a different question; LOO eligibility depends on quote availability. Each row is a separate historical cohort, so differences are descriptive, not causal timing effects or evidence of a reliable long-lead advantage.
 
 | Time before start | Fixtures | LOO consensus LL | C20R LL | Hybrid-50 LL |
 |---|---:|---:|---:|---:|
@@ -87,10 +102,14 @@ The DVC pipeline is a retained historical workflow; it is not the entry point fo
 The numeric scorecards above come from `scripts/reproduce_project_results.py`. It reads bound local artifacts, checks their hashes and saved reference results, and writes a new `project_summary.json` plus a replay receipt. It does **not** fit models, run neural inference, scrape, access a database, or use the network.
 
 ```bash
+python -m pip install -e '.[replay]'
+DVC_NO_ANALYTICS=1 DVC_CHECK_UPDATE=false .venv/bin/dvc pull --with-deps project_results_replay_v4
 .venv/bin/python scripts/reproduce_project_results.py \
   --output-dir /tmp/lol-breaker-readme-replay
 ```
 
 The README tables use `model_scores.regional_supported_3083`, `bookmaker_comparisons.{oddsportal,pinnacle}.endpoints`, `bookmaker_comparisons.polish.by_lead_bin`, and `production_opportunities.snapshot_weighted.recorded_close_clv` in the replay output. Reproduction requires bound local study artifacts under `data/`; they are not all in Git or downloaded by the script. `docs/results/project_summary.json` is the checked-in reference snapshot, not a fallback input. Reproduction checks saved-output consistency; it does not authenticate source clocks, forecast issuance, market closes, fills, or prospective performance.
 
-MIT licensed. Research and education only; not financial advice. LoL-Breaker is not endorsed by Riot Games.
+Drive access requires Google authentication and permission to the configured folder. The `replay` extra pins the numerical stack and a compatible OpenSSL dependency pair; installing bare `dvc[gdrive]` can resolve an incompatible legacy pyOpenSSL. A failed download is not a successful reproduction. Use the `dev` branch for this workflow; the default `main` branch retains the older project version.
+
+MIT-licensed original source; third-party data and artifacts remain subject to their source terms and are not granted under this license. Research and education only; not financial advice. LoL-Breaker is not endorsed by Riot Games.

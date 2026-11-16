@@ -1,0 +1,5 @@
+outs:
+- md5: 932706a08cf51832fc11148104a30cd6
+  size: 3970
+  hash: md5
+  path: binding.json

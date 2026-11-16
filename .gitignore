@@ -6,6 +6,7 @@
 # Python runtime/cache
 __pycache__/
 *.py[cod]
+*.egg-info/
 *.pyo
 .pytest_cache/
 .ruff_cache/
@@ -21,8 +22,9 @@ env/
 .ipynb_checkpoints/
 
 # Local experiment/training outputs
-data
-data/
+/data/**
+!/data/**/
+!/data/**/*.dvc
 models/*.pt
 client/node_modules/
 client/dist/

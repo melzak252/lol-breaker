@@ -1,0 +1,5 @@
+outs:
+- md5: d7180ba1a6c5e098b968836c676bfe21
+  size: 84851
+  hash: md5
+  path: configurations.json

@@ -1,0 +1,5 @@
+outs:
+- md5: e86ea53f791faf44dea82bb0efe16d31
+  size: 52824
+  hash: md5
+  path: verification.json
