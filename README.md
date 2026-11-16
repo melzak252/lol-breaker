@@ -102,6 +102,7 @@ The DVC pipeline is a retained historical workflow; it is not the entry point fo
 The numeric scorecards above come from `scripts/reproduce_project_results.py`. It reads bound local artifacts, checks their hashes and saved reference results, and writes a new `project_summary.json` plus a replay receipt. It does **not** fit models, run neural inference, scrape, access a database, or use the network.
 
 ```bash
+set -e
 python -m pip install -e '.[replay]'
 bundle=$(mktemp -d)
 curl -fL https://github.com/melzak252/lol-breaker/releases/download/readme-replay-v4/dvc-cache-transfer.zip -o "$bundle/replay.zip"

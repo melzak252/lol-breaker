@@ -29,6 +29,7 @@ The `demo` extra installs CPU-only NumPy, pandas, and scikit-learn constraints; 
 The current saved-ledger replay has a dedicated DVC target. Run only this stage; plain `dvc repro` also traverses the historical simulation pipeline:
 
 ```bash
+set -e
 python -m pip install -e '.[replay]'
 bundle=$(mktemp -d)
 curl -fL https://github.com/melzak252/lol-breaker/releases/download/readme-replay-v4/dvc-cache-transfer.zip -o "$bundle/replay.zip"
@@ -40,7 +41,7 @@ DVC_NO_ANALYTICS=1 DVC_CHECK_UPDATE=false .venv/bin/dvc repro --force project_re
 
 It writes to `data/08_reporting/project_results_replay_v4_dvc_20261116`, an exclusive DVC-owned output directory. Standard DVC stage reruns remove only that declared output before invoking the existing runner, which still refuses any occupied `--output-dir`.
 
-The 37 input `.dvc` pointers, stage, lock, and code are versioned together. The release ZIP supplies only the corresponding content-addressed cache objects. Its SHA-256 is pinned above; verify it before extraction. No Google authentication, Drive plugin, original worktree cache, or GitHub login is needed to download the public asset. The legacy Drive remote is retained for older studies, not used by this workflow.
+The 37 input `.dvc` pointers, stage, lock, and code are versioned together. The release ZIP supplies only the corresponding content-addressed cache objects. Its SHA-256 is pinned above; verify it before extraction. No Google authentication, Drive plugin, original worktree cache, or GitHub login is needed to download the public asset. The legacy Drive remote remains named for older studies but is no longer the default, so local checkout does not load its blocked Google integration.
 
 This stage covers saved-ledger aggregate replay only; it does not version the complete C20R inference/training closure or the prop-v2/draft model artifacts.
 
