@@ -197,7 +197,7 @@ export interface BettingRecommendation {
   thesis_disagreement?: number | null;
   thesis_guard_passed?: boolean | null;
   guard_b_passed?: boolean | null;
-  raw_clv?: number | null;
+  current_market_edge?: number | null;
 }
 
 export interface ParlayLeg {
@@ -1126,6 +1126,13 @@ export interface FinancialBucket {
 
 export interface FinancialLedgerEntry {
   canonical_match_id: number;
+  prediction_id: number | null;
+  predicted_at: string | null;
+  data_cutoff_at: string | null;
+  result_available_at: string | null;
+  entry_quote_snapshot_id: number | null;
+  reference_quote_snapshot_id: number | null;
+  bookmaker_id: number | null;
   start_time: string | null;
   league: string | null;
   team_a_name: string | null;

@@ -20,7 +20,9 @@ def test_newest_invalid_state_does_not_revive_old(monkeypatch):
     assert ctx.rejections[0].reason=='quote_price_invalid'
 
 def test_exact_freshness_boundary_and_mutated_same_id(monkeypatch):
-    state=quote(); install(monkeypatch,[state])
+    state=quote()
+    peer=quote(2); peer.update(bookmaker_id=2,bookmaker='Peer')
+    install(monkeypatch,[state,peer])
     ctx=service.load_prematch_quotes([1],decision_at=NOW)[1]
     assert ctx.prob_a==pytest.approx(.4)
     saved=service.serialize_market_context(ctx)
@@ -30,6 +32,45 @@ def test_exact_freshness_boundary_and_mutated_same_id(monkeypatch):
     assert not service.stored_market_context_is_current(saved,evaluation_context=changed,current_context=changed)[0]
     state['odds_a']=3.
     assert not service.load_prematch_quotes([1],decision_at=NOW+timedelta(microseconds=1))[1].quotes
+
+def test_focal_consensus_excludes_its_book_and_requires_two_other_books():
+    focal=service.PrematchQuote(1,1,1,'Focal',NOW,'Alpha','Beta',1.1,10.,None,None)
+    peer_a=service.PrematchQuote(2,1,2,'Peer A',NOW,'Alpha','Beta',3.,2.,None,None)
+    peer_b=service.PrematchQuote(3,1,3,'Peer B',NOW,'Alpha','Beta',2.,4.,None,None)
+    consensus=service.quotes_consensus([focal,peer_a,peer_b],exclude_bookmaker_id=1)
+    assert consensus.prob_a==pytest.approx((.4+2/3)/2)
+    assert consensus.bookmaker_ids==(2,3)
+    assert consensus.excluded_bookmaker_id==1
+
+    insufficient=service.quotes_consensus([focal,peer_a],exclude_bookmaker_id=1)
+    assert insufficient.prob_a is None
+    assert insufficient.reason==service.CONSENSUS_INSUFFICIENT_REASON
+    assert insufficient.book_count==1
+
+def test_single_fresh_book_withholds_nonfocal_consensus(monkeypatch):
+    install(monkeypatch,[quote()])
+    context=service.load_prematch_quotes([1],decision_at=NOW)[1]
+    assert context.prob_a is None
+    assert context.rejections[-1].reason==service.CONSENSUS_INSUFFICIENT_REASON
+
+@pytest.mark.parametrize('prediction_delay',[-120,-10])
+def test_signal_allows_either_quote_or_forecast_first(monkeypatch,prediction_delay):
+    state=quote(); state['scraped_at']=NOW-timedelta(seconds=60)
+    peer_a=quote(2); peer_a.update(bookmaker_id=2,bookmaker='Peer A',scraped_at=NOW-timedelta(seconds=30))
+    peer_b=quote(3); peer_b.update(bookmaker_id=3,bookmaker='Peer B',scraped_at=NOW-timedelta(seconds=30))
+    install(monkeypatch,[state,peer_a,peer_b])
+    context=service.load_prematch_quotes([1],decision_at=NOW)[1]
+    focal=service.quotes_consensus(context.quotes,exclude_bookmaker_id=1)
+    prediction=dict(id=7,canonical_match_id=1,model_name='S',model_version='v',prediction_status='active',
+        predicted_at=(NOW+timedelta(seconds=prediction_delay)).isoformat(),
+        data_cutoff_at=(NOW-timedelta(seconds=150)).isoformat(),prob_a=.4,prob_b=.6,diagnostics_json='{}')
+    signal=dict(canonical_prediction_id=7,canonical_match_id=1,odds_snapshot_id=1,bookmaker_id=1,
+        side='a',odds=3.,model_prob=.4,market_prob=focal.prob_a,status='new',evaluated_at=NOW,
+        market_context_json=service.serialize_market_context(context,model_name='S',model_version='v'))
+    signal['market_context_json']['focal_consensus']=service.serialize_focal_consensus(focal)
+    assert service.signal_is_actionable(signal,prediction,evaluation_context=context,current_context=context)==(True,None)
+    signal['evaluated_at']=None
+    assert not service.signal_is_actionable(signal,prediction,evaluation_context=context,current_context=context)[0]
 
 def test_prediction_arrival_orders_and_offset_ranking():
     row=dict(id=1,model_name='S',model_version='v',prediction_status='active',data_cutoff_at=(NOW-timedelta(minutes=2)).isoformat(),predicted_at=(NOW-timedelta(minutes=1)).isoformat())
@@ -69,14 +110,18 @@ def test_book_mean_and_peer_mutation(monkeypatch):
 @pytest.mark.parametrize('prediction_delay',[-120,-10])
 def test_signal_allows_either_quote_or_forecast_first(monkeypatch,prediction_delay):
     state=quote(); state['scraped_at']=NOW-timedelta(seconds=60)
-    install(monkeypatch,[state])
+    peer_a=quote(2); peer_a.update(bookmaker_id=2,bookmaker='Peer A',scraped_at=NOW-timedelta(seconds=30))
+    peer_b=quote(3); peer_b.update(bookmaker_id=3,bookmaker='Peer B',scraped_at=NOW-timedelta(seconds=30))
+    install(monkeypatch,[state,peer_a,peer_b])
     context=service.load_prematch_quotes([1],decision_at=NOW)[1]
+    focal=service.quotes_consensus(context.quotes,exclude_bookmaker_id=1)
     prediction=dict(id=7,canonical_match_id=1,model_name='S',model_version='v',prediction_status='active',
         predicted_at=(NOW+timedelta(seconds=prediction_delay)).isoformat(),
         data_cutoff_at=(NOW-timedelta(seconds=150)).isoformat(),prob_a=.4,prob_b=.6,diagnostics_json='{}')
     signal=dict(canonical_prediction_id=7,canonical_match_id=1,odds_snapshot_id=1,bookmaker_id=1,
-        side='a',odds=3.,model_prob=.4,market_prob=.4,status='new',evaluated_at=NOW,
+        side='a',odds=3.,model_prob=.4,market_prob=focal.prob_a,status='new',evaluated_at=NOW,
         market_context_json=service.serialize_market_context(context,model_name='S',model_version='v'))
+    signal['market_context_json']['focal_consensus']=service.serialize_focal_consensus(focal)
     assert service.signal_is_actionable(signal,prediction,evaluation_context=context,current_context=context)==(True,None)
     signal['evaluated_at']=None
     assert not service.signal_is_actionable(signal,prediction,evaluation_context=context,current_context=context)[0]

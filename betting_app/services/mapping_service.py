@@ -63,7 +63,6 @@ BOOKMAKER_TO_GOLGG_ALIASES = {
     "esuba": "Esuba",
     "fc barcelona": "Barca eSports",
     "fearx": "FearX",
-    "bnk fearx": "FearX",
     # FearX Youth / Challengers in GOL.GG (2026)
     "fearx challengers": "BNK FEARX Youth",
     "bnk fearx challengers": "BNK FEARX Youth",
@@ -98,11 +97,6 @@ BOOKMAKER_TO_GOLGG_ALIASES = {
     "karmine corp": "Karmine Corp",
     "karmine corp blue": "Karmine Corp Blue",
     "kt rolster": "KT Rolster",
-    # KT Rolster Challengers (active 2026) vs legacy KT Challengers
-    "kt challengers": "KT Rolster Challengers",
-    "kt rolster challengers": "KT Rolster Challengers",
-    "kt academy": "KT Rolster Challengers",
-    "kt rolster academy": "KT Rolster Challengers",
     "lgd": "LGD Gaming",
     "liquid": "Team Liquid",
     "los": "Los Grandes",
@@ -119,8 +113,6 @@ BOOKMAKER_TO_GOLGG_ALIASES = {
     "ns academy": "Nongshim Esports Academy",
     "nongshim esports academy": "Nongshim Esports Academy",
     "ns red force": "Nongshim RedForce",
-    "ok savingsbank brion": "BRION",
-    "oksavingsbank brion": "BRION",
     # HANJIN BRION Challengers in GOL.GG (2026)
     "brion challengers": "HANJIN BRION Challengers",
     "hanjin brion challengers": "HANJIN BRION Challengers",
@@ -203,6 +195,7 @@ def load_golgg_team_candidates() -> list[str]:
             "red_team",
         )
         game_level_keys = ("t1_name", "t2_name", "team1_name", "team2_name")
+        rows = payload if isinstance(payload, list) else []
         for row in rows:
             if not isinstance(row, dict):
                 continue

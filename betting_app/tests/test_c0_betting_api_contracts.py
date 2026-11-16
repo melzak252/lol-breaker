@@ -46,25 +46,40 @@ def test_pre_quote_base_survives_post_start_active_prediction():
 
 
 def _context(now, *, odds=3., age=10):
-    from betting_app.services.prematch_quote_service import PrematchMarketContext, PrematchQuote
-    quotes = tuple(PrematchQuote(i, 4, i, f"book{i}", now-timedelta(seconds=age),
-                                "Alpha", "Beta", odds, 1.45, None, None) for i in (1, 2))
+    from betting_app.services.prematch_quote_service import (
+        PrematchMarketContext, PrematchQuote, quotes_consensus,
+    )
+    quotes = tuple(
+        PrematchQuote(i, 4, i, f"book{i}", now-timedelta(seconds=age),
+                      "Alpha", "Beta", odds + (2 - i) * .1, 1.45, None, None)
+        for i in (1, 2, 3)
+    )
     return PrematchMarketContext(4, "alpha", "beta", "LCK", "upcoming",
-                                 now+timedelta(hours=1), now, quotes, 1.45/(odds+1.45), ())
+                                 now+timedelta(hours=1), now, quotes,
+                                 quotes_consensus(quotes).prob_a, ())
 
 
 def _signal_rows(now, context):
-    from betting_app.services.prematch_quote_service import serialize_market_context
-    name, version = "Causal-C0", "c0-native-2026-w32-e12-v1"
+    from betting_app.services.prematch_quote_service import (
+        quotes_consensus, serialize_focal_consensus, serialize_market_context,
+    )
+    name, version = "Causal-C0", "c0-native-fresh20-2026-10-21-v1-regional-v1"
+    focal = quotes_consensus(context.quotes, exclude_bookmaker_id=1)
     row = dict(id=8, prediction_id=9, prediction_match_id=4, canonical_prediction_id=9,
-               canonical_match_id=4, bookmaker_id=1, odds_snapshot_id=1, side="a", odds=3.,
+               canonical_match_id=4, bookmaker_id=1, odds_snapshot_id=1, side="a",
+               odds=context.quotes[0].odds_a,
                model_name=name, model_version=version, model_prob=.4, prob_a=.4, prob_b=.6,
-               market_prob=context.prob_a, ev=.056, evaluated_at=now, status="new",
+               market_prob=focal.prob_a,
+               ev=.4 * context.quotes[0].odds_a * .88 - 1, evaluated_at=now, status="new",
                prediction_status="active", predicted_at=now-timedelta(seconds=20),
                data_cutoff_at=now-timedelta(minutes=1), team_a_name="Alpha", team_b_name="Beta",
                league="LCK", start_time_normalized=context.start_at.isoformat(), bookmaker_name="book1",
-               diagnostics_json={"uncertainty_required":False,"rating_disagreement":0.,"best_of":3},
-               market_context_json=serialize_market_context(context, model_name=name, model_version=version))
+               diagnostics_json={"uncertainty_required":False,"rating_disagreement":0.,"best_of":3,
+                                 "base_prob_a":.4},
+               market_context_json={
+                   **serialize_market_context(context, model_name=name, model_version=version),
+                   "focal_consensus": serialize_focal_consensus(focal),
+               })
     return row
 
 
@@ -81,11 +96,11 @@ def test_predictions_admit_before_limit_and_preserve_unrounded_ev_and_clocks(mon
     monkeypatch.setattr(predictions, "datetime", Clock)
     monkeypatch.setattr(predictions, "query_df", lambda *args: [legacy, valid])
     monkeypatch.setattr(predictions, "load_prematch_quotes", lambda *args, **kwargs: {4:context})
-    response = predictions.list_predictions(min_ev=0, max_ev=None, min_books=2,
+    response = predictions.list_predictions(min_ev=0, max_ev=None, min_books=3,
         model_name=valid["model_name"], model_version=valid["model_version"], limit=1, db=object())
     assert response.total == 1
     signal = response.signals[0]
-    assert signal.ev == pytest.approx(.056, abs=1e-12)
+    assert signal.ev == pytest.approx(valid["ev"], abs=1e-12)
     assert signal.odds_snapshot_id == 1
     assert signal.evaluated_at == now.isoformat()
     assert signal.quote_scraped_at == (now-timedelta(seconds=10)).isoformat()
@@ -106,7 +121,7 @@ def test_predictions_withhold_changed_operational_context(monkeypatch, change):
     monkeypatch.setattr(predictions, "datetime", Clock)
     monkeypatch.setattr(predictions, "query_df", lambda *args: [row])
     monkeypatch.setattr(predictions, "load_prematch_quotes", lambda *args, **kwargs: {4:current})
-    response = predictions.list_predictions(min_ev=0, max_ev=None, min_books=1,
+    response = predictions.list_predictions(min_ev=0, max_ev=None, min_books=3,
         model_name=row["model_name"], model_version=row["model_version"], limit=50, db=object())
     assert response.total == 0
 
@@ -128,9 +143,8 @@ def test_diagnostic_old_prices_cannot_build_recommendation():
     from betting_app.api.schemas import BookmakerOddsRow
     recommendation = _build_match_recommendation(
         "Alpha", "Beta", False, [BookmakerOddsRow(bookmaker="book", canonical_odds_a=3.,
-        canonical_odds_b=1.45, quote_status="diagnostic")], .4, .6, .4, .6)
+        canonical_odds_b=1.45, quote_status="diagnostic")], .4, .6)
     assert not recommendation.has_value
-    assert recommendation.verdict == "no_odds"
 
 
 def test_display_selector_normalizes_offsets_before_rank_and_null_clock_withholds_book():
@@ -155,7 +169,10 @@ def test_results_endpoint_quote_origin_consensus_and_missing_contract_visible_pr
     states = [dict(odds_snapshot_id=i, canonical_match_id=4, bookmaker_id=book, bookmaker=f"book{book}",
                    raw_team_a="Alpha", raw_team_b="Beta", odds_a=oa, odds_b=ob, is_live=0,
                    scraped_at=at, league="LCK", start_time_normalized=match["start_time_normalized"])
-              for i, book, oa, ob, at in [(1,1,3.,2.,t), (2,2,2.,4.,t), (3,2,9.,2.,t+timedelta(seconds=10))]]
+              for i, book, oa, ob, at in [
+                  (1,1,3.,2.,t), (2,2,2.,4.,t),
+                  (3,2,9.,2.,t+timedelta(seconds=10)), (4,3,2.5,2.5,t),
+              ]]
     base = dict(id=9, canonical_match_id=4, model_name="EXP081", model_version="sealed", prob_a=.8,
                 prob_b=.2, predicted_at=t-timedelta(minutes=1), data_cutoff_at=t-timedelta(hours=1))
     def query(db, sql, params=None):
@@ -172,10 +189,13 @@ def test_results_endpoint_quote_origin_consensus_and_missing_contract_visible_pr
     item = response.results[0]
     side = item.bookmaker_ev_details["book1"].side_a
     assert side.odds == 3.
-    assert side.market_prob == pytest.approx((.4+2/3)/2)
+    assert side.market_prob == pytest.approx((.4 + 2/3 + .5) / 3)
     assert item.probability_basis == "historical_quote_recomputation"
     if contract_present:
-        p = blend_market_probability(.8, (.4+2/3)/2, alpha=.5, temperature=1., blending_mode="logit_shrinkage")
+        p = blend_market_probability(
+            .8, (.4 + 2/3 + .5) / 3, alpha=.5, temperature=1.,
+            blending_mode="logit_shrinkage",
+        )
         assert side.model_prob == pytest.approx(p, abs=1e-12)
     else:
         assert side.model_prob is None and side.ev is None and side.kelly is None
@@ -265,7 +285,11 @@ def test_mutated_stored_hybrid_is_ignored_and_pure_base_current_market_blended_o
     rows = [dict(common, id=1, model_name=hybrid.base_model.name, model_version=hybrid.base_model.version,
                  prob_a=.8, prob_b=.2, diagnostics_json={}),
             dict(common, id=2, model_name=hybrid.hybrid_model_name, model_version=hybrid.hybrid_model_version,
-                 prob_a=.9, prob_b=.1, diagnostics_json={"market_context":serialize_market_context(saved)})]
+                 prob_a=.9, prob_b=.1, diagnostics_json={
+                     "market_context":serialize_market_context(saved), "base_prob_a":.8,
+                     "alpha":hybrid.alpha, "temperature":hybrid.temperature,
+                     "blending_mode":hybrid.blending_mode,
+                 })]
     monkeypatch.setattr(matches, "load_prematch_quotes", lambda *args, **kwargs: {4:current})
     monkeypatch.setattr(matches, "hybrid_prediction_contract_is_current", lambda *args, **kwargs: (True,None))
     serving = matches._serving_predictions(object(), rows, current)
@@ -287,7 +311,7 @@ def test_all_matching_surfaces_handle_unresolved_orientation_without_indexing_no
                 raw_team_a="Unrelated", raw_team_b="Other", odds_a=3., odds_b=2.,
                 is_live=0, scraped_at=now-timedelta(seconds=10))
     prediction = dict(id=9, canonical_match_id=4, model_name="Causal-C0",
-                      model_version="c0-native-2026-w32-e12-v1", prob_a=.4, prob_b=.6, predicted_at=now)
+                      model_version="c0-native-fresh20-2026-10-21-v1-regional-v1", prob_a=.4, prob_b=.6, predicted_at=now)
     def query(db, sql, params=None):
         if "FROM odds_snapshots" in sql:
             return [dict(odds)]

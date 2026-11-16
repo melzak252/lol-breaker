@@ -12,7 +12,9 @@ import argparse
 import json
 import os
 import sys
+from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -23,6 +25,7 @@ import pandas as pd
 from src.analysis.unified_evaluation_engine import (
     EvaluatedBet,
     UnifiedBettingEngine,
+    simulate_operational_portfolio,
 )
 
 def format_conditional_metric(value: float | None, spec: str, suffix: str = "") -> str:
@@ -101,7 +104,135 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable low-odds dynamic hurdle penalty.",
     )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Run the inline synthetic scenario; it is not model or trading evidence.",
+    )
     return parser.parse_args()
+
+
+def run_synthetic_portfolio_demo() -> dict[str, Any]:
+    """Exercise canonical qualification and portfolio mechanics on inline inputs."""
+    engine = UnifiedBettingEngine(tax_rate=0.12)
+    decision_at = pd.Timestamp("2026-01-01T12:00:00Z")
+    settle_at = decision_at + pd.Timedelta(hours=3)
+    prob_model = 0.565
+    prob_market = 0.381
+    quotes = [
+        {
+            "opportunity_id": "demo-01-best",
+            "canonical_match_id": "synthetic-match-01",
+            "odds": 2.60,
+            "outcome": True,
+        },
+        {
+            "opportunity_id": "demo-01-lower",
+            "canonical_match_id": "synthetic-match-01",
+            "odds": 2.55,
+            "outcome": True,
+        },
+        *[
+            {
+                "opportunity_id": "demo-00-pending" if index == 5 else f"demo-{index:02d}",
+                "canonical_match_id": f"synthetic-match-{index:02d}",
+                "odds": 2.60,
+                "outcome": None if index == 5 else False,
+            }
+            for index in range(2, 6)
+        ],
+        {
+            "opportunity_id": "demo-missing-uncertainty",
+            "canonical_match_id": "synthetic-match-abstain",
+            "odds": 2.60,
+            "outcome": False,
+            "uncertainty_basis": None,
+        },
+    ]
+    qualified: list[dict[str, Any]] = []
+    abstentions: list[dict[str, Any]] = []
+    for quote in quotes:
+        eligible, bet = engine.qualify_quote(
+            match_id=quote["canonical_match_id"],
+            side="team_a",
+            odds=quote["odds"],
+            prob_model=prob_model,
+            prob_market_novig=prob_market,
+            won=bool(quote["outcome"]),
+            bookmaker="synthetic-book",
+            uncertainty_basis=quote.get("uncertainty_basis", "assumed_research_haircut"),
+        )
+        if not eligible:
+            abstentions.append({
+                "opportunity_id": quote["opportunity_id"],
+                "reason": bet.quarantine_reason or "not_eligible",
+            })
+            continue
+        qualified.append({
+            "opportunity_id": quote["opportunity_id"],
+            "canonical_match_id": quote["canonical_match_id"],
+            "side": "team_a",
+            "bookmaker": "synthetic-book",
+            "odds": quote["odds"],
+            "prob_for_ev": bet.prob_for_ev,
+            "ev_net": bet.ev_net,
+            "decision_at": decision_at,
+            "settle_at": settle_at,
+            "y": quote["outcome"],
+        })
+
+    candidates = pd.DataFrame(qualified)
+    opportunities = candidates[[
+        "opportunity_id", "canonical_match_id", "side", "decision_at", "settle_at", "y"
+    ]].copy()
+    result = simulate_operational_portfolio(
+        candidates,
+        opportunities,
+        initial_bankroll=1_000.0,
+        tax_rate=0.12,
+        fraction=0.25,
+        max_stake=150.0,
+        max_portfolio_exposure=0.25,
+    )
+    def frame_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+        numeric_values = frame.map(
+            lambda value: float(value) if isinstance(value, Decimal) else value
+        )
+        return json.loads(numeric_values.to_json(orient="records", date_format="iso"))
+    return {
+        "status": "SYNTHETIC_SCENARIO_NOT_MODEL_EVIDENCE",
+        "scenario_id": "synthetic-overlap-tax-2026-01",
+        "source": "inline synthetic scenario",
+        "interpretation": "Mechanics and trace only; no model, market, or trading evidence.",
+        "evidence": {
+            "model_fitted": False,
+            "database_accessed": False,
+            "network_accessed": False,
+        },
+        "qualification": {
+            "candidate_count": len(quotes),
+            "qualified_count": len(qualified),
+            "qualified_offers": frame_records(pd.DataFrame(qualified)),
+            "synthetic_inputs": {
+                "model_probability": prob_model,
+                "market_fair_probability": prob_market,
+                "uncertainty_basis": "assumed_research_haircut",
+            },
+            "abstentions": abstentions,
+        },
+        "portfolio": {
+            "configuration": {
+                "initial_bankroll": 1_000.0,
+                "tax_rate": 0.12,
+                "kelly_fraction": 0.25,
+                "max_portfolio_exposure": 0.25,
+            },
+            "summary": json.loads(json.dumps(result["summary"], default=float)),
+            "ledger": frame_records(result["ledger"]),
+            "capital_path": frame_records(result["capital_path"]),
+            "execution_rejections": frame_records(result["execution_rejections"]),
+        },
+    }
 
 
 def run_production_calibration(argv: list[str]) -> None:
@@ -299,6 +430,21 @@ def run_production_calibration(argv: list[str]) -> None:
 
 
 def main() -> None:
+    if sys.argv[1:2] == ["long-term-market"]:
+        from src.analysis.long_term_market_evaluation import main as long_term_market_main
+
+        long_term_market_main(sys.argv[2:])
+        return
+    if sys.argv[1:2] == ["current-policy"]:
+        from src.analysis.c0_policy_runner import main as current_policy_main
+
+        current_policy_main(sys.argv[2:])
+        return
+    if sys.argv[1:2] == ["model-region-factorial"]:
+        from src.analysis.c0_region_factorial import main as factorial_main
+
+        factorial_main(sys.argv[2:])
+        return
     if sys.argv[1:2] == ["c0-market-study"]:
         run_c0_market_study(sys.argv[2:])
         return
@@ -316,6 +462,9 @@ def main() -> None:
         input_repair_main(sys.argv[2:])
         return
     args = parse_args()
+    if args.demo:
+        print(json.dumps(run_synthetic_portfolio_demo(), indent=2, sort_keys=True))
+        return
 
     data_path = args.data
     if data_path is None:

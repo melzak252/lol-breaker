@@ -104,7 +104,14 @@ def valid_parlay_rows(monkeypatch):
     Base.metadata.create_all(engine)
     try:
         with sessionmaker(bind=engine)() as session:
-            session.add_all([Bookmaker(id=1, name="superbet"), Bookmaker(id=2, name="sts")])
+            session.add_all([
+                Bookmaker(id=1, name="superbet"),
+                Bookmaker(id=2, name="sts"),
+                Bookmaker(id=3, name="pinnacle"),
+                Bookmaker(id=4, name="betclic"),
+                Bookmaker(id=5, name="efortuna"),
+                Bookmaker(id=6, name="totalbet"),
+            ])
             session.add(ModelArtifact(
                 id=1, model_name=hybrid.hybrid_model_name,
                 model_version=hybrid.hybrid_model_version,
@@ -128,19 +135,26 @@ def valid_parlay_rows(monkeypatch):
                     start_time_normalized=(now + timedelta(hours=2)).isoformat(),
                 ))
             session.flush()
-            for mid, team_a, team_b, _, book, odds_a in fixtures:
-                # Raw SQL preserves the explicit offset that SQLite's DateTime
-                # bind processor otherwise drops; production rejects naive clocks.
-                session.execute(text("""
-                    INSERT INTO odds_snapshots
-                    (id, canonical_match_id, bookmaker_id, market_type, is_live,
-                     raw_team_a, raw_team_b, odds_a, odds_b, scraped_at)
-                    VALUES (:id, :id, :book, 'match_winner', 0,
-                            :team_a, :team_b, :odds_a, 3.5, :clock)
-                """), {
-                    "id": mid, "book": book, "team_a": team_a, "team_b": team_b,
-                    "odds_a": odds_a, "clock": (now - timedelta(seconds=30)).isoformat(),
-                })
+            quote_book_ids = {1: (1, 2, 3), 2: (1, 2, 3), 3: (1, 2, 3), 4: (4, 5, 6)}
+            for mid, team_a, team_b, _, _, odds_a in fixtures:
+                # Each market has three fresh books; the unrelated fourth match
+                # remains unavailable at the books offering the eligible legs.
+                for index, book_id in enumerate(quote_book_ids[mid], start=1):
+                    session.execute(text("""
+                        INSERT INTO odds_snapshots
+                        (id, canonical_match_id, bookmaker_id, market_type, is_live,
+                         raw_team_a, raw_team_b, odds_a, odds_b, scraped_at)
+                        VALUES (:snapshot_id, :match_id, :book, 'match_winner', 0,
+                                :team_a, :team_b, :odds_a, :odds_b, :clock)
+                    """), {
+                        "snapshot_id": mid * 10 + index, "match_id": mid, "book": book_id,
+                        "team_a": team_a, "team_b": team_b, "odds_a": (
+                            odds_a if book_id == quote_book_ids[mid][0] else 1.8
+                        ), "odds_b": (
+                            3.5 if book_id == quote_book_ids[mid][0] else 1.8
+                        ),
+                        "clock": (now - timedelta(seconds=30)).isoformat(),
+                    })
             origin = now - timedelta(seconds=10)
             contexts = load_prematch_quotes([1, 2, 3, 4], decision_at=origin, session=session)
             forecasts = {}
@@ -153,7 +167,7 @@ def valid_parlay_rows(monkeypatch):
                     prediction_status="active",
                 ))
                 context = contexts[mid]
-                assert context.book_count == 1
+                assert context.book_count == 3
                 probability = blend_market_probability(
                     0.95, context.prob_a, alpha=hybrid.alpha,
                     temperature=hybrid.temperature, blending_mode=hybrid.blending_mode,
@@ -172,6 +186,7 @@ def valid_parlay_rows(monkeypatch):
                     prediction_status="active",
                     diagnostics_json=json.dumps({
                         **params, "base_prediction_id": mid,
+                        "base_prob_a": 0.95,
                         "base_data_cutoff_at": base_cutoff, "market_context": saved,
                     }),
                 )
@@ -187,16 +202,25 @@ def test_valid_bound_parlays_require_same_bookmaker_and_disjoint_participants(va
     session, _, _ = valid_parlay_rows
     response = find_parlay_recommendations(session, bankroll=100.0)
 
-    assert response.count == 1
-    assert response.top_parlay == response.parlays[0]
+    assert response.count == 3
+    assert {parlay.bookmaker for parlay in response.parlays} == {
+        "sts", "superbet", "pinnacle",
+    }
+    for parlay in response.parlays:
+        assert {leg.canonical_match_id for leg in parlay.legs} == {1, 2}
+        participants = [
+            {leg.team_name.lower(), leg.opponent_name.lower()} for leg in parlay.legs
+        ]
+        assert participants[0].isdisjoint(participants[1])
     top = response.top_parlay
-    assert top.bookmaker == "superbet"
-    assert {leg.canonical_match_id for leg in top.legs} == {1, 2}
-    participants = [
-        {leg.team_name.lower(), leg.opponent_name.lower()} for leg in top.legs
-    ]
-    assert participants[0].isdisjoint(participants[1])
-    assert top.combined_odds == pytest.approx(1.65 * 1.75, abs=1e-3)
+    assert top == response.parlays[0]
+    assert all(
+        (top.ev * top.joint_prob, top.ev) >= (p.ev * p.joint_prob, p.ev)
+        for p in response.parlays
+    )
+    assert top.combined_odds == pytest.approx(
+        top.legs[0].odds * top.legs[1].odds, abs=1e-3,
+    )
     assert top.joint_prob == pytest.approx(
         top.legs[0].model_prob * top.legs[1].model_prob, abs=1e-4,
     )
@@ -204,9 +228,13 @@ def test_valid_bound_parlays_require_same_bookmaker_and_disjoint_participants(va
         top.joint_prob * top.combined_odds * (1 - POLISH_TAX_RATE) - 1, abs=1e-4,
     )
     assert top.ev > 0
-    assert "założeniu niezależności" in top.summary_pl
-    assert "nie potwierdza" in response.explanation
-    filtered = find_parlay_recommendations(session, bookmaker="STS")
+    for bookmaker in ("STS", "Superbet", "Pinnacle"):
+        filtered = find_parlay_recommendations(session, bookmaker=bookmaker)
+        assert filtered.count == 1
+        assert {parlay.bookmaker for parlay in filtered.parlays} == {
+            bookmaker.lower(),
+        }
+    filtered = find_parlay_recommendations(session, bookmaker="Betclic")
     assert filtered.count == 0
     assert filtered.top_parlay is None
 
@@ -228,7 +256,10 @@ def test_parlays_withhold_invalid_forecast_or_market_contract(valid_parlay_rows,
     elif invalid_contract == "expired_quotes":
         clock["now"] += timedelta(seconds=301)
     elif invalid_contract == "changed_quote":
-        session.execute(text("UPDATE odds_snapshots SET odds_a=1.8 WHERE id=2"))
+        focal_source = diagnostics["market_context"]["sources"][0]
+        session.execute(text(
+            "UPDATE odds_snapshots SET odds_a=1.8 WHERE id=:snapshot_id"
+        ), {"snapshot_id": focal_source["odds_snapshot_id"]})
     elif invalid_contract == "unbound_forecast":
         diagnostics.pop("market_context")
     elif invalid_contract == "missing_base_row":

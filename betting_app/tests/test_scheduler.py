@@ -178,7 +178,10 @@ def test_embedding_cycle_serializes_both_builds(monkeypatch: pytest.MonkeyPatch)
     assert calls == ["champion", "team"]
 
 
-def test_prediction_pipeline_uses_fast_rematch_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prediction_pipeline_passes_decimal_wallet_bankroll(monkeypatch: pytest.MonkeyPatch) -> None:
+    from decimal import Decimal
+    from betting_app.services.bankroll_service import WalletBankroll
+
     calls: list[tuple[str, list[str] | None, int]] = []
 
     def run_module(module: str, args: list[str] | None = None, timeout: int = 300) -> bool:
@@ -186,23 +189,58 @@ def test_prediction_pipeline_uses_fast_rematch_mode(monkeypatch: pytest.MonkeyPa
         return True
 
     monkeypatch.setattr(predict, "_run_module", run_module)
+    monkeypatch.setattr(
+        predict,
+        "wallet_bankroll",
+        lambda: WalletBankroll(
+            cash=Decimal("200.25"), open_stakes=Decimal("49.75")
+        ),
+    )
 
     result = predict.run_prediction_pipeline()
 
     assert result["success"] is True
-    assert calls == [
-        (
-            "betting_app.scripts.rematch_canonical_matches",
-            ["--no-overview"],
-            300,
-        ),
-        (
-            "betting_app.scripts.run_upcoming_prediction_pipeline",
-            ["--include-partial", "--operational-hybrid"],
-            900,
-        ),
+    assert calls[1] == (
+        "betting_app.scripts.run_upcoming_prediction_pipeline",
+        ["--include-partial", "--operational-hybrid", "--bankroll", "250.00"],
+        900,
+    )
+
+
+def test_prediction_pipeline_fails_closed_without_wallet(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, list[str] | None, int]] = []
+
+    def run_module(module: str, args: list[str] | None = None, timeout: int = 300) -> bool:
+        calls.append((module, args, timeout))
+        return True
+
+    monkeypatch.setattr(predict, "_run_module", run_module)
+    monkeypatch.setattr(predict, "wallet_bankroll", lambda: None)
+
+    result = predict.run_prediction_pipeline()
+
+    assert result["success"] is True
+    assert calls[1][1] == [
+        "--include-partial", "--operational-hybrid", "--bankroll", "0"
     ]
 
+
+
+def test_pipeline_bankroll_resolution_uses_wallet_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from decimal import Decimal
+    from betting_app.scripts import run_upcoming_prediction_pipeline as pipeline
+    from betting_app.services.bankroll_service import WalletBankroll
+
+    wallet = WalletBankroll(
+        cash=Decimal("200.25"), open_stakes=Decimal("49.75")
+    )
+    monkeypatch.setattr(pipeline, "wallet_bankroll", lambda: wallet)
+    assert pipeline.resolve_bankroll(None) == 250.0
+
+    monkeypatch.setattr(pipeline, "wallet_bankroll", lambda: None)
+    assert pipeline.resolve_bankroll(None) == 0.0
 
 def test_prediction_pipeline_stops_when_rematch_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(predict, "rematch_canonical", lambda: False)

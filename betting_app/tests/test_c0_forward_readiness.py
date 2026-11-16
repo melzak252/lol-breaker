@@ -79,7 +79,7 @@ def test_tensor_bytes_dtype_order_and_hash_preserved():
     shapes = {"raw": {"players": ((2,5,21), "float32",4), "core": ((2,5),"float32",4),
                        "team": ((2,11),"float32",4), "w20": ((2,10),"float32",4),
                        "gates": ((2,2),"float32",4)},
-              "hist": {"history": ((2,5,16,33),"float16",2), "mask": ((2,5,16),"uint8",1),
+              "hist": {"history": ((2,5,19,33),"float32",4), "mask": ((2,5,19),"uint8",1),
                        "champions": ((2,5,16),"uint16",2)}}
     snapshot = {"target": {"roster_a": [1,2,3,4,5], "roster_b": [6,7,8,9,10]}, "raw": {}, "hist": {}}
     for side in ("a", "b"):
@@ -95,6 +95,19 @@ def test_tensor_bytes_dtype_order_and_hash_preserved():
     records, hashes = snapshot_tensor_records(snapshot)
     assert len(hashes) == 8
     assert records["hist"]["champions"]["dtype"] == "uint16"
+
+    old_snapshot = dict(snapshot)
+    old_snapshot["hist"] = dict(snapshot["hist"])
+    old_snapshot["hist"]["history"] = {
+        "dtype": "float16", "shape": [2, 5, 16, 33],
+        "data_base64": base64.b64encode(bytes(2 * 5 * 16 * 33 * 2)).decode(),
+    }
+    old_snapshot["hist"]["mask"] = {
+        "dtype": "uint8", "shape": [2, 5, 16],
+        "data_base64": base64.b64encode(bytes(2 * 5 * 16)).decode(),
+    }
+    with pytest.raises(ValueError, match="dtype/shape"):
+        snapshot_tensor_records(old_snapshot)
     assert "data_base64" not in records["raw"]["players"]
     snapshot["target"]["raw_tensor_player_order_a"] = [5,4,3,2,1]
     with pytest.raises(ValueError, match="order"):

@@ -26,29 +26,82 @@ def test_quarter_kelly_default():
     stake = fractional_kelly_stake(1000.0, 0.60, 2.00, tax_rate=0.12)
     assert 18.0 <= stake <= 19.0
 
-def test_fractional_kelly_reserved_bankroll():
-    # Total bankroll = 1000 PLN, but 800 PLN is reserved in currently open bets -> Available = 200 PLN
-    stake_full = fractional_kelly_stake(1000.0, 0.60, 2.00, fraction=0.05, tax_rate=0.12, reserved_bankroll=0.0)
-    stake_reserved = fractional_kelly_stake(1000.0, 0.60, 2.00, fraction=0.05, tax_rate=0.12, reserved_bankroll=800.0)
+def test_fractional_kelly_limits_stake_to_aggregate_headroom():
+    # Nominal equity is 1,000; 240 is already reserved, so only 10 of the
+    # 25%-of-equity aggregate limit remains even though 760 is free cash.
+    stake = fractional_kelly_stake(
+        1000.0, 0.99, 3.0, fraction=1.0, tax_rate=0.0,
+        reserved_bankroll=240.0,
+    )
+    assert stake == pytest.approx(10.0)
 
-    # Stake should scale proportionally to the available bankroll (200 / 1000 = 1/5)
-    # But subject to min_stake (2.0)
-    assert stake_reserved <= stake_full
-    assert stake_reserved <= 200.0
 
-
-def test_fractional_kelly_exhausted_bankroll():
-    # When reserved bankroll equals or exceeds total bankroll, stake must be 0.0
-    stake = fractional_kelly_stake(500.0, 0.65, 2.20, reserved_bankroll=500.0)
+def test_fractional_kelly_returns_zero_when_aggregate_cap_is_exhausted():
+    stake = fractional_kelly_stake(
+        1000.0, 0.99, 3.0, fraction=1.0, tax_rate=0.0,
+        reserved_bankroll=250.0,
+    )
     assert stake == 0.0
 
-    stake_over = fractional_kelly_stake(500.0, 0.65, 2.20, reserved_bankroll=600.0)
-    assert stake_over == 0.0
+
+def test_fractional_kelly_does_not_raise_stake_to_minimum_above_headroom():
+    stake = fractional_kelly_stake(
+        1000.0, 0.99, 3.0, fraction=1.0, tax_rate=0.0,
+        min_stake=2.0, reserved_bankroll=248.5,
+    )
+    assert stake == 0.0
 
 
-def test_fractional_kelly_portfolio_exposure_cap():
-    # Even if Kelly fraction is large, single bet must not exceed max_portfolio_exposure (e.g. 25% of available)
-    # Available = 100 PLN, max_exposure = 0.20 -> cap = 20.0 PLN
+def test_fractional_kelly_uses_free_cash_for_kelly_and_respects_maximum():
+    # Kelly on free cash (600) exceeds max_stake; neither nominal bankroll
+    # nor the aggregate headroom should replace the single-ticket maximum.
+    stake = fractional_kelly_stake(
+        1000.0, 0.99, 3.0, fraction=1.0, tax_rate=0.0,
+        max_stake=80.0, reserved_bankroll=100.0,
+    )
+    assert stake == 80.0
+
+
+def test_fractional_kelly_cannot_exceed_free_cash():
+    stake = fractional_kelly_stake(
+        1000.0, 0.99, 3.0, fraction=1.0, tax_rate=0.0,
+        max_stake=1000.0, reserved_bankroll=900.0,
+        max_portfolio_exposure=1.0,
+    )
+    assert stake == pytest.approx(98.5)
+    assert stake <= 100.0
+
+
+def test_fractional_kelly_enforces_cap_for_over_cap_existing_exposure():
+    stake = fractional_kelly_stake(
+        900.0, 0.99, 3.0, fraction=1.0, tax_rate=0.0,
+        reserved_bankroll=250.0,
+    )
+    assert stake == 0.0
+
+
+def test_step_compounded_integer_rounding_stays_within_aggregate_headroom():
+    from betting_app.core.staking import step_compounded_flat_stake
+
+    stake = step_compounded_flat_stake(
+        1000.0, unit_fraction=1.0, min_stake=2.0, max_stake=150.0,
+        reserved_bankroll=244.3, integer_round=True,
+    )
+    assert stake <= 5.7
+
+
+def test_wasserstein_integer_rounding_stays_within_aggregate_headroom():
+    from betting_app.core.staking import capped_wasserstein_kelly_stake
+
+    stake = capped_wasserstein_kelly_stake(
+        1000.0, 0.99, 3.0, wasserstein_epsilon=0.0,
+        fraction=1.0, tax_rate=0.0, min_stake=2.0, max_stake=150.0,
+        reserved_bankroll=244.3, integer_round=True,
+    )
+    assert stake <= 5.7
+
+def test_fractional_kelly_applies_exposure_limit_when_no_cap_is_used():
+    # With no existing reservations, aggregate headroom is 20% of equity.
     stake = fractional_kelly_stake(
         100.0,
         0.90,

@@ -18,9 +18,9 @@ class TestPredictions:
 @pytest.mark.parametrize(
     "basis, required, bound, expected_ev",
     [
-        ("mean", False, None, 0.1088),
-        ("measured_bounds", True, 0.40, 0.056),
-        ("assumed_research_haircut", True, 0.40, 0.056),
+        ("mean", False, None, 0.2144),
+        ("measured_bounds", True, 0.44, 0.1616),
+        ("assumed_research_haircut", True, 0.44, 0.1616),
         ("missing_bounds", True, None, None),
     ],
 )
@@ -30,41 +30,49 @@ def test_prediction_signals_disclose_actual_ev_score_without_inventing_bound(
     from betting_app.api.routers import predictions
     from betting_app.core.models import C0_NATIVE
     from betting_app.services.prematch_quote_service import (
-        PrematchMarketContext, PrematchQuote, serialize_market_context,
+        PrematchMarketContext, PrematchQuote, quotes_consensus,
+        serialize_focal_consensus, serialize_market_context,
     )
 
     now = datetime.now(UTC)
-    quote = PrematchQuote(1, 4, 1, "book1", now - timedelta(seconds=10),
-                          "Alpha", "Beta", 3.0, 2.0, None, None)
+    quotes = tuple(
+        PrematchQuote(i, 4, i, f"book{i}", now - timedelta(seconds=10),
+                      "Alpha", "Beta", 3.0, 2.0, None, None)
+        for i in (1, 2, 3)
+    )
     context = PrematchMarketContext(
         4, "alpha", "beta", "LCK", "upcoming", now + timedelta(hours=1),
-        now, (quote,), 0.4, (),
+        now, quotes, quotes_consensus(quotes).prob_a, (),
     )
     diagnostics = {"uncertainty_required": required, "uncertainty_basis": basis}
     if bound is not None:
         diagnostics.update(
-            p_low_a=bound, p_low_b=0.56, epistemic_sigma_z=0.15,
+            p_low_a=bound, p_low_b=0.52, epistemic_sigma_z=0.15,
             rating_disagreement=0.0,
         )
+    focal = quotes_consensus(quotes, exclude_bookmaker_id=1)
     row = dict(
         id=8, prediction_id=9, prediction_match_id=4, canonical_prediction_id=9,
         canonical_match_id=4, bookmaker_id=1, odds_snapshot_id=1, side="a", odds=3.0,
         model_name=C0_NATIVE.name, model_version=C0_NATIVE.version,
-        prob_a=0.42, prob_b=0.58, model_prob=0.42, market_prob=context.prob_a,
+        prob_a=0.46, prob_b=0.54, model_prob=0.46, market_prob=focal.prob_a,
         ev=9.0, evaluated_at=now, status="new", prediction_status="active",
         predicted_at=now - timedelta(seconds=20),
         data_cutoff_at=now - timedelta(minutes=1),
         team_a_name="Alpha", team_b_name="Beta", league="LCK", best_of=3,
         start_time_normalized=context.start_at.isoformat(), bookmaker_name="book1",
-        diagnostics_json=diagnostics,
-        market_context_json=serialize_market_context(
-            context, model_name=C0_NATIVE.name, model_version=C0_NATIVE.version,
-        ),
+        diagnostics_json={**diagnostics, "base_prob_a": 0.46},
+        market_context_json={
+            **serialize_market_context(
+                context, model_name=C0_NATIVE.name, model_version=C0_NATIVE.version,
+            ),
+            "focal_consensus": serialize_focal_consensus(focal),
+        },
     )
     monkeypatch.setattr(predictions, "query_df", lambda *args: [row])
     monkeypatch.setattr(predictions, "load_prematch_quotes", lambda *args, **kwargs: {4: context})
     result = predictions.list_predictions(
-        min_ev=0.0, max_ev=None, min_books=1, model_name=C0_NATIVE.name,
+        min_ev=0.0, max_ev=None, min_books=3, model_name=C0_NATIVE.name,
         model_version=C0_NATIVE.version, limit=50, db=object(),
     )
 
@@ -75,7 +83,7 @@ def test_prediction_signals_disclose_actual_ev_score_without_inventing_bound(
         assert result.total == 1
         signal = result.signals[0]
         payload = result.model_dump()["signals"][0]
-        score = 0.42 if bound is None else bound
+        score = 0.46 if bound is None else bound
         assert payload["prob_conservative"] == bound
         assert payload["prob_for_ev"] == score
         assert payload["uncertainty_basis"] == basis

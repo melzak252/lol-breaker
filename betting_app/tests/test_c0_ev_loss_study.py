@@ -5,6 +5,7 @@ for the CLI to replace the real run's population or authorization contract.
 """
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -323,6 +324,14 @@ def sealed_source(tmp_path, monkeypatch):
          'evidence_class':'EXPOSED_HISTORICAL_DEVELOPMENT_ONLY', 'outputs':outputs})
     save(stages[8]/'sealed_verification.json', {'status':'PASS', 'artifacts':{
          **outputs, **{ref['path']:ref for ref in references.values()}}})
+    code_root = Path(study.CODE_ROOT)
+    for filename in study.CODE:
+        destination = root / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(code_root / filename, destination)
+    (root / 'synthetic_plan_snapshot.md').write_text('Synthetic fixture plan; no native authorization.\\n')
+    monkeypatch.setattr(study, 'CODE_ROOT', root)
+    monkeypatch.setattr(study, 'PLAN', 'synthetic_plan_snapshot.md')
     monkeypatch.setattr(study, 'PROJECT_ROOT', root)
     monkeypatch.setattr(study, 'SOURCE_PROTOCOL', str(protocol_path.relative_to(root)))
     return root, frame, stages

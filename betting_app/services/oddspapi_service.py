@@ -640,7 +640,7 @@ def fetch_pinnacle_horizon_odds(
                 select(OddsSnapshot.id).where(
                     OddsSnapshot.canonical_match_id == cm_id,
                     OddsSnapshot.bookmaker_id == pinnacle_id,
-                    OddsSnapshot.scraped_at >= (now - timedelta(hours=2)).isoformat(),
+                    OddsSnapshot.scraped_at >= now - timedelta(hours=2),
                 )
             )
             if not recent_quote:

@@ -16,8 +16,9 @@ import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
 
-from betting_app.core.models.causal_a0 import CausalA0Adapter
+from betting_app.models.prediction import ForecastEvidenceSnapshot
 from betting_app.services.forecast_evidence import append_forecast_evidence
+from betting_app.core.models.causal_a0 import CausalA0Adapter
 from src.analysis.a0_prediction_input import snapshot_evidence_status
 from src.analysis.ev_asof_replay import AsOfSnapshot
 

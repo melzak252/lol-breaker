@@ -83,6 +83,66 @@ def _sigmoid(x: float) -> float:
         return z / (1.0 + z)
 
 
+def _wins_needed(best_of: int) -> int:
+    """Return map wins needed for an odd best-of format, validating the format."""
+    if type(best_of) is not int or best_of < 1 or best_of % 2 == 0:
+        raise ValueError(f"best_of must be a positive odd integer (got {best_of!r})")
+    return best_of // 2 + 1
+
+
+def _series_prob_from_map_prob(map_prob: float, wins_needed: int) -> float:
+    """P(team wins the series) for independent maps won with probability ``map_prob``."""
+    q = map_prob
+    loss = 1.0 - q
+    total = 0.0
+    for k in range(wins_needed):
+        total += math.comb(wins_needed - 1 + k, k) * (q ** wins_needed) * (loss ** k)
+    return total
+
+
+def _map_prob_from_series_prob(series_prob: float, wins_needed: int) -> float:
+    """Invert the best-of-N series win probability with safeguarded Newton iterations."""
+    if wins_needed == 1:
+        return series_prob
+    lo, hi = 0.0, 1.0
+    q = series_prob
+    coefficient = (2 * wins_needed - 1) * math.comb(2 * wins_needed - 2, wins_needed - 1)
+    for _ in range(60):
+        value = _series_prob_from_map_prob(q, wins_needed) - series_prob
+        if abs(value) < 1e-13:
+            return q
+        if value > 0.0:
+            hi = q
+        else:
+            lo = q
+        slope = coefficient * (q * (1.0 - q)) ** (wins_needed - 1)
+        q_next = q - value / slope if slope > 1e-12 else 0.5 * (lo + hi)
+        q = q_next if lo < q_next < hi else 0.5 * (lo + hi)
+    return q
+
+
+def expected_map_margin(series_prob_a: float, best_of: int) -> float:
+    """Expected final map differential (maps_a - maps_b) of a best-of-N series.
+
+    The series win probability is converted to an independent per-map probability
+    ``q`` (exact inverse of the binomial series formula), then the expectation is
+    taken over every possible final scoreline. Anti-symmetric in the two teams:
+    ``expected_map_margin(p) == -expected_map_margin(1 - p)``.
+    """
+    wins = _wins_needed(best_of)
+    if series_prob_a <= 0.0:
+        return -float(wins)
+    if series_prob_a >= 1.0:
+        return float(wins)
+    q = _map_prob_from_series_prob(float(series_prob_a), wins)
+    loss = 1.0 - q
+    expected = 0.0
+    for k in range(wins):
+        ways = math.comb(wins - 1 + k, k)
+        expected += (wins - k) * ways * ((q ** wins) * (loss ** k) - (loss ** wins) * (q ** k))
+    return expected
+
+
 class InPathTournamentBayesianFilter:
     """State-space Bayesian filter tracking in-tournament team momentum.
 
@@ -106,7 +166,8 @@ class InPathTournamentBayesianFilter:
             adaptation_volatility: Meta adaptation shock standard deviation (sigma), default 0.04.
             max_abs_logit_offset: Maximum absolute logit offset clamping bound, default 0.85.
             rng: Optional random.Random instance or seed for reproducible meta shocks.
-            map_margin_weight: Bonus per map differential, default 0.03.
+            map_margin_weight: Weight on the map-margin surprise (margin minus its expectation
+                given the pre-match probability), default 0.03.
         """
         if not math.isfinite(learning_rate) or learning_rate < 0.0:
             raise ValueError(f"learning_rate must be non-negative and finite (got {learning_rate})")
@@ -192,14 +253,18 @@ class InPathTournamentBayesianFilter:
         maps_a: int,
         maps_b: int,
         pre_match_prob_a: float,
+        best_of: int | None = None,
     ) -> None:
         """Update momentum states for both teams after a completed series.
 
-        Update formula:
+        Update formula (every term has zero mean when ``pre_match_prob_a`` is the
+        true series probability and maps are independent):
             Delta theta = eta * (1_won - p_pre_match) + map_margin_bonus + eps_meta
             where:
                 eta = self.learning_rate (default 0.12)
-                map_margin_bonus = self.map_margin_weight * (maps_won - maps_lost) (default 0.03 * delta)
+                map_margin_bonus = self.map_margin_weight * (margin - E[margin | p_pre_match])
+                    (default weight 0.03); the *surprise* in the map margin is used so a
+                    calibrated favourite does not drift upward just for winning by more maps
                 eps_meta ~ Normal(0, sigma^2) (default sigma 0.04)
 
         Args:
@@ -209,6 +274,9 @@ class InPathTournamentBayesianFilter:
             maps_a: Maps won by Team A in this series.
             maps_b: Maps won by Team B in this series.
             pre_match_prob_a: Pre-match win probability for Team A.
+            best_of: Series length. When omitted it is inferred from a completed series
+                as ``2 * max(maps_a, maps_b) - 1`` (the winner holds the wins needed);
+                with 0-0 maps and no ``best_of`` the map-margin term is skipped.
         """
         team_a_clean = str(team_a).strip()
         team_b_clean = str(team_b).strip()
@@ -234,11 +302,15 @@ class InPathTournamentBayesianFilter:
         p_a = float(min(max(pre_match_prob_a, 0.0), 1.0))
         p_b = 1.0 - p_a
 
-        margin_a = maps_a - maps_b
-        margin_b = maps_b - maps_a
+        if best_of is None and max(maps_a, maps_b) > 0:
+            best_of = 2 * max(maps_a, maps_b) - 1
+        if best_of is None:
+            surprise_a = 0.0
+        else:
+            surprise_a = (maps_a - maps_b) - expected_map_margin(p_a, best_of)
 
-        bonus_a = self.map_margin_weight * margin_a
-        bonus_b = self.map_margin_weight * margin_b
+        bonus_a = self.map_margin_weight * surprise_a
+        bonus_b = -bonus_a
 
         eps_a = (
             self.rng.gauss(0.0, self.adaptation_volatility)
@@ -337,4 +409,5 @@ class InPathTournamentBayesianFilter:
 __all__ = [
     "TeamMomentumState",
     "InPathTournamentBayesianFilter",
+    "expected_map_margin",
 ]

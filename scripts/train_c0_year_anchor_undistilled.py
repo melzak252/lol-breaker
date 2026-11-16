@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Train and evaluate the 18-Token Multi-Horizon History Attention Architecture.
 
-Adds each player's strictly causal 365-Day Whole-Year Anchor Token
-([empty_token, year_anchor_365d_token, map_1, ..., map_16])
-to the 16 recent maps in Causal-C0.
+Adds each player's strictly prior 365-day whole-year anchor token
+([empty_token, year_anchor_365d_token, map_1, ..., map_16]) to Causal-C0.
+
+Bank provenance: ``scripts/build_year_anchor_bank.py`` rebuilds this token from
+the release-corrected bank resolved through ``data/research_root.txt``. Its
+33-value layout follows the canonical benchmark's historical
+``temporal_player_features.py`` implementation. The builder asserts chronological
+metadata order, preserves metadata row alignment, and uses only released maps
+strictly before the current day and within 365 days. Rebuild the bank with
+``python scripts/build_year_anchor_bank.py`` before training.
 """
 from __future__ import annotations
 
@@ -52,13 +59,14 @@ YEAR_BANK_DIR = REPORT_DIR / "year_anchor_bank"
 
 
 def resolve_research_root() -> Path:
+    configured = Path((PROJECT_ROOT / "data/research_root.txt").read_text().strip())
     candidates = [
+        configured if configured.is_absolute() else PROJECT_ROOT / configured,
         Path("/home/melzak/.codex/.chatgpt-projects/g-p-6944b69bdee08191acfcfeb7a38f372a"),
-        PROJECT_ROOT / "data/05_model_input/canonical_benchmark",
     ]
-    for c in candidates:
-        if (c / "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/metadata.parquet").is_file():
-            return c
+    for candidate in candidates:
+        if (candidate / "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank/metadata.parquet").is_file():
+            return candidate
     raise FileNotFoundError("Could not find valid research root containing release_corrected_bank")
 
 
@@ -515,6 +523,10 @@ def main() -> int:
     print(f"Loading 365-day bank from {YEAR_BANK_DIR}...")
     year_anchor_hist = np.load(year_hist_path)
     year_anchor_mask = np.load(year_mask_path)
+    year_row_ids = np.load(YEAR_BANK_DIR / "year_anchor_row_ids.npy", mmap_mode="r", allow_pickle=False)
+    np.testing.assert_array_equal(year_row_ids, frame["golgg_match_id"].astype(str).to_numpy(dtype=str))
+    assert year_anchor_hist.shape == (len(frame), 2, 5, 1, 33)
+    assert year_anchor_mask.shape == (len(frame), 2, 5, 1)
     print(f"Loaded year_anchor_hist: {year_anchor_hist.shape}, dtype={year_anchor_hist.dtype}")
     print(f"Loaded year_anchor_mask: {year_anchor_mask.shape}, dtype={year_anchor_mask.dtype}")
 

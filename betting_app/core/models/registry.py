@@ -15,23 +15,37 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 # -----------------------------------------------------------------------------
 
 
+_UNSERVED_MANIFEST_REASON = "no serving path builds 18/20-token tensors; artifact manifest not tracked"
+_UNSERVED_REPORTING_JSON_REASON = (
+    "no serving path builds 18/20-token tensors; artifact manifest not tracked "
+    "(artifact_path is a reporting JSON, not a model)"
+)
+_UNSERVED_STUDENT_REASON = "no serving path loads distilled C0 student artifacts; artifact manifest not tracked"
+# What the research CLI (scripts/predict_matchup.py) actually emits for non-C0 short codes:
+# legacy 17-token C0 probability, then logit(p) * calibration_slopes[best_of].
+_BO_SLOPE_SURROGATE = "legacy_c0_probability_with_bo_slope_surrogate"
+
+
 C0_NATIVE = ModelSpec(
     name="Causal-C0",
     display_name="PlayerHistory-Attention-Ensemble",
     short_code="C0",
-    version="c0-native-2026-w32-e12-v1",
-    feature_version="native-c0-history16-v1",
-    artifact_path=PROJECT_ROOT / "data" / "06_models" / "a0_data_focus" / "a0_data_focus_20260929_192443",
-    description="3-seed Width-32/Epoch-12 player history-attention neural ensemble + Glicko-2/Elo ratings + MLP experts (Causal-C0).",
+    version="c0-native-fresh20-2026-10-21-v1-regional-v1",
+    feature_version="native-c0-fresh20-history19-regional-v1",
+    artifact_path=PROJECT_ROOT / "data" / "06_models" / "c0_distilled_verification" / "c0d_repro_20261021_01" / "fresh" / "20t",
+    description="Genuine three-seed fresh 20-token C0 inference with causal regional input correction. Nineteen observed history slots plus the learned model token.",
     metadata={
         "operational": True,
         "symmetric": True,
-        "artifact_release": "data/06_models/a0_data_focus/a0_data_focus_20260929_192443",
-        "artifact_kind": "native_control_trio_shared_calibration",
-        "year_anchor_18token_log_loss": 0.534777,
-        "year_anchor_18token_tails": 9,
-        "year_anchor_18token_brier": 0.180842,
-        "year_anchor_18token_ece": 0.021726,
+        "weights_model_version": "c0-native-fresh20-2026-10-21-v1",
+        "weights_feature_version": "native-c0-fresh20-history19-v1",
+        "regional_adjustment_version": "regional-input-correction-v1",
+        "source_contract_version": "native-c0-serving-source-v3",
+        "artifact_release": "data/06_models/c0_distilled_verification/c0d_repro_20261021_01/fresh/20t",
+        "serving_protocol": "data/05_model_input/c0_distilled_verification/c0d_repro_20261021_01/protocol.json",
+        "token_count": 20,
+        "observed_history_slots": 19,
+        "learned_model_tokens": 1,
     },
 )
 
@@ -46,10 +60,13 @@ C0_DISTILLED = ModelSpec(
     prediction_target="series",
     has_uncertainty=False,
     family="distilled_c0",
-    artifact_path=PROJECT_ROOT / "data" / "06_models" / "c0_distilled" / "manifest.json",
-    description="Pure, self-contained 3-seed 18-Token (16 Recent Maps + 365d Year Anchor + Empty) Born-Again Distilled W32 Ensemble (0.534134 LL core / 0.533984 LL with Connector+ONS; 19,914 neural params = 6,638/seed, zero tree/connector dependencies).",
+    artifact_path=None,
+    description="RESEARCH ONLY, not servable: 3-seed 18-Token (16 Recent Maps + 365d Year Anchor + Empty) Born-Again Distilled W32 Ensemble. No serving path builds 18-token tensors; the research CLI applies a BO logit-slope surrogate to legacy 17-token C0 probabilities, not distilled inference.",
     metadata={
-        "operational": True,
+        "operational": False,
+        "unavailable_reason": _UNSERVED_MANIFEST_REASON,
+        "served_as": _BO_SLOPE_SURROGATE,
+        "calibration_slopes_source": "copied from the 18-token manifest (untracked); the research CLI applies them to legacy 17-token C0 probabilities",
         "symmetric": True,
         "distilled": True,
         "short_name": "C0-D",
@@ -108,10 +125,13 @@ C0_DISTILLED_20T = ModelSpec(
     prediction_target="series",
     has_uncertainty=False,
     family="distilled_c0",
-    artifact_path=PROJECT_ROOT / "data" / "08_reporting" / "c0_upgrade_and_distillation_20261017" / "multiscale_20token_distilled.json",
-    description="3-seed 20-Token Multi-Scale (16 Recent Maps + 90d Split + 180d Half-Year + 365d Year + Empty) Born-Again Distilled W32 Ensemble (0.533954 LL standalone / 0.533600 LL with Cross-Region Norm; 20,106 neural params).",
+    artifact_path=None,
+    description="RESEARCH ONLY, not servable: 3-seed 20-Token Multi-Scale Born-Again Distilled W32 Ensemble. The reporting JSON is not an inference artifact; the research CLI applies a BO logit-slope surrogate to legacy 17-token C0 probabilities, not distilled inference.",
     metadata={
-        "operational": True,
+        "operational": False,
+        "unavailable_reason": _UNSERVED_REPORTING_JSON_REASON,
+        "served_as": _BO_SLOPE_SURROGATE,
+        "calibration_slopes_source": "copied from C0-D; not present in the 20-token reporting JSON",
         "symmetric": True,
         "distilled": True,
         "short_name": "C0-D-20T",
@@ -124,6 +144,7 @@ C0_DISTILLED_20T = ModelSpec(
         "brier": 0.180388,
         "ece": 0.020309,
         "calibration_slopes": {1: 1.004, 3: 1.008, 5: 1.012},
+        "reporting_json": "data/08_reporting/c0_upgrade_and_distillation_20261017/multiscale_20token_distilled.json",
     },
 )
 
@@ -137,11 +158,12 @@ C0_SLIM = ModelSpec(
     w20_version="w20-latest",
     prediction_target="series",
     has_uncertainty=False,
-    family="distilled_c0",
-    artifact_path=PROJECT_ROOT / "data" / "06_models" / "c0_distilled" / "manifest.json",
-    description="1-seed 18-Token Distilled W32 with 365-Day Whole-Year Anchor Token (0.534656 LL pure / 0.534356 LL with Connector; 6,638 neural params = 1/3rd size of C0, 3.1x faster at 278 ms, +34.37% Pinnacle 12%-tax yield).",
+    artifact_path=None,
+    description="RESEARCH ONLY, not servable: 1-seed 18-Token Distilled W32 research result. The research CLI applies a BO logit-slope surrogate to legacy 17-token C0 probabilities, not distilled inference.",
     metadata={
-        "operational": True,
+        "operational": False,
+        "unavailable_reason": _UNSERVED_STUDENT_REASON,
+        "served_as": _BO_SLOPE_SURROGATE,
         "symmetric": True,
         "distilled": True,
         "short_name": "C0-Slim",
@@ -170,33 +192,8 @@ C0_SLIM = ModelSpec(
         "latency_ms": 277.7,
         "speedup": "3.1x",
         "calibration_slopes": {1: 0.992, 3: 1.002, 5: 1.018},
+        "calibration_slopes_source": "research-only slope values recorded in registry; source artifact is untracked and values are not verified for serving",
         "artifact_manifest": "data/06_models/c0_distilled/manifest.json",
-        "financials": {
-            "polish_cohort_profit_pln": 1643.79,
-            "polish_cohort_yield_pct": 26.53,
-            "sharp_pinnacle_12pct_tax": {
-                "window": "T-1h",
-                "bets": 29,
-                "win_rate": 0.483,
-                "profit_pln": 1348.78,
-                "yield_pct": 34.37,
-                "sharpe": 1.15,
-            },
-            "sharp_pinnacle_0pct_tax": {
-                "bets": 560,
-                "profit_pln": 5024.57,
-                "yield_pct": 6.04,
-                "roi_pct": 50.25,
-                "sharpe": 1.52,
-            },
-            "sharp_pinnacle_longshots_0pct_tax": {
-                "odds_range": "2.30-4.00",
-                "bets": 211,
-                "profit_pln": 4462.18,
-                "yield_pct": 14.59,
-                "sharpe": 1.59,
-            },
-        },
     },
 )
 
@@ -211,10 +208,12 @@ C0_MINI = ModelSpec(
     prediction_target="series",
     has_uncertainty=False,
     family="distilled_c0",
-    artifact_path=PROJECT_ROOT / "data" / "06_models" / "c0_distilled" / "manifest.json",
-    description="3-seed Width-16/Epoch-12 Distilled Student A Ensemble (0.535845 LL, 8,394 total / 2,798 per-seed neural params = 58% smaller width, passes all 6 C0 guards).",
+    artifact_path=None,
+    description="RESEARCH ONLY, not servable: 3-seed Width-16/Epoch-12 Distilled Student A research result. The research CLI applies a BO logit-slope surrogate to legacy 17-token C0 probabilities, not distilled inference.",
     metadata={
-        "operational": True,
+        "operational": False,
+        "unavailable_reason": _UNSERVED_STUDENT_REASON,
+        "served_as": _BO_SLOPE_SURROGATE,
         "symmetric": True,
         "distilled": True,
         "short_name": "C0-Mini",
@@ -224,6 +223,7 @@ C0_MINI = ModelSpec(
         "log_loss": 0.535845,
         "parameter_reduction": "57.65%",
         "calibration_slopes": {1: 1.002302, 3: 1.004804, 5: 1.002428},
+        "calibration_slopes_source": "research-only slope values recorded in registry; source artifact is untracked and values are not verified for serving",
         "artifact_manifest": "data/06_models/c0_distilled/manifest.json",
     },
 )
@@ -239,10 +239,12 @@ C0_YEAR = ModelSpec(
     prediction_target="series",
     has_uncertainty=False,
     family="c0_year_anchor",
-    artifact_path=PROJECT_ROOT / "data" / "08_reporting" / "c0_upgrade_and_distillation_20261017" / "year_anchor_undistilled.json",
-    description="3-seed 18-Token (16 Recent Maps + 365-Day Whole-Year Anchor + Empty) Width-32/Epoch-12 Attention Ensemble (0.534777 LL, 9 tails, 19,914 neural params).",
+    artifact_path=None,
+    description="RESEARCH ONLY, not servable: 3-seed 18-Token Width-32/Epoch-12 Attention Ensemble. The reporting JSON is not an inference artifact; the research CLI applies a BO logit-slope surrogate to legacy 17-token C0 probabilities, not distilled inference.",
     metadata={
-        "operational": True,
+        "operational": False,
+        "unavailable_reason": _UNSERVED_REPORTING_JSON_REASON,
+        "served_as": _BO_SLOPE_SURROGATE,
         "symmetric": True,
         "short_name": "C0-Year",
         "aliases": ["C0-Year", "Causal-C0-Year", "c0_year", "c0-18t"],
@@ -250,6 +252,8 @@ C0_YEAR = ModelSpec(
         "neural_params_per_seed": 6638,
         "log_loss": 0.534777,
         "calibration_slopes": {1: 1.001, 3: 1.002, 5: 1.003},
+        "calibration_slopes_source": "no source: these registry slope values are unverified and are not present in year_anchor_undistilled.json",
+        "reporting_json": "data/08_reporting/c0_upgrade_and_distillation_20261017/year_anchor_undistilled.json",
     },
 )
 
@@ -271,6 +275,7 @@ A0_REFERENCE = ModelSpec(
     description="Annual walk-forward causal ensemble reference baseline (7 base checkpoints across 3 experts; quarterly cross-fitted calibration).",
     metadata={
         "operational": False,
+        "unavailable_reason": "Annual-Causal-A0 is an offline walk-forward benchmark reference and is not servable in the live app.",
         "symmetric": True,
         "benchmark_reference": True,
         "short_name": "A0",
@@ -338,7 +343,7 @@ BAYESIAN_SHRUNK_HYBRID = ModelSpec(
     name="Hybrid-Operational-Market",
     display_name="MarketShrunk-Hybrid-50",
     short_code="Hybrid-50",
-    version="c0-native-2026-w32-e12-v1-a0.50-t1.00",
+    version=f"{C0_NATIVE.version}-a0.50-t1.00",
     feature_version=C0_NATIVE.feature_version,
     ratings_version=C0_NATIVE.ratings_version,
     w20_version=C0_NATIVE.w20_version,
@@ -473,7 +478,7 @@ def get_hybrid_spec(model: ModelSpec) -> HybridSpec:
     if base is None or base.family == "bayesian_market_hybrid":
         raise ValueError("A hybrid must declare a registered pure sports model.")
     if base.metadata.get("operational") is False:
-        raise ValueError(base.metadata["unavailable_reason"])
+        raise ValueError(base.metadata.get("unavailable_reason", f"Model {base.name} is not operational"))
     return HybridSpec(
         base_model=base,
         hybrid_model_name=model.name,
@@ -491,7 +496,7 @@ def get_active_model() -> ModelSpec:
     if spec is None:
         raise ValueError(f"Unknown ACTIVE_PREDICTION_MODEL: {override}")
     if spec.metadata.get("operational") is False:
-        raise ValueError(spec.metadata["unavailable_reason"])
+        raise ValueError(spec.metadata.get("unavailable_reason", f"Model {spec.name} is not operational"))
     return spec
 
 
@@ -510,7 +515,7 @@ def set_active_model(model_or_name: ModelSpec | str) -> None:
     else:
         spec = model_or_name
     if spec.metadata.get("operational") is False:
-        raise ValueError(spec.metadata["unavailable_reason"])
+        raise ValueError(spec.metadata.get("unavailable_reason", f"Model {spec.name} is not operational"))
     if spec.family == "bayesian_market_hybrid":
         hybrid = get_hybrid_spec(spec)
     else:
@@ -547,7 +552,11 @@ def set_active_hybrid(hybrid_spec: HybridSpec) -> None:
     if hybrid_spec.base_model.family == "bayesian_market_hybrid":
         raise ValueError("A hybrid must use a pure sports model, not another hybrid.")
     if hybrid_spec.base_model.metadata.get("operational") is False:
-        raise ValueError(hybrid_spec.base_model.metadata["unavailable_reason"])
+        raise ValueError(
+            hybrid_spec.base_model.metadata.get(
+                "unavailable_reason", f"Model {hybrid_spec.base_model.name} is not operational"
+            )
+        )
     active = get_active_model()
     if active.family == "bayesian_market_hybrid":
         if hybrid_spec != get_hybrid_spec(active):
@@ -612,7 +621,7 @@ def resolve_model_spec(identifier: str) -> ModelSpec:
         return spec
     raise KeyError(
         f"Unknown model identifier: '{identifier}'. "
-        f"Available models: {[m.effective_short_code for m in (C0_NATIVE, C0_DISTILLED, C0_SLIM, C0_MINI, BAYESIAN_SHRUNK_HYBRID, EXP078_LINEAR, EXP039_THESIS, A1_CONSOLIDATED, A0_REFERENCE)]}"
+        f"Available models: {sorted({m.effective_short_code for m in REGISTERED_MODELS.values()})}"
     )
 
 def list_registered_models() -> list[dict[str, Any]]:
@@ -671,10 +680,17 @@ def get_active_prediction_db_params() -> dict[str, str]:
     }
 
 
-def apply_model_calibration(p_a: float, spec: Any, best_of: int = 3) -> tuple[float, float]:
-    """Apply model-specific calibration / distillation adjustment to base probability."""
+def apply_model_calibration(
+    p_a: float, spec: Any, best_of: int = 3, *, allow_surrogate: bool = False
+) -> tuple[float, float]:
+    """Apply a model's BO slope; research-only models require explicit surrogate opt-in.
+
+    This adjustment does not run distilled inference.
+    """
     import math
 
+    if spec.metadata.get("operational") is False and not allow_surrogate:
+        raise ValueError("Research-only calibration requires explicit allow_surrogate=True")
     slopes = spec.metadata.get("calibration_slopes", {}) if hasattr(spec, "metadata") else {}
     slope = float(slopes.get(best_of, slopes.get(str(best_of), slopes.get(3, 1.0))))
     p_clamped = max(1e-6, min(1.0 - 1e-6, float(p_a)))

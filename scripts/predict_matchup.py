@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI utility for rapid pre-match predictions using C0 Model Family (C0, C0-D, C0-Slim, C0-Mini) and Hybrid-50.
+"""CLI utility for native C0 predictions and explicitly opted-in legacy research surrogates.
 
 Usage:
     .venv/bin/python scripts/predict_matchup.py C9 KC
@@ -17,30 +17,26 @@ from pathlib import Path
 import sys
 from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
+if __name__ == "__main__" and str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-# Ensure ensemble research root points to consolidated benchmark if not set
-if "ENSEMBLE_RESEARCH_ROOT" not in os.environ:
-    os.environ["ENSEMBLE_RESEARCH_ROOT"] = str(PROJECT_ROOT / "data/05_model_input/canonical_benchmark")
 
 from scipy.special import expit, logit
 
 from betting_app.services.c0_inference import close_c0_inference_worker, predict_c0
-from betting_app.core.models.registry import resolve_model_spec
+from betting_app.core.models.registry import (
+    C0_NATIVE, apply_model_calibration as _apply_model_calibration, resolve_model_spec,
+)
 
 
-def apply_model_calibration(p_a: float, spec: Any, best_of: int = 3) -> tuple[float, float]:
-    """Apply model-specific calibration / distillation adjustment to base probability."""
-    slopes = spec.metadata.get("calibration_slopes", {}) if hasattr(spec, "metadata") else {}
-    slope = slopes.get(best_of, slopes.get(3, 1.0))
-    p_clamped = max(1e-6, min(1.0 - 1e-6, p_a))
-    if slope == 1.0 or abs(slope - 1.0) < 1e-9:
-        return p_clamped, 1.0 - p_clamped
-    l = logit(p_clamped)
-    p_adj = float(expit(slope * l))
-    p_adj = max(1e-6, min(1.0 - 1e-6, p_adj))
-    return p_adj, 1.0 - p_adj
+POLISH_TURNOVER_TAX = 0.12  # fraction of stake, AGENTS.md convention
+CANONICAL_HISTORY_RELATIVE = "data/artifacts/golgg-database-recovery-20260909/matches.json"
+
+
+def apply_model_calibration(
+    p_a: float, spec: Any, best_of: int = 3, *, allow_surrogate: bool = False
+) -> tuple[float, float]:
+    """Delegate registry calibration; research-only slopes require explicit opt-in."""
+    return _apply_model_calibration(p_a, spec, best_of, allow_surrogate=allow_surrogate)
 
 COMMON_ALIASES: dict[str, str] = {
     "c9": "cloud9",
@@ -82,7 +78,6 @@ COMMON_ALIASES: dict[str, str] = {
     "dig": "dignitas",
     "nrg": "nrg",
     "sr": "shopify rebellion",
-    "lyon": "lyon",
     "lyon gaming": "lyon",
 }
 
@@ -90,14 +85,10 @@ COMMON_ALIASES: dict[str, str] = {
 def load_raw_matches(history_path: Path | str | None = None) -> list[dict]:
     if history_path is None:
         env_path = os.environ.get("C0_RAW_HISTORY_PATH")
-        ext_default = PROJECT_ROOT / "data/04_feature/live_c0_cache/extended_matches.json"
         if env_path:
             history_path = Path(env_path)
-        elif ext_default.is_file():
-            history_path = ext_default
-            os.environ["C0_RAW_HISTORY_PATH"] = str(ext_default.resolve())
         else:
-            history_path = PROJECT_ROOT / "data/artifacts/golgg-database-recovery-20260909/matches.json"
+            history_path = PROJECT_ROOT / CANONICAL_HISTORY_RELATIVE
     else:
         history_path = Path(history_path)
     if not history_path.is_file():
@@ -174,6 +165,39 @@ def resolve_team(query: str, raw_matches: list[dict]) -> dict:
     }
 
 
+def describe_served_model(spec: Any) -> list[str]:
+    """Header lines stating what artifact actually produces the probability for ``spec``."""
+    metadata = getattr(spec, "metadata", {}) or {}
+    served_as = metadata.get("served_as")
+    if served_as is None:
+        return [
+            f"Spec:         {spec.name} {spec.version}",
+            f"Architecture: {spec.description}",
+        ]
+    return [
+        f"Requested spec: {spec.name} {spec.version} (research label; operational={metadata.get('operational')})",
+        f"Served as:      {served_as}",
+        "Note: the probability below is the legacy 17-token C0 with a BO logit-slope surrogate, "
+        "NOT an 18/20-token model.",
+        f"Reason:         {metadata.get('unavailable_reason', 'n/a')}",
+    ]
+
+
+def _prepare_live_history(cutoff: str | None) -> Path:
+    """Refresh and return live extended history for the exclusive cutoff day."""
+    from betting_app.core.db import get_session
+    from betting_app.services.live_native_feature_builder import LiveNativeFeatureBuilder
+
+    with get_session() as session:
+        builder = LiveNativeFeatureBuilder(session=session)
+        ext_path, ext_digest, ext_audit = builder.prepare_extended_history(cutoff_date=cutoff)
+    os.environ["C0_RAW_HISTORY_PATH"] = str(ext_path)
+    print(f"  Live extended history active: {ext_path} (SHA-256: {ext_digest[:16]}...)")
+    print("  (DB-backed history refreshed from PostgreSQL for this invocation.)")
+    print(f"  Cutoff (exclusive): {ext_audit.get('cutoff_enforced')}, total series: {ext_audit.get('total_series_count')}, new from DB: {ext_audit.get('db_new_count')}")
+    return ext_path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Fast pre-match prediction for any League of Legends matchup using C0 Model Family & Hybrid-50.",
@@ -184,17 +208,20 @@ def main() -> int:
     parser.add_argument(
         "--model",
         type=str,
-        default="C0-D-20T",
-        help="Model specification to evaluate (e.g. 'C0-D-20T', 'C0-D', 'C0-Slim', 'C0-Mini', 'C0'; default: 'C0-D-20T')",
+        default="C0",
+        help="Native C0 by default. Research C0-family labels require --allow-research-surrogate; use c0_distilled_replay for genuine saved 18/20-token inference.",
     )
+    parser.add_argument("--allow-research-surrogate", action="store_true", help="Explicitly allow legacy C0-family BO-slope surrogates; these are not genuine distilled-model inference")
     parser.add_argument("--odds1", type=float, default=None, help="Decimal odds for Team 1 (e.g. 2.10)")
     parser.add_argument("--odds2", type=float, default=None, help="Decimal odds for Team 2 (e.g. 1.70)")
     parser.add_argument("--all-bo", action="store_true", help="Print win probabilities for BO1, BO3, and BO5")
     parser.add_argument("--history-path", type=Path, default=None, help="Explicit path to GOL.GG history JSON")
-    parser.add_argument("--live-db", action="store_true", help="Assemble extended history dynamically from PostgreSQL GOL.GG matches")
-    parser.add_argument("--no-cross-region-norm", action="store_true", help="Disable automatic cross-regional input tensor normalization")
+    parser.add_argument("--live-db", action="store_true", help="Assemble extended history from PostgreSQL GOL.GG matches released strictly before --cutoff; refresh DB input on every invocation")
+    parser.add_argument("--cutoff", type=str, default=None, help="With --live-db: EXCLUSIVE prediction day YYYY-MM-DD; only series with effective release day strictly before it are used (default: today, UTC)")
+    parser.add_argument("--allow-baseline-fallback", action="store_true", help="With --live-db: if the live history cannot be built, run on the frozen canonical baseline instead of exiting with an error")
+    parser.add_argument("--research-cross-region-norm", action="store_true", help="Opt into unverified cached regional input normalization for research; off by default and not causal confirmation")
     parser.add_argument("--show-region-ranks", action="store_true", help="Display live automatic regional offsets and pyramid drift table")
-    parser.add_argument("--simulate-worlds", action="store_true", help="Run full Worlds 2026 Swiss + Knockout simulation using C0-D (Norm)")
+    parser.add_argument("--simulate-worlds", action="store_true", help="Run the legacy research Worlds scenario; not certified tournament probabilities")
     parser.add_argument("--n-sims", type=int, default=25000, help="Number of Monte Carlo Worlds simulations (default: 25000)")
     args = parser.parse_args()
 
@@ -202,6 +229,16 @@ def main() -> int:
         model_spec = resolve_model_spec(args.model)
     except KeyError as exc:
         parser.error(str(exc))
+    if model_spec is not C0_NATIVE and not (
+        args.allow_research_surrogate
+        and model_spec.metadata.get("operational") is False
+        and model_spec.metadata.get("calibration_slopes_source")
+    ):
+        parser.error(
+            "This named-matchup path serves native C0 only. C0-family research slopes "
+            "require --allow-research-surrogate; genuine saved C0-D inference is "
+            "available through python -m src.models.c0_distilled_replay."
+        )
 
     if args.show_region_ranks:
         from src.models.cross_region_input_normalizer import (
@@ -275,26 +312,28 @@ def main() -> int:
     if not args.team1 or not args.team2:
         parser.error("team1 and team2 are required unless --show-region-ranks is specified.")
     print("=" * 78)
-    print(f"LoL-Breaker Matchup Predictor ({model_spec.effective_short_code} | {model_spec.effective_display_name})")
-    print(f"  Version:      {model_spec.version}")
-    print(f"  Architecture: {model_spec.description}")
+    print(f"LoL-Breaker Matchup Predictor (requested model code: {args.model})")
+    for line in describe_served_model(model_spec):
+        print(f"  {line}")
     print("=" * 78)
 
     history_file: Path | None = args.history_path
     if args.live_db:
         print("Assembling dynamic extended history from PostgreSQL GOL.GG tables...")
-        from betting_app.core.db import get_session
-        from betting_app.services.live_native_feature_builder import LiveNativeFeatureBuilder
         try:
-            with get_session() as session:
-                builder = LiveNativeFeatureBuilder(session=session)
-                ext_path, ext_digest, ext_audit = builder.prepare_extended_history()
-                history_file = ext_path
-                os.environ["C0_RAW_HISTORY_PATH"] = str(ext_path)
-                print(f"  Live extended history active: {ext_path} (SHA-256: {ext_digest[:16]}...)")
-                print(f"  Total series: {ext_audit.get('total_series_count')}, New from DB: {ext_audit.get('db_new_count')}")
+            history_file = _prepare_live_history(args.cutoff)
         except Exception as exc:
-            print(f"  Warning: Live DB extraction failed ({exc}); falling back to canonical baseline history.")
+            if not args.allow_baseline_fallback:
+                print(
+                    f"ERROR: live history build failed ({exc}). Not falling back to the canonical "
+                    "baseline; pass --allow-baseline-fallback to run on frozen history explicitly.",
+                    file=sys.stderr,
+                )
+                return 2
+            history_file = PROJECT_ROOT / CANONICAL_HISTORY_RELATIVE
+            os.environ.pop("C0_RAW_HISTORY_PATH", None)
+            print(f"  WARNING: live history build failed ({exc}); running on the FROZEN canonical baseline "
+                  f"({history_file}) because --allow-baseline-fallback was given. Results are NOT live.")
     elif history_file is not None:
         os.environ["C0_RAW_HISTORY_PATH"] = str(history_file.resolve())
 
@@ -312,15 +351,15 @@ def main() -> int:
     t2_info = resolve_team(args.team2, raw_matches)
     fam_a = resolve_side_domestic_family(t1_info["id"], t1_info["player_ids"], team_fam_map, player_fam_map)
     fam_b = resolve_side_domestic_family(t2_info["id"], t2_info["player_ids"], team_fam_map, player_fam_map)
-    off_a = get_region_offset(fam_a)
-    off_b = get_region_offset(fam_b)
+    off_a = get_region_offset(fam_a) if args.research_cross_region_norm else 0.0
+    off_b = get_region_offset(fam_b) if args.research_cross_region_norm else 0.0
 
     print(f"\nResolved Teams:")
     print(f"  Team A: {t1_info['name']} [{fam_a}] (ID: {t1_info['id']}, Last Match: {t1_info['last_played_date']})")
     print(f"          Roster: {', '.join(f'{r}: {n}' for r, n in t1_info['players'].items())}")
     print(f"  Team B: {t2_info['name']} [{fam_b}] (ID: {t2_info['id']}, Last Match: {t2_info['last_played_date']})")
     print(f"          Roster: {', '.join(f'{r}: {n}' for r, n in t2_info['players'].items())}")
-    if not args.no_cross_region_norm and abs(off_a - off_b) > 1.0:
+    if args.research_cross_region_norm and abs(off_a - off_b) > 1.0:
         print(f"  Cross-Region Input Normalization: ACTIVE ({fam_a} {off_a:+.0f} vs {fam_b} {off_b:+.0f} Glicko eq.)")
 
     from datetime import timedelta
@@ -343,15 +382,21 @@ def main() -> int:
             "competition_context": "Worlds",
             "mode": "full",
         }
-        if not args.no_cross_region_norm and abs(off_a - off_b) > 1.0:
+        if args.research_cross_region_norm and abs(off_a - off_b) > 1.0:
             ev_res = client.predict_evidence(c0_req)
             norm_snap = normalize_encoded_snapshot(ev_res.encoded_snapshot, off_a, off_b)
             raw_pred = predict_c0({"c0_request": c0_req, "c0_snapshot": norm_snap, "canonical": {"id": None}})
-            raw_unnorm_pa, _ = apply_model_calibration(ev_res.prediction.prob_a, model_spec, best_of=bo)
+            raw_unnorm_pa, _ = apply_model_calibration(
+                ev_res.prediction.prob_a, model_spec, best_of=bo,
+                allow_surrogate=args.allow_research_surrogate,
+            )
         else:
             raw_pred = predict_c0({"c0_request": c0_req, "canonical": {"id": None}})
             raw_unnorm_pa = None
-        pa, pb = apply_model_calibration(raw_pred.prob_a, model_spec, best_of=bo)
+        pa, pb = apply_model_calibration(
+            raw_pred.prob_a, model_spec, best_of=bo,
+            allow_surrogate=args.allow_research_surrogate,
+        )
         predictions[bo] = {"prob_a": pa, "prob_b": pb, "raw": raw_pred, "unnorm_prob_a": raw_unnorm_pa}
 
     primary_bo = args.bo
@@ -359,7 +404,13 @@ def main() -> int:
     p_model_a = primary_pred["prob_a"]
     p_model_b = primary_pred["prob_b"]
 
-    print(f"\n--- Model Forecast ({model_spec.effective_short_code} - BO{primary_bo} Series) ---")
+    served_name = getattr(primary_pred["raw"], "model_name", None)
+    served_version = getattr(primary_pred["raw"], "model_version", None)
+    served_feature = getattr(primary_pred["raw"], "feature_version", None)
+    print(f"\n--- Model Forecast (requested {args.model} - BO{primary_bo} Series) ---")
+    if model_spec.metadata.get("operational") is False:
+        print("  DISCLOSURE: research-only BO-slope surrogate applied to legacy 17-token C0; this is not distilled-model inference.")
+    print(f"  Probability produced by artifact: {served_name} {served_version} (feature_version={served_feature})")
     print(f"  {t1_info['name']:<20} Win Prob: {p_model_a*100:6.2f}%  (Fair Decimal Odds: {1.0/p_model_a:5.2f})")
     print(f"  {t2_info['name']:<20} Win Prob: {p_model_b*100:6.2f}%  (Fair Decimal Odds: {1.0/p_model_b:5.2f})")
     if primary_pred.get("unnorm_prob_a") is not None:
@@ -381,12 +432,14 @@ def main() -> int:
             edge_str = f"{favorite} +{abs(pa - pb)*100:.2f} pp"
             print(f"| Best-of-{bo} | {t1_info['name']}: {pa*100:.2f}% | {t2_info['name']}: {pb*100:.2f}% | {edge_str} |")
 
-    # If bookmaker odds are provided, compute Shin de-vig, Hybrid-50, and 12% Polish tax EV
+    # Informational EV arithmetic only. This is NOT the application betting policy: it applies
+    # none of the app's gates (thesis, BO1, longshot, freshness, >=2-bookmaker consensus, ...).
     if args.odds1 is not None and args.odds2 is not None:
         o1, o2 = args.odds1, args.odds2
         inv1, inv2 = 1.0 / o1, 1.0 / o2
         overround = (inv1 + inv2) - 1.0
-        q1 = max(1e-6, min(1.0 - 1e-6, inv1 - overround / 2.0))
+        # Multiplicative de-vig, the method used by betting_app/services/prematch_quote_service.py.
+        q1 = max(1e-6, min(1.0 - 1e-6, inv1 / (inv1 + inv2)))
         q2 = 1.0 - q1
 
         # Hybrid-50 logit shrinkage with selected model
@@ -395,39 +448,18 @@ def main() -> int:
         p_hybrid_a = float(expit(0.50 * l_model + 0.50 * l_mkt))
         p_hybrid_b = 1.0 - p_hybrid_a
 
-        # Polish tax multiplier c = 0.88
-        tax_mult = 0.88
+        tax_mult = 1.0 - POLISH_TURNOVER_TAX
         ev_model_a = (p_model_a * tax_mult * o1) - 1.0
         ev_model_b = (p_model_b * tax_mult * o2) - 1.0
         ev_hyb_a = (p_hybrid_a * tax_mult * o1) - 1.0
         ev_hyb_b = (p_hybrid_b * tax_mult * o2) - 1.0
 
-        print(f"\n--- Market & Betting Evaluation ({model_spec.effective_short_code} + 12% Polish Turnover Tax) ---")
+        print(f"\n--- EV ESTIMATE (informational, NOT the application betting policy; {POLISH_TURNOVER_TAX*100:.0f}% Polish turnover tax) ---")
         print(f"Offered Odds:     {t1_info['name']} @ {o1:.2f}  |  {t2_info['name']} @ {o2:.2f} (Margin: {overround*100:.2f}%)")
-        print(f"De-vigged Market: {t1_info['name']} {q1*100:5.2f}%  |  {t2_info['name']} {q2*100:5.2f}%")
+        print(f"De-vigged Market (multiplicative, single quote pair): {t1_info['name']} {q1*100:5.2f}%  |  {t2_info['name']} {q2*100:5.2f}%")
         print(f"Hybrid-50 Shrink: {t1_info['name']} {p_hybrid_a*100:5.2f}%  |  {t2_info['name']} {p_hybrid_b*100:5.2f}%")
-        print(f"Pure {model_spec.effective_short_code} EV (Net): {t1_info['name']} {ev_model_a*100:+5.2f}%  |  {t2_info['name']} {ev_model_b*100:+5.2f}%")
-        print(f"Hybrid-50 EV:     {t1_info['name']} {ev_hyb_a*100:+5.2f}%  |  {t2_info['name']} {ev_hyb_b*100:+5.2f}%")
-
-        # Operational decision gates
-        divergence = abs(l_model - l_mkt)
-        div_gate_ok = divergence <= 0.85
-        best_ev = max(ev_hyb_a, ev_hyb_b)
-        best_side = t1_info['name'] if ev_hyb_a >= ev_hyb_b else t2_info['name']
-        best_odds = o1 if ev_hyb_a >= ev_hyb_b else o2
-        best_p_hyb = p_hybrid_a if ev_hyb_a >= ev_hyb_b else p_hybrid_b
-
-        # Wasserstein Robust Gate (eps = 0.025)
-        dro_ev = ((best_p_hyb - 0.025) * tax_mult * best_odds) - 1.0
-
-        print(f"\nSafety Gates Check:")
-        print(f"  Market-Divergence-Gate (|logit diff| <= 0.85): {divergence:.4f} -> {'PASS' if div_gate_ok else 'VETO'}")
-        print(f"  Wasserstein-Robust-Gate (eps = 0.025):        {dro_ev*100:+.2f}% -> {'PASS' if dro_ev > 0 else 'VETO'}")
-
-        if div_gate_ok and dro_ev > 0 and 0.05 <= best_ev <= 0.25 and best_odds <= 4.0:
-            print(f"\n>>> ADOPTED BET RECOMMENDATION: {best_side} @ {best_odds:.2f} (Net EV: {best_ev*100:+.2f}%, 1/4 Kelly, Max 150 PLN) <<<")
-        else:
-            print(f"\n>>> NO BET: Opportunity does not satisfy strict production risk gates. <<<")
+        print(f"Pure model EV (net of tax): {t1_info['name']} {ev_model_a*100:+5.2f}%  |  {t2_info['name']} {ev_model_b*100:+5.2f}%")
+        print(f"Hybrid-50 EV (net of tax):  {t1_info['name']} {ev_hyb_a*100:+5.2f}%  |  {t2_info['name']} {ev_hyb_b*100:+5.2f}%")
 
     print("\n" + "=" * 78)
     close_c0_inference_worker()

@@ -93,7 +93,29 @@ def test_build_telegram_html_format():
     assert "Gen.G vs T1" in html_text
     assert "+11.5%" in html_text
     assert "<b>2.10</b>" in html_text
-    assert "4.5% bankrolla" in html_text
+    assert "4.50 PLN" in html_text
+    assert "bankrolla" not in html_text
+    assert "EV (po podatku 12%)" in html_text
+
+
+def test_alert_stake_shows_pln_amount_and_percent_of_wallet_when_known():
+    signal = {"side": "a", "suggested_stake": 5.0, "bankroll": 250.0, "tax_rate": 0.07}
+    html_text = build_telegram_html(signal)
+    embed = build_discord_embed(signal)
+
+    assert "5.00 PLN (2.0% salda portfela)" in html_text
+    stake_field = next(f for f in embed["fields"] if f["name"] == "💵 Sugerowana Stawka")
+    assert stake_field["value"] == "`5.00 PLN (2.0% salda portfela)`"
+    assert "EV (po podatku 7%)" in html_text
+    assert "💰 EV (po podatku 7%)" in [f["name"] for f in embed["fields"]]
+
+
+def test_alert_tax_label_uses_configured_rate_when_signal_has_none(monkeypatch):
+    from betting_app.services import alert_service as alerts
+
+    monkeypatch.setattr(alerts, "load_config", lambda: SimpleNamespace(tax_rate=0.05))
+
+    assert "EV (po podatku 5%)" in build_telegram_html({"side": "a"})
 
 
 def test_get_or_create_and_update_alert_config(sqlite_session):
@@ -154,45 +176,105 @@ def test_is_alert_on_cooldown_logic(sqlite_session):
         ({"uncertainty_required": False}, 0.1088),
         ({
             "uncertainty_required": True,
+            "p_low_a": 0.41,
+            "p_low_b": 0.56,
+            "epistemic_sigma_z": 0.15,
+            "rating_disagreement": 0.0,
+            "uncertainty_basis": "measured_bounds",
+        }, 0.0824),
+        ({"uncertainty_required": True}, None),
+        # (0.40 - 0.025) * 3 * 0.88 - 1 < 0: the signal pipeline's Wasserstein DRO check
+        # quarantines it, so the alert re-qualification must too.
+        ({
+            "uncertainty_required": True,
             "p_low_a": 0.40,
             "p_low_b": 0.56,
             "epistemic_sigma_z": 0.15,
             "rating_disagreement": 0.0,
             "uncertainty_basis": "measured_bounds",
-        }, 0.056),
-        ({"uncertainty_required": True}, None),
+        }, None),
     ],
-    ids=["native_mean", "provided_bounds", "missing_required_bounds"],
+    ids=["native_mean", "provided_bounds", "missing_required_bounds", "dro_fail"],
 )
 def test_alerts_use_selected_ev_score_and_withhold_missing_bounds(monkeypatch, diagnostics, expected_ev):
+    result, db = _scan_alerts(monkeypatch, diagnostics)
+
+    if expected_ev is None:
+        assert result["dispatched"] == 0
+        assert result["alerts"] == []
+        db.add.assert_not_called()
+    else:
+        assert result["dispatched"] == 1
+        assert result["alerts"][0]["status"] == "simulated"
+        assert result["alerts"][0]["ev"] == pytest.approx(expected_ev, abs=1e-12)
+        assert json.loads(db.add.call_args.args[0].message_payload)["ev"] == pytest.approx(expected_ev)
+
+
+def test_alert_scan_uses_configured_tax_and_reports_pln_stake_with_wallet_percent(monkeypatch):
+    from betting_app.services.bankroll_service import WalletBankroll
+    from decimal import Decimal
+
+    result, db = _scan_alerts(
+        monkeypatch, {"uncertainty_required": False}, tax_rate=0.05,
+        wallet=WalletBankroll(cash=Decimal("200.00"), open_stakes=Decimal("50.00")),
+        stake_suggestion=4.0,
+    )
+
+    # 0.42 * 3.0 * (1 - 0.05) - 1; the old hard-coded 0.12 would give 0.1088
+    assert result["alerts"][0]["ev"] == pytest.approx(0.197, abs=1e-12)
+    payload = json.loads(db.add.call_args.args[0].message_payload)
+    assert payload["tax_rate"] == 0.05
+    assert payload["bankroll"] == 250.0
+
+
+def test_alert_scan_without_wallet_has_no_bankroll_percent(monkeypatch):
+    result, db = _scan_alerts(monkeypatch, {"uncertainty_required": False}, wallet=None)
+
+    assert json.loads(db.add.call_args.args[0].message_payload)["bankroll"] is None
+
+
+def _scan_alerts(monkeypatch, diagnostics, *, tax_rate=0.12, wallet=None, stake_suggestion=0.0):
     from betting_app.core.models import C0_NATIVE
     from betting_app.services import alert_service as alerts
     from betting_app.services.prematch_quote_service import (
         PrematchMarketContext, PrematchQuote, serialize_market_context,
+        serialize_focal_consensus, quotes_consensus,
     )
 
     now = datetime.now(timezone.utc)
     quote = PrematchQuote(1, 201, 4, "superbet", now - timedelta(seconds=10),
                           "Alpha", "Beta", 3.0, 2.0, None, None)
+    consensus_quotes = (
+        quote,
+        PrematchQuote(2, 201, 5, "book2", now - timedelta(seconds=11),
+                      "Alpha", "Beta", 3.0, 2.0, None, None),
+        PrematchQuote(3, 201, 6, "book3", now - timedelta(seconds=12),
+                      "Alpha", "Beta", 3.0, 2.0, None, None),
+    )
     context = PrematchMarketContext(
         201, "alpha", "beta", "LCK", "upcoming", now + timedelta(hours=8),
-        now, (quote,), 0.4, (),
+        now, consensus_quotes, quotes_consensus(consensus_quotes).prob_a, (),
     )
+    focal = quotes_consensus(consensus_quotes, exclude_bookmaker_id=4)
     row = dict(
         signal_id=401, prediction_id=301, prediction_match_id=201,
         canonical_prediction_id=301, canonical_match_id=201,
         bookmaker_id=4, odds_snapshot_id=1, side="a", odds=3.0,
         model_name=C0_NATIVE.name, model_version=C0_NATIVE.version,
-        prob_a=0.42, prob_b=0.58, model_prob=0.42, market_prob=context.prob_a,
+        prob_a=0.42, prob_b=0.58, model_prob=0.42, market_prob=focal.prob_a,
         ev=9.0, status="new", evaluated_at=now, prediction_status="active",
+        stake_suggestion=stake_suggestion,
         predicted_at=now - timedelta(seconds=20),
         data_cutoff_at=now - timedelta(minutes=1),
         start_time_normalized=context.start_at.isoformat(), league="LCK",
         team_a_name="Alpha", team_b_name="Beta", bookmaker_name="superbet",
         diagnostics_json=diagnostics,
-        market_context_json=serialize_market_context(
-            context, model_name=C0_NATIVE.name, model_version=C0_NATIVE.version,
-        ),
+        market_context_json={
+            **serialize_market_context(
+                context, model_name=C0_NATIVE.name, model_version=C0_NATIVE.version,
+            ),
+            "focal_consensus": serialize_focal_consensus(focal),
+        },
     )
     cfg = SimpleNamespace(
         is_enabled=True, min_ev=0.05, min_odds=1.25, max_odds=12.0,
@@ -204,22 +286,15 @@ def test_alerts_use_selected_ev_score_and_withhold_missing_bounds(monkeypatch, d
     monkeypatch.setattr(alerts, "query_df", lambda *args: [row])
     monkeypatch.setattr(alerts, "load_prematch_quotes", lambda *args, **kwargs: {201: context})
     monkeypatch.setattr(alerts, "is_alert_on_cooldown", lambda *args: False)
+    monkeypatch.setattr(alerts, "load_config", lambda: SimpleNamespace(tax_rate=tax_rate))
+    monkeypatch.setattr(alerts, "wallet_bankroll", lambda *args: wallet)
     with patch.object(alerts, "send_discord_notification") as discord, patch.object(
         alerts, "send_telegram_notification"
     ) as telegram:
         result = alerts.scan_and_dispatch_ev_alerts(db)
         discord.assert_not_called()
         telegram.assert_not_called()
-
-    if expected_ev is None:
-        assert result["dispatched"] == 0
-        assert result["alerts"] == []
-        db.add.assert_not_called()
-    else:
-        assert result["dispatched"] == 1
-        assert result["alerts"][0]["status"] == "simulated"
-        assert result["alerts"][0]["ev"] == pytest.approx(expected_ev, abs=1e-12)
-        assert json.loads(db.add.call_args.args[0].message_payload)["ev"] == pytest.approx(expected_ev)
+    return result, db
 
 
 def test_send_discord_notification_mock():

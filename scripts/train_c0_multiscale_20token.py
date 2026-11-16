@@ -15,6 +15,7 @@ Outputs saved to:
 """
 from __future__ import annotations
 
+import argparse
 from collections import defaultdict
 import json
 import math
@@ -40,6 +41,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.analysis.bootstrap import monthly_block_bootstrap_delta
 from src.analysis.metrics import calculate_ece
+from src.analysis.replacement_guards import (
+    DEFAULT_N_VARIANTS_SCORED,
+    assert_chronological_order,
+    bonferroni_delta_interval,
+    evaluate_replacement_guards,
+    standard_slice_masks,
+)
 from src.models import a0_capacity_experiment as cap_exp
 from src.models import a0_capacity_runner as runner
 from src.models import a0_data_focus as data_focus
@@ -56,6 +64,7 @@ from scripts.train_c0_year_anchor_distilled import (
     evaluate_probability_stream,
     fit_beta_calibration_and_assemble,
     resolve_research_root,
+    OUTPUT_PARQUET_PATH as YEAR_ANCHOR_PREDICTIONS_PATH,
 )
 
 OUTPUT_JSON_PATH = REPORT_DIR / "multiscale_20token_distilled.json"
@@ -84,14 +93,25 @@ def _summarize_window_maps(maps_list: list[tuple[int, np.ndarray]], cur_ord: int
     return out
 
 
-def build_or_load_multiscale_banks(research_root: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Build or load strictly causal 90d (3-month) and 180d (half-year) anchor banks."""
+def build_or_load_multiscale_banks(
+    research_root: Path, expected_ids: pd.Series | np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build/load causal 90d and 180d banks with metadata row identity preserved."""
+    bank_dir = research_root / "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank"
+    meta = pd.read_parquet(bank_dir / "metadata.parquet")
+    assert_chronological_order(meta["date"], label="release_corrected_bank metadata.parquet dates")
+    if "golgg_match_id" not in meta:
+        raise ValueError("release_corrected_bank metadata lacks golgg_match_id")
+    if expected_ids is not None and not np.array_equal(
+        np.asarray(expected_ids).astype(str), meta["golgg_match_id"].astype(str).to_numpy()
+    ):
+        raise ValueError("release_corrected_bank metadata row IDs do not match training frame order")
+
     BANK_DIR.mkdir(parents=True, exist_ok=True)
     h90_path = BANK_DIR / "quarter_90d_history.npy"
     m90_path = BANK_DIR / "quarter_90d_mask.npy"
     h180_path = BANK_DIR / "half_year_180d_history.npy"
     m180_path = BANK_DIR / "half_year_180d_mask.npy"
-
     if all(p.is_file() for p in (h90_path, m90_path, h180_path, m180_path)):
         print("Loading cached 90d and 180d anchor banks...")
         return (
@@ -103,8 +123,6 @@ def build_or_load_multiscale_banks(research_root: Path) -> tuple[np.ndarray, np.
 
     print("Building strictly causal 90-day and 180-day multi-scale anchor banks across 40,636 series...")
     t0 = time.monotonic()
-    bank_dir = research_root / "a0-phase-walkforward-20260914/data/04_feature/release_corrected_bank"
-    meta = pd.read_parquet(bank_dir / "metadata.parquet")
     hist = np.load(bank_dir / "history.npy", mmap_mode="r")
     mask = np.load(bank_dir / "mask.npy", mmap_mode="r")
     champs = np.load(bank_dir / "champions.npy", mmap_mode="r")
@@ -305,7 +323,36 @@ def train_or_load_20token_model(
     return snapshots[epochs]
 
 
-def main() -> int:
+def _align_predictions_by_id(
+    predictions: pd.DataFrame, ids: pd.Series, y: np.ndarray, label: str
+) -> pd.DataFrame:
+    """Reindex a saved predictions frame to ``ids`` order by ``golgg_match_id`` (never by position)."""
+    if "golgg_match_id" not in predictions.columns:
+        raise ValueError(f"{label} has no golgg_match_id column; cannot align by ID")
+    keyed = predictions.assign(golgg_match_id=predictions["golgg_match_id"].astype(str))
+    if keyed["golgg_match_id"].duplicated().any():
+        raise ValueError(f"{label} has duplicate golgg_match_id values")
+    aligned = keyed.set_index("golgg_match_id").reindex(ids.to_numpy())
+    missing = int(aligned["y"].isna().sum())
+    if missing:
+        raise ValueError(f"{label} is missing {missing} of {len(ids)} assess-frame match IDs")
+    if not np.array_equal(aligned["y"].to_numpy(dtype=int), y):
+        raise ValueError(f"{label} outcomes disagree with the assess frame after ID alignment")
+    return aligned.reset_index()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--n-variants-scored",
+        type=int,
+        default=DEFAULT_N_VARIANTS_SCORED,
+        help="Number of model variants scored on the 2026 ASSESS rows; sets the Bonferroni level "
+        "of the global primary interval (default: %(default)s).",
+    )
+    args = parser.parse_args(argv)
+    if args.n_variants_scored < 1:
+        parser.error("--n-variants-scored must be >= 1")
     t_start = time.monotonic()
     print("=" * 80)
     print("20-TOKEN MULTI-SCALE HORIZON ATTENTION ARCHITECTURE (90d + 180d + 365d + 16m)")
@@ -331,7 +378,25 @@ def main() -> int:
 
     y_hist = np.load(BANK_DIR / "year_anchor_history.npy", mmap_mode="r")
     y_mask = np.load(BANK_DIR / "year_anchor_mask.npy", mmap_mode="r")
-    h180, m180, h90, m90 = build_or_load_multiscale_banks(research_root)
+    h180, m180, h90, m90 = build_or_load_multiscale_banks(
+        research_root, frame["golgg_match_id"]
+    )
+    assert_chronological_order(frame["date"], label="training frame dates")
+    n = len(frame)
+    shapes = {
+        "frame": n, "year_history": y_hist.shape[0], "year_mask": y_mask.shape[0],
+        "bank180": h180.shape[0], "mask180": m180.shape[0],
+        "bank90": h90.shape[0], "mask90": m90.shape[0],
+        "history": data["history"]["history"].shape[0],
+        "history_mask": data["history"]["mask"].shape[0],
+    }
+    if any(count != n for count in shapes.values()):
+        raise ValueError(f"Row count mismatch before history concatenation: {shapes}")
+    from src.models.c0_distilled_replay import validate_teacher_probabilities
+    teacher_probs_B = validate_teacher_probabilities(
+        np.load(REPORT_DIR / "teacher_probs_B.npy"),
+        frame.iloc[train_ix]["golgg_match_id"].astype(str).to_numpy(),
+    )
 
     h_19 = np.concatenate([y_hist, h180, h90, data["history"]["history"]], axis=3)
     m_19 = np.concatenate([y_mask, m180, m90, data["history"]["mask"]], axis=3)
@@ -359,14 +424,27 @@ def main() -> int:
     assert abs(p_cold - 0.5) < 1e-6, f"Cold start failed: {p_cold}"
     print(f"Verified 20-Token Invariants: params/seed=6702, cold_start={p_cold:.6f}")
 
-    teacher_probs_B = np.load(REPORT_DIR / "teacher_probs_B.npy")
-    p1 = pd.read_parquet(REPORT_DIR / "track1_predictions.parquet")
-    p_18t = pd.read_parquet(REPORT_DIR / "year_anchor_distilled.parquet")
-    p_c0_full = p1["p_c0__full"].to_numpy(dtype=np.float64)
-    p_c0d_18t = p_18t["p_c0_d_year_core__full"].to_numpy(dtype=np.float64)
 
     assess_frame = frame.iloc[assess_ix].reset_index(drop=True)
+    assess_ids = assess_frame["golgg_match_id"].astype(str)
     y_assess = assess_frame["y"].to_numpy(dtype=int)
+    p1 = _align_predictions_by_id(
+        pd.read_parquet(REPORT_DIR / "track1_predictions.parquet"), assess_ids, y_assess, "track1_predictions"
+    )
+    p_18t = _align_predictions_by_id(
+        pd.read_parquet(YEAR_ANCHOR_PREDICTIONS_PATH), assess_ids, y_assess, "year_anchor_distilled_predictions"
+    )
+    p_c0_full = p1["p_c0__full"].to_numpy(dtype=np.float64)
+    p_c0d_18t = p_18t["p_c0_d_year_core__full"].to_numpy(dtype=np.float64)
+    a0_source = next(
+        (table for table in (p1, p_18t) if any(col in table for col in ("p_a0__full", "p_full"))),
+        None,
+    )
+    if a0_source is None:
+        raise ValueError("Aligned saved predictions contain no A0 reference probability")
+    a0_column = next(col for col in ("p_a0__full", "p_full") if col in a0_source)
+    p_a0_full = a0_source[a0_column].to_numpy(dtype=np.float64)
+
     y_cal = frame.iloc[cal_ix]["y"].to_numpy(dtype=int)
     dates_assess = assess_frame["date"].to_numpy(dtype=str)
 
@@ -403,17 +481,81 @@ def main() -> int:
     print(f"17-Token Legacy C0  : LL = {compute_unclipped_log_loss(y_assess, p_c0_full):.6f}")
     print(f"18-Token C0-D (365d): LL = {compute_unclipped_log_loss(y_assess, p_c0d_18t):.6f}")
     print(f"20-Token C0-D-20T   : LL = {eval_20t['unclipped_log_loss']:.6f} | Brier = {eval_20t['brier_score']:.6f} | ECE = {eval_20t['ece_10_bins']*100:.2f}% | Tails = {eval_20t['tail_count_ll_ge_2_5']}")
-    print(f"  ΔLL vs 17T C0     : {eval_20t['bootstrap_vs_c0']['observed_delta']:+.6f} (95% CI: [{eval_20t['bootstrap_vs_c0']['ci95_lower']:+.6f}, {eval_20t['bootstrap_vs_c0']['ci95_upper']:+.6f}])")
-    print(f"  ΔLL vs 18T C0-D   : {eval_20t['bootstrap_vs_c0_d_core']['observed_delta']:+.6f} (95% CI: [{eval_20t['bootstrap_vs_c0_d_core']['ci95_lower']:+.6f}, {eval_20t['bootstrap_vs_c0_d_core']['ci95_upper']:+.6f}])")
+    print(f"  ΔLL vs 17T C0     : {eval_20t['bootstrap_vs_c0']['observed_delta']:+.6f} (unadjusted 95% CI: [{eval_20t['bootstrap_vs_c0']['ci95_lower']:+.6f}, {eval_20t['bootstrap_vs_c0']['ci95_upper']:+.6f}])")
+    print(f"  ΔLL vs 18T C0-D   : {eval_20t['bootstrap_vs_c0_d_core']['observed_delta']:+.6f} (unadjusted 95% CI: [{eval_20t['bootstrap_vs_c0_d_core']['ci95_lower']:+.6f}, {eval_20t['bootstrap_vs_c0_d_core']['ci95_upper']:+.6f}])")
     print(f"20-Token C0-Slim-20T: LL = {eval_slim_20t['unclipped_log_loss']:.6f} | Brier = {eval_slim_20t['brier_score']:.6f} | ECE = {eval_slim_20t['ece_10_bins']*100:.2f}% | Tails = {eval_slim_20t['tail_count_ll_ge_2_5']}")
     for s_name, s_val in eval_20t["slices"].items():
         print(f"  Slice {s_name:<15s}: {s_val}")
+
+    # Replacement guards: 6 subgroup non-inferiority checks, candidate = 20T ensemble.
+    slice_masks = standard_slice_masks(assess_frame)
+    replacement_guards = {
+        "candidate": "p_c0_d_20t_core__full",
+        "n_boot": BOOTSTRAP_DRAWS,
+        "references": {},
+    }
+    for ref_name, ref_p in (
+        ("a0_reference", p_a0_full),
+        ("c0_d_18t_core", p_c0d_18t),
+        ("c0_legacy_p_c0_full", p_c0_full),
+    ):
+        replacement_guards["references"][ref_name] = evaluate_replacement_guards(
+            y_assess, p_20t_full, ref_p, assess_frame, slice_masks,
+            n_boot=BOOTSTRAP_DRAWS, seed=BOOTSTRAP_SEED,
+        )
+        replacement_guards["references"][f"c0_slim_20t_vs_{ref_name}"] = evaluate_replacement_guards(
+            y_assess, p_slim_20t_full, ref_p, assess_frame, slice_masks,
+            n_boot=BOOTSTRAP_DRAWS, seed=BOOTSTRAP_SEED,
+        )
+
+    # Multiplicity: n_variants_scored variants were scored on these same rows, so the
+    # global primary interval uses a Bonferroni level over that count.
+    multiplicity = {
+        "n_variants_scored": args.n_variants_scored,
+        "bonferroni_alpha": 0.05,
+        "primary_intervals_bonferroni": {
+            f"{candidate}_vs_{reference}": bonferroni_delta_interval(
+                y_assess, candidate_p, reference_p, assess_frame,
+                n_comparisons=args.n_variants_scored, n_boot=BOOTSTRAP_DRAWS, seed=BOOTSTRAP_SEED,
+            )
+            for candidate, candidate_p in (
+                ("c0_d_20t_core", p_20t_full),
+                ("c0_slim_20t", p_slim_20t_full),
+            )
+            for reference, reference_p in (
+                ("a0_reference", p_a0_full),
+                ("c0_d_18t_core", p_c0d_18t),
+                ("c0_legacy_p_c0_full", p_c0_full),
+            )
+        },
+        "development_exposure": (
+            "All 2026 data, including the N=3,103 ASSESS rows, are development-exposed: "
+            "architecture, hyperparameter and variant selection saw them. These results are "
+            "not a clean holdout."
+        ),
+    }
+
+    print("\n=== REPLACEMENT GUARDS (computed by evaluate_replacement_guards; margin 0.005) ===")
+    for ref_name, guard_result in replacement_guards["references"].items():
+        print(f"  vs {ref_name}: overall = {guard_result['overall_status']}")
+        for g_name, g in guard_result["guards"].items():
+            ci_upper = "n/a" if g["ci_upper"] is None else f"{g['ci_upper']:+.6f}"
+            delta_ll = "n/a" if g["delta_ll"] is None else f"{g['delta_ll']:+.6f}"
+            print(f"    {g_name:<15s} n={g['n']:<5d} blocks={g['n_blocks']:<3d} dLL={delta_ll} upper={ci_upper} -> {g['status']}")
+    for name, interval in multiplicity["primary_intervals_bonferroni"].items():
+        print(
+            f"  Bonferroni({args.n_variants_scored} variants, {interval['confidence']:.4%}) {name}: "
+            f"dLL={interval['delta_match_weighted']:+.6f} [{interval['ci_lower']:+.6f}, {interval['ci_upper']:+.6f}]"
+        )
+
     out_payload = {
         "experiment": "c0_20_token_multiscale_distilled",
         "elapsed_seconds": time.monotonic() - t_start,
         "c0_d_20t_core": eval_20t,
         "c0_slim_20t": eval_slim_20t,
         "calibration": cal_summary,
+        "replacement_guards": replacement_guards,
+        "multiplicity": multiplicity,
     }
     OUTPUT_JSON_PATH.write_text(json.dumps(out_payload, indent=2), encoding="utf-8")
     out_df = p_18t.copy()

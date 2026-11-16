@@ -160,6 +160,17 @@ def test_c0_cache_requires_matching_inputs_and_freshness(tmp_path, monkeypatch):
     assert cache.get_cached_simulation(
         "fresh", expected_input_fingerprint="roster-artifact-origin-a",
     ) is not None
+    pre_regional = json.loads(cache.get_cache_file("fresh").read_text())
+    pre_regional["probability_model_version"] = "c0-native-2026-w32-e12-v1"
+    old_provenance = pre_regional["depths"]["10000"]["provenance"]
+    old_provenance["probability_model_version"] = "c0-native-2026-w32-e12-v1"
+    pre_regional["source_identity_fingerprints"]["10000"] = (
+        cache._source_identity_fingerprint(old_provenance)
+    )
+    cache.get_cache_file("pre-regional").write_text(json.dumps(pre_regional))
+    assert cache.get_cached_simulation(
+        "pre-regional", expected_input_fingerprint="roster-artifact-origin-a",
+    ) is None
     assert cache.get_cached_simulation(
         "fresh", expected_input_fingerprint="roster-artifact-origin-b",
     ) is None

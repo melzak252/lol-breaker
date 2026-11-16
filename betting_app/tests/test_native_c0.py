@@ -13,6 +13,116 @@ from betting_app.core.models.native_c0 import (
 )
 
 
+def test_serving_source_contract_rejects_tampered_version_and_hash(tmp_path) -> None:
+    import json
+
+    config, _, _ = native_c0.load_serving_config()
+    config_path = tmp_path / "serving.json"
+    config["source_contract_version"] = "native-c0-serving-source-v1"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(ValueError, match="source-contract version"):
+        native_c0.load_serving_config(config_path)
+
+    config, _, _ = native_c0.load_serving_config()
+    config["feature_replay_sha256"] = "0" * 64
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(ValueError, match="feature replay source"):
+        native_c0.load_serving_config(config_path)
+
+
+def test_serving_config_rejects_noncanonical_raw_history_path(tmp_path) -> None:
+    import json
+
+    config, _, _ = native_c0.load_serving_config()
+    config["raw_history_path"] = "data/other/matches.json"
+    config_path = tmp_path / "serving.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(ValueError, match="raw_history_path"):
+        native_c0.load_serving_config(config_path)
+
+
+
+
+def test_client_identity_schema_tracks_configured_source_contract(monkeypatch) -> None:
+    from betting_app.services import c0_inference
+
+    config, config_path, config_sha256 = native_c0.load_serving_config()
+    identity = {
+        "name": native_c0.MODEL_NAME,
+        "version": native_c0.MODEL_VERSION,
+        "family": native_c0.MODEL_FAMILY,
+        "feature_version": native_c0.FEATURE_VERSION,
+        "weights_model_version": native_c0.WEIGHTS_MODEL_VERSION,
+        "weights_feature_version": native_c0.WEIGHTS_FEATURE_VERSION,
+        "regional_default_enabled": True,
+        "regional_adjustment_version": native_c0.REGIONAL_ADJUSTMENT_VERSION,
+        "has_uncertainty": False,
+        "run_id": "c0d_repro_20261021_01",
+        "variant": "20t",
+        "artifact_path": str(native_c0.PROJECT_ROOT / native_c0._FRESH_MODEL_ROOT_RELATIVE),
+        "execution_sha256": "e" * 64,
+        "completion_sha256": native_c0._COMPLETION_SHA256,
+        "artifact_hashes": {
+            "bundle_manifest.json": native_c0._FRESH_BUNDLE_MANIFEST_SHA256,
+            "calibration.json": native_c0._FRESH_CALIBRATION_SHA256,
+            **{
+                f"seed_{seed}/checkpoint_epoch16.pt": digest
+                for seed, digest in native_c0._FRESH_CHECKPOINT_SHA256.items()
+            },
+        },
+        "training_source_hashes": {"source": "b" * 64},
+        "training_source_provenance": "fresh_execution_binding_with_original_shared_expert",
+        "fresh_candidate": "20t",
+        "fresh_protocol_path": str(native_c0.PROJECT_ROOT / config["fresh_protocol_path"]),
+        "fresh_bundle_manifest_sha256": native_c0._FRESH_BUNDLE_MANIFEST_SHA256,
+        "fresh_checkpoint_hashes": native_c0._FRESH_CHECKPOINT_SHA256,
+        "fresh_calibration_sha256": native_c0._FRESH_CALIBRATION_SHA256,
+        "shared_expert_sha256": native_c0._FRESH_SHARED_SHA256,
+        "reference_calibration_sha256": native_c0._FRESH_REFERENCE_CALIBRATION_SHA256,
+        "serving_source_hashes": {
+            "project:src/analysis/ev_asof_replay.py": config["feature_replay_sha256"],
+        },
+        "raw_feature_replay_source": {
+            "implementation_path": "/replay",
+            "implementation_sha256": config["feature_replay_sha256"],
+            "feature_archive_path": "/archive",
+        },
+        "canonical_raw_history_source": {
+            "path": "/history",
+            "sha256": config["raw_history_sha256"],
+            "source_kind": config["raw_history_source_kind"],
+        },
+        "serving_config_path": str(config_path),
+        "serving_config_sha256": config_sha256,
+        "scope": "DEVELOPMENT_ONLY",
+        "source_contract_version": config["source_contract_version"],
+        "forward_status": config["forward_status"],
+    }
+    monkeypatch.setattr(
+        c0_inference, "load_serving_config",
+        lambda: (config, config_path, config_sha256),
+    )
+    assert c0_inference._validate_identity(identity) == identity
+    for field, value in (
+        ("source_contract_version", "native-c0-serving-source-v1"),
+        ("serving_config_sha256", "0" * 64),
+        ("version", native_c0.WEIGHTS_MODEL_VERSION),
+        ("feature_version", native_c0.WEIGHTS_FEATURE_VERSION),
+        ("regional_default_enabled", False),
+        ("regional_adjustment_version", "unverified-regional-law"),
+    ):
+        altered = deepcopy(identity)
+        altered[field] = value
+        with pytest.raises(c0_inference.C0InferenceError):
+            c0_inference._validate_identity(altered)
+
+    altered = deepcopy(identity)
+    altered["serving_source_hashes"] = {}
+    with pytest.raises(c0_inference.C0InferenceError):
+        c0_inference._validate_identity(altered)
+
+
+
 DECISION = "2026-10-02T12:00:00+00:00"
 ROSTER_A = ["a1", "a2", "a3", "a4", "a5"]
 ROSTER_B = ["b1", "b2", "b3", "b4", "b5"]
@@ -45,8 +155,8 @@ def _snapshot() -> dict:
         "gates": np.arange(2 * 2, dtype=np.float32).reshape(2, 2),
     }
     hist = {
-        "history": np.arange(2 * 5 * 16 * 33, dtype=np.float16).reshape(2, 5, 16, 33),
-        "mask": np.arange(2 * 5 * 16, dtype=np.uint8).reshape(2, 5, 16) % 2,
+        "history": np.arange(2 * 5 * 19 * 33, dtype=np.float32).reshape(2, 5, 19, 33),
+        "mask": np.arange(2 * 5 * 19, dtype=np.uint8).reshape(2, 5, 19) % 2,
         "champions": np.arange(2 * 5 * 16, dtype=np.uint16).reshape(2, 5, 16),
     }
     target = {
@@ -178,7 +288,7 @@ def test_missing_explicit_raw_history_fails_without_automatic_fallback(tmp_path,
 
 
 @pytest.fixture(scope="module")
-def genuine_native_client():
+def genuine_native_client(require_native_artifacts):
     from betting_app.services.c0_inference import C0InferenceClient
 
     client = C0InferenceClient()
@@ -212,12 +322,18 @@ def test_genuine_native_diagnostics_bind_exact_request_without_changing_probabil
     assert diagnostics["uncertainty_available"] is False
     assert diagnostics["information_status_basis"] == "declared_input_provenance_not_authenticated"
     provenance = diagnostics["feature_provenance"]
-    assert provenance["source_kind"] == "canonical_frozen_golgg_history"
-    assert provenance["raw_history_sha256"] == native_c0._CANONICAL_RAW_HISTORY_SHA256
-    assert provenance["dataset_freshness"]["raw_history_max_source_game_day"] == "2026-09-08"
-    assert provenance["dataset_freshness"]["raw_history_max_effective_release_day"] == "2026-09-08"
-    assert provenance["dataset_freshness"]["feature_history_release_cutoff_day"] == "2026-09-08"
-    assert provenance["dataset_freshness"]["query_decision_day_exclusive_cutoff"] == "2026-10-02"
+    import hashlib
+    from pathlib import Path
+
+    config, _, _ = native_c0.load_serving_config()
+    expected_history = native_c0.PROJECT_ROOT / config["serving_raw_history_path"]
+    assert Path(provenance["raw_history_path"]).resolve() == expected_history.resolve()
+    with expected_history.open("rb") as source:
+        assert provenance["raw_history_sha256"] == hashlib.file_digest(source, "sha256").hexdigest()
+    freshness = provenance["dataset_freshness"]
+    consumed_day = freshness["feature_history_release_cutoff_day"]
+    assert consumed_day < freshness["query_decision_day_exclusive_cutoff"]
+    assert consumed_day <= freshness["raw_history_max_effective_release_day"]
     assert diagnostics["input_hashes"] == evidence.prediction.diagnostics["input_hashes"]
     assert diagnostics["c0_request"] == {
         **original,
@@ -225,6 +341,15 @@ def test_genuine_native_diagnostics_bind_exact_request_without_changing_probabil
         "roster_b": sorted(ROSTER_B),
         "start_at": "2026-10-02T14:00:00+00:00",
     }
+ 
+def test_native_snapshot_rejects_retained_sixteen_slot_input_without_fallback() -> None:
+    adapter = _adapter()
+    request = adapter._validate_request(_request())
+    snapshot = _snapshot()
+    snapshot["hist"]["history"] = snapshot["hist"]["history"][:, :, 3:, :]
+    snapshot["hist"]["mask"] = snapshot["hist"]["mask"][:, :, 3:]
+    with pytest.raises(ValueError, match="shape"):
+        adapter._decode_snapshot(encode_snapshot(snapshot), request)
 
 
 @pytest.mark.parametrize(

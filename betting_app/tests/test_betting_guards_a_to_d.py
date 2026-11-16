@@ -34,12 +34,18 @@ class TestDeviggingMethods:
         assert (pa + pb) == pytest.approx(1.0, abs=1e-10)
         assert pa > 0.70
 
-    def test_shin_two_way_does_not_divide_by_zero(self):
-        # 2-way market: n = 2. Must not divide by (n-2) = 0!
-        pa, pb = devig_shin(1.30, 3.50)
-        assert (pa + pb) == pytest.approx(1.0, abs=1e-10)
-        assert pa > 0.70
-        assert pb < 0.30
+    @pytest.mark.parametrize(
+        "odds_a,odds_b", [(1.20, 4.00), (1.30, 3.50), (1.50, 2.60), (1.01, 1.20)]
+    )
+    def test_shin_two_way_matches_asymmetric_additive_solution(self, odds_a, odds_b):
+        # Subtracting the two Shin equations gives p_a - p_b = q_a - q_b.
+        expected_a = (1.0 + 1.0 / odds_a - 1.0 / odds_b) / 2.0
+        pa, pb = devig_shin(odds_a, odds_b)
+        reverse_a, reverse_b = devig_shin(odds_b, odds_a)
+        assert pa == pytest.approx(expected_a, abs=1e-12)
+        assert pb == pytest.approx(1.0 - expected_a, abs=1e-12)
+        assert (pa, pb) == pytest.approx((reverse_b, reverse_a), abs=1e-12)
+
 
     def test_invalid_odds_raise(self):
         for bad in [0.95, -1.0, float('nan'), float('inf')]:

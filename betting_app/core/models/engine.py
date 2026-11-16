@@ -101,7 +101,7 @@ class PredictionEngine:
         """Evaluate a model on an extracted feature payload and return a UnifiedPredictionResult."""
         spec = model_spec or get_active_model()
         if spec.metadata.get("operational") is False:
-            raise ValueError(spec.metadata["unavailable_reason"])
+            raise ValueError(spec.metadata.get("unavailable_reason", f"Model {spec.name} is not operational"))
         canonical_match_id = features.get("canonical", {}).get("id")
 
         if spec.family == "native_c0":

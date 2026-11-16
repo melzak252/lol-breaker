@@ -2,7 +2,7 @@
 """Empirical Walk-Forward Optimization: Net CLV vs Optimizer's Curse (B_hyb vs B_DRO).
 
 Executes rigorous walk-forward simulations across:
-1. Production PostgreSQL Database (Cohort A: 646 exact matches, Cohort B: 830 matches up to Sep 21)
+1. Production PostgreSQL Database (Cohort A: frozen exact matches; Cohort B: strictly later disjoint matches)
    - Realistic 5-Check Pre-Match Walk-Forward (T-24h, T-12h, T-6h, T-2h, T-1h)
    - Strictly max 1 bet per match
    - OperationalWallet 3-hour locked capital
@@ -16,9 +16,8 @@ Executes rigorous walk-forward simulations across:
    - MaxOdds in {4.00, None}
    Under strict condition: B_hyb < Net CLV (CCR_hyb < 1.0, Edge Retention > 50%)
    And stricter conditions: B_DRO <= 0 (CCR_DRO <= 0) and B_hyb <= 0.5 * Net CLV (CCR_hyb <= 0.5)
-3. Cross-Cohort Verification:
-   - 1,467-match Polish Bookmaker cohort (Polish2plus, raw best bookmaker odds)
-   - 1,668-match Pinnacle T-1h cohort (under 12% Polish tax and 0% International tax)
+3. Independent later-period evaluation:
+   - Polish and Pinnacle cohorts, plus production matches after Cohort A's end date
 
 Saves output to:
 data/08_reporting/c0_upgrade_and_distillation_20261017/clv_vs_optimizers_curse_optimization.json
@@ -44,6 +43,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from betting_app.core.ev import fair_market_probabilities
 from src.analysis.historical_production_simulator import OperationalWallet
 
 REPORT_DIR = PROJECT_ROOT / "data/08_reporting/c0_upgrade_and_distillation_20261017"
@@ -66,6 +66,54 @@ POLISH_PANEL_PATH = PROJECT_ROOT / "data/07_model_output/model_bookmaker_competi
 POLISH_PAIRS_PATH = PROJECT_ROOT / "data/07_model_output/oddsportal/oddsportal_polish_consensus_20261009_152919Z/polish_quote_model_pairs.parquet"
 PINNACLE_T1_PATH = PROJECT_ROOT / "data/08_reporting/a0_data_focus/a0_data_focus_20260929_192443/market_T1_joined.parquet"
 PINNACLE_TIMES_PATH = PROJECT_ROOT / "data/07_model_output/oddsportal/c0_bookmaker_horizons_20261009_103721Z/native_event_query_ledger.parquet"
+
+def quotes_observed_by_decision_time(
+    quotes: pd.DataFrame,
+    decision_time: Any,
+    observed_at_col: str = "scraped_dt",
+) -> pd.DataFrame:
+    """Return quotes known at the decision instant; future observations are never eligible."""
+    decision_dt = pd.to_datetime(decision_time, utc=True)
+    observed_at = pd.to_datetime(quotes[observed_at_col], utc=True)
+    return quotes.loc[observed_at <= decision_dt]
+
+
+def net_clv_from_close(odds: float, close_probability: float | None, tax_rate: float) -> float | None:
+    """Compute net CLV only when an observed closing probability is available."""
+    if close_probability is None or pd.isna(close_probability):
+        return None
+    return float(odds * (1.0 - tax_rate) * close_probability - 1.0)
+def observed_clv_rows(bets: pd.DataFrame, clv_col: str = "clv") -> pd.DataFrame:
+    """Keep only bets whose CLV uses an observed, independent closing reference."""
+    return bets.loc[bets[clv_col].notna()]
+
+def label_cohort_clv(
+    result: dict[str, Any],
+    clv_by_construction: bool = False,
+    net_clv_reason: str | None = None,
+) -> dict[str, Any]:
+    """Null CLV claims when the cohort lacks an independent closing reference."""
+    result["clv_by_construction"] = clv_by_construction
+    n_bets = int(result.get("n_bets", 0))
+    if clv_by_construction or net_clv_reason:
+        result["n_clv_bets"] = 0
+        result["n_missing_close"] = n_bets
+        result["n_clv_excluded_by_construction"] = n_bets if clv_by_construction else 0
+        for key in (
+            "net_clv_pct", "net_clv_unweighted_pct", "b_hyb_pp", "b_dro_pp", "ccr_hyb", "ccr_dro",
+            "edge_retention_pct", "total_clv_profit_pln", "t_clv", "p_clv",
+        ):
+            result[key] = None
+        result["net_clv_reason"] = net_clv_reason or (
+            "Odds are de-vigged fair odds from the same q used as the CLV reference."
+        )
+    else:
+        result.setdefault("n_clv_bets", 0)
+        result.setdefault("n_missing_close", n_bets)
+        result["n_clv_excluded_by_construction"] = 0
+        result.setdefault("net_clv_reason", None)
+    return result
+
 
 # -----------------------------------------------------------------------------
 # 1. Data Preparation
@@ -105,15 +153,10 @@ def load_production_data() -> dict[str, Any]:
     q_aligned["scraped_dt"] = pd.to_datetime(q_aligned["scraped_at"], utc=True)
     q_aligned = q_aligned.sort_values("scraped_dt")
 
-    # Devig using Shin to obtain fair p_shin_1
-    inv1 = 1.0 / q_aligned["odds_1"].to_numpy(dtype=float)
-    inv2 = 1.0 / q_aligned["odds_2"].to_numpy(dtype=float)
-    s_tot = inv1 + inv2
-    z_shin = np.maximum(0.0, s_tot - 1.0)
-    denom = np.maximum(1e-9, 2.0 * (1.0 - z_shin))
-    pi1 = (np.sqrt(z_shin**2 + 4.0 * (1.0 - z_shin) * (inv1**2) / s_tot) - z_shin) / denom
-    pi2 = (np.sqrt(z_shin**2 + 4.0 * (1.0 - z_shin) * (inv2**2) / s_tot) - z_shin) / denom
-    q_aligned["p_shin_1"] = pi1 / (pi1 + pi2)
+    q_aligned["p_shin_1"] = [
+        fair_market_probabilities(float(odds_1), float(odds_2))[0]
+        for odds_1, odds_2 in zip(q_aligned["odds_1"], q_aligned["odds_2"])
+    ]
 
     # Pre-compute pre-kickoff sharp closing line consensus
     print("Pre-computing closing lines...")
@@ -174,16 +217,26 @@ def load_production_data() -> dict[str, Any]:
 
     all_matches_df = pd.DataFrame(match_rows)
     cohort_a = all_matches_df[all_matches_df["is_cohort_a"]].copy()
-    cohort_b = all_matches_df.copy()
+    selected_ids = set(cohort_a["canonical_match_id"])
+    if cohort_a.empty:
+        cohort_b = all_matches_df.iloc[0:0].copy()
+    else:
+        selection_end = cohort_a["start_dt"].max()
+        cohort_b = all_matches_df[
+            (all_matches_df["start_dt"] > selection_end)
+            & ~all_matches_df["canonical_match_id"].isin(selected_ids)
+        ].copy()
+    in_sample_selection = cohort_b.empty
 
     quotes_by_match = {mid: df for mid, df in q_aligned.groupby("canonical_match_id")}
 
     print(f"Cohort A prepared: {len(cohort_a)} matches")
-    print(f"Cohort B prepared: {len(cohort_b)} matches")
+    print(f"Later disjoint Cohort B prepared: {len(cohort_b)} matches")
 
     return {
         "cohort_a": cohort_a,
         "cohort_b": cohort_b,
+        "in_sample_selection": in_sample_selection,
         "quotes_by_match": quotes_by_match,
         "closing_dict": closing_dict,
     }
@@ -198,51 +251,48 @@ def preextract_snapshots(matches_df: pd.DataFrame, quotes_by_match: dict[int, pd
         if q_mid is None:
             continue
 
-        sub = q_mid[(q_mid["scraped_dt"] < t_start) & (q_mid["scraped_dt"] >= t_start - pd.Timedelta(hours=72))].copy()
+        sub = q_mid[
+            (q_mid["scraped_dt"] < t_start)
+            & (q_mid["scraped_dt"] >= t_start - pd.Timedelta(hours=72))
+        ].copy()
         if sub.empty:
             continue
 
-        sub["bucket_2h"] = sub["scraped_dt"].dt.floor("2h")
-        live_books = {}
-        for b_dt, b_df in sub.groupby("bucket_2h"):
-            for _, qrow in b_df.iterrows():
-                live_books[int(qrow["bookmaker_id"])] = {
-                    "o1": float(qrow["odds_1"]),
-                    "o2": float(qrow["odds_2"]),
-                    "p1": float(qrow["p_shin_1"]),
-                    "dt": qrow["scraped_dt"],
-                }
-            active = {k: v for k, v in live_books.items() if (b_dt - v["dt"]).total_seconds() <= 12 * 3600}
-            if len(active) < 2:
+        first_decision = (t_start - pd.Timedelta(hours=72)).ceil("2h")
+        decision_times = pd.date_range(first_decision, t_start, freq="2h", inclusive="left")
+        for t_dec in decision_times:
+            known = quotes_observed_by_decision_time(sub, t_dec)
+            latest = known.sort_values("scraped_dt").groupby("bookmaker_id").tail(1)
+            if len(latest) < 3:
                 continue
 
             best_1 = None
             best_2 = None
-            for fk_id, fk_val in active.items():
-                oth = [v["p1"] for oid, v in active.items() if oid != fk_id]
-                ql1 = float(np.mean(oth))
+            for row in latest.itertuples(index=False):
+                other = latest[latest["bookmaker_id"] != row.bookmaker_id]
+                if other["bookmaker_id"].nunique() < 2:
+                    continue
+                ql1 = float(other["p_shin_1"].mean())
                 ql2 = 1.0 - ql1
-                lag1 = ql1 * fk_val["o1"] - 1.0
-                lag2 = ql2 * fk_val["o2"] - 1.0
+                odds_1 = float(row.odds_1)
+                odds_2 = float(row.odds_2)
+                if odds_1 > 1.0 and (best_1 is None or odds_1 > best_1["odds"]):
+                    best_1 = {"odds": odds_1, "q_loo": ql1}
+                if odds_2 > 1.0 and (best_2 is None or odds_2 > best_2["odds"]):
+                    best_2 = {"odds": odds_2, "q_loo": ql2}
 
-                if 0.00 <= lag1 <= 0.38:
-                    if best_1 is None or fk_val["o1"] > best_1["odds"]:
-                        best_1 = {"odds": fk_val["o1"], "q_loo": ql1}
-                if 0.00 <= lag2 <= 0.38:
-                    if best_2 is None or fk_val["o2"] > best_2["odds"]:
-                        best_2 = {"odds": fk_val["o2"], "q_loo": ql2}
 
             if best_1 is None and best_2 is None:
                 continue
 
-            h_lead = (t_start - b_dt).total_seconds() / 3600.0
+            h_lead = (t_start - t_dec).total_seconds() / 3600.0
             snapshots.append({
                 "canonical_match_id": mid,
                 "horizon_h": round(h_lead, 1),
-                "t_dec": b_dt,
+                "t_dec": t_dec,
                 "t_start": t_start,
                 "t_settle": t_start + pd.Timedelta(hours=3),
-                "n_books": len(active),
+                "n_books": len(latest),
                 "q_mkt_a": best_1["q_loo"] if best_1 else np.nan,
                 "q_mkt_b": best_2["q_loo"] if best_2 else np.nan,
                 "best_odds_a": best_1["odds"] if best_1 else 1.0,
@@ -253,7 +303,8 @@ def preextract_snapshots(matches_df: pd.DataFrame, quotes_by_match: dict[int, pd
                 "p_c0_slim_year__full": float(m["p_c0_slim_year__full"]),
                 "p_c0__full": float(m["p_c0__full"]),
                 "golgg_str": str(m["golgg_str"]),
-                "p_close_a": float(closing_dict.get(mid, 0.5)),
+                "p_close_a": float(closing_dict[mid]) if mid in closing_dict and pd.notna(closing_dict[mid]) else np.nan,
+                "market_prefilter_applied": False,
             })
     return snapshots
 
@@ -320,9 +371,9 @@ def evaluate_snapshot(snap: dict[str, Any], model_col: str, alpha: float, eps: f
         won = (snap["winner_side"] == "team_b")
         p_close = 1.0 - snap["p_close_a"]
 
-    net_clv = odds * c_tax * p_close - 1.0
-    b_hyb = ev_claim - net_clv
-    b_dro = dro_ev - net_clv
+    net_clv = net_clv_from_close(odds, p_close, tax_rate)
+    b_hyb = ev_claim - net_clv if net_clv is not None else None
+    b_dro = dro_ev - net_clv if net_clv is not None else None
 
     return {
         "match_id": snap["canonical_match_id"],
@@ -429,9 +480,10 @@ def run_simulation(
     if settled.empty:
         return {
             "n_bets": 0, "n_wins": 0, "win_rate_pct": 0.0, "turnover_pln": 0.0, "profit_pln": 0.0,
-            "realized_yield_pct": 0.0, "net_clv_pct": 0.0, "ev_hyb_pct": 0.0, "ev_dro_pct": 0.0,
-            "b_hyb_pp": 0.0, "b_dro_pp": 0.0, "ccr_hyb": 0.0, "ccr_dro": 0.0, "edge_retention_pct": 0.0,
-            "total_clv_profit_pln": 0.0, "net_clv_unweighted_pct": 0.0, "t_clv": 0.0, "p_clv": 1.0,
+            "realized_yield_pct": 0.0, "net_clv_pct": None, "ev_hyb_pct": None, "ev_dro_pct": None,
+            "b_hyb_pp": None, "b_dro_pp": None, "ccr_hyb": None, "ccr_dro": None, "edge_retention_pct": None,
+            "total_clv_profit_pln": None, "net_clv_unweighted_pct": None, "t_clv": None, "p_clv": None,
+            "n_clv_bets": 0, "n_missing_close": 0, "net_clv_reason": "no_bets_with_independent_close",
             "max_drawdown_pct": 0.0, "profit_factor": 0.0, "sharpe": 0.0, "capital_exhausted": capital_exhausted_bets,
             "final_equity_pln": initial_capital,
         }
@@ -443,27 +495,33 @@ def run_simulation(
     yd = (profit / turnover) * 100.0 if turnover > 0 else 0.0
     wr = float(settled["won"].mean()) * 100.0
 
-    weights = settled["stake"].to_numpy(dtype=float) / turnover
-    net_clvs = settled["clv"].to_numpy(dtype=float)
-    ev_claims = settled["ev_claimed"].to_numpy(dtype=float)
-
-    net_clv_weighted = float(np.sum(weights * net_clvs)) * 100.0
-    ev_hyb_weighted = float(np.sum(weights * ev_claims)) * 100.0
-    b_hyb_weighted = ev_hyb_weighted - net_clv_weighted
-    odds_arr = settled["odds"].to_numpy(dtype=float)
-    ev_dro_arr = ev_claims - eps * c_tax * odds_arr
-    ev_dro_weighted = float(np.sum(weights * ev_dro_arr)) * 100.0
-    b_dro_weighted = ev_dro_weighted - net_clv_weighted
-
-    ccr_hyb = (b_hyb_weighted / net_clv_weighted) if net_clv_weighted != 0 else float("inf")
-    ccr_dro = (b_dro_weighted / net_clv_weighted) if net_clv_weighted != 0 else float("inf")
-
-    net_clv_mean_unw = float(np.mean(net_clvs))
-    net_clv_std_unw = float(np.std(net_clvs, ddof=1)) if n > 1 else 0.0
-    t_clv = (net_clv_mean_unw / (net_clv_std_unw / np.sqrt(n))) if (n > 1 and net_clv_std_unw > 0) else 0.0
-    p_clv = float(1.0 - t_dist.cdf(t_clv, df=n - 1)) if n > 1 else 1.0
-
-    total_clv_profit_pln = float(np.sum(settled["stake"].to_numpy(dtype=float) * net_clvs))
+    clv_bets = observed_clv_rows(settled)
+    n_clv_bets = len(clv_bets)
+    n_missing_close = n - n_clv_bets
+    if n_clv_bets:
+        clv_turnover = float(clv_bets["stake"].sum())
+        weights = clv_bets["stake"].to_numpy(dtype=float) / clv_turnover
+        net_clvs = clv_bets["clv"].to_numpy(dtype=float)
+        ev_claims = clv_bets["ev_claimed"].to_numpy(dtype=float)
+        odds_arr = clv_bets["odds"].to_numpy(dtype=float)
+        net_clv_weighted = float(np.sum(weights * net_clvs)) * 100.0
+        ev_hyb_weighted = float(np.sum(weights * ev_claims)) * 100.0
+        b_hyb_weighted = ev_hyb_weighted - net_clv_weighted
+        ev_dro_weighted = float(np.sum(weights * (ev_claims - eps * c_tax * odds_arr))) * 100.0
+        b_dro_weighted = ev_dro_weighted - net_clv_weighted
+        ccr_hyb = b_hyb_weighted / net_clv_weighted if net_clv_weighted != 0 else None
+        ccr_dro = b_dro_weighted / net_clv_weighted if net_clv_weighted != 0 else None
+        net_clv_mean_unw = float(np.mean(net_clvs))
+        net_clv_std_unw = float(np.std(net_clvs, ddof=1)) if n_clv_bets > 1 else 0.0
+        t_clv = (net_clv_mean_unw / (net_clv_std_unw / np.sqrt(n_clv_bets))) if n_clv_bets > 1 and net_clv_std_unw > 0 else None
+        p_clv = float(1.0 - t_dist.cdf(t_clv, df=n_clv_bets - 1)) if t_clv is not None else None
+        total_clv_profit_pln = float(np.sum(clv_bets["stake"].to_numpy(dtype=float) * net_clvs))
+        clv_reason = None
+    else:
+        net_clv_weighted = ev_hyb_weighted = ev_dro_weighted = None
+        b_hyb_weighted = b_dro_weighted = ccr_hyb = ccr_dro = None
+        net_clv_mean_unw = t_clv = p_clv = total_clv_profit_pln = None
+        clv_reason = "no_bets_with_independent_close"
 
     equities = np.array([initial_capital] + [r["total_equity"] for r in wallet.settled_bets])
     running_max = np.maximum.accumulate(equities)
@@ -480,23 +538,26 @@ def run_simulation(
 
     return {
         "n_bets": n,
+        "n_clv_bets": n_clv_bets,
+        "n_missing_close": n_missing_close,
+        "net_clv_reason": clv_reason,
         "n_wins": n_wins,
         "win_rate_pct": round(wr, 2),
         "turnover_pln": round(turnover, 2),
         "profit_pln": round(profit, 2),
         "realized_yield_pct": round(yd, 2),
-        "net_clv_pct": round(net_clv_weighted, 2),
-        "ev_hyb_pct": round(ev_hyb_weighted, 2),
-        "ev_dro_pct": round(ev_dro_weighted, 2),
-        "b_hyb_pp": round(b_hyb_weighted, 2),
-        "b_dro_pp": round(b_dro_weighted, 2),
-        "ccr_hyb": round(ccr_hyb, 3),
-        "ccr_dro": round(ccr_dro, 3),
-        "edge_retention_pct": round((net_clv_weighted / ev_hyb_weighted) * 100.0, 2) if ev_hyb_weighted != 0 else 0.0,
-        "total_clv_profit_pln": round(total_clv_profit_pln, 2),
-        "net_clv_unweighted_pct": round(net_clv_mean_unw * 100.0, 2),
-        "t_clv": round(float(t_clv), 3),
-        "p_clv": round(p_clv, 4),
+        "net_clv_pct": round(net_clv_weighted, 2) if net_clv_weighted is not None else None,
+        "ev_hyb_pct": round(ev_hyb_weighted, 2) if ev_hyb_weighted is not None else None,
+        "ev_dro_pct": round(ev_dro_weighted, 2) if ev_dro_weighted is not None else None,
+        "b_hyb_pp": round(b_hyb_weighted, 2) if b_hyb_weighted is not None else None,
+        "b_dro_pp": round(b_dro_weighted, 2) if b_dro_weighted is not None else None,
+        "ccr_hyb": round(ccr_hyb, 3) if ccr_hyb is not None else None,
+        "ccr_dro": round(ccr_dro, 3) if ccr_dro is not None else None,
+        "edge_retention_pct": round((net_clv_weighted / ev_hyb_weighted) * 100.0, 2) if net_clv_weighted is not None and ev_hyb_weighted != 0 else None,
+        "total_clv_profit_pln": round(total_clv_profit_pln, 2) if total_clv_profit_pln is not None else None,
+        "net_clv_unweighted_pct": round(net_clv_mean_unw * 100.0, 2) if net_clv_mean_unw is not None else None,
+        "t_clv": round(float(t_clv), 3) if t_clv is not None else None,
+        "p_clv": round(p_clv, 4) if p_clv is not None else None,
         "max_drawdown_pct": round(max_dd, 2),
         "profit_factor": round(pf, 2),
         "sharpe": round(float(sharpe), 2),
@@ -506,7 +567,7 @@ def run_simulation(
 
 
 # -----------------------------------------------------------------------------
-# 3. Cross-Cohort Verification (Polish & Pinnacle)
+# 3. Independent Later-Period Evaluation (Polish & Pinnacle)
 # -----------------------------------------------------------------------------
 def load_cross_cohort_data(preds: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     print("[3/5] Loading 1,467 Polish Bookmaker cohort and 1,668 Pinnacle cohort...")
@@ -569,6 +630,9 @@ def run_cohort_sim(
     odds_col2: str,
     tax_rate: float = 0.12,
     initial_capital: float = 10000.0,
+    clv_by_construction: bool = False,
+    close_reference_available: bool = True,
+    net_clv_reason: str | None = None,
 ) -> dict[str, Any]:
     c_tax = 1.0 - tax_rate
     wallet = OperationalWallet(initial_capital=initial_capital)
@@ -611,15 +675,18 @@ def run_cohort_sim(
     for i in range(len(df)):
         side = 0
         if c1[i] and (not c2[i] or dro1[i] >= dro2[i]):
-            side, o_taken, p_claim, p_close, won, ev_claim = 1, o1[i], p1_h[i], q1[i], int(y[i] == 1), ev1[i]
+            close_ref = q1[i] if close_reference_available else None
+            side, o_taken, p_claim, p_close, won, ev_claim = 1, o1[i], p1_h[i], close_ref, int(y[i] == 1), ev1[i]
         elif c2[i]:
-            side, o_taken, p_claim, p_close, won, ev_claim = 2, o2[i], p2_h[i], q2[i], int(y[i] == 0), ev2[i]
+            close_ref = q1[i] if close_reference_available else None
+            p_close = 1.0 - close_ref if close_ref is not None else None
+            side, o_taken, p_claim, won, ev_claim = 2, o2[i], p2_h[i], int(y[i] == 0), ev2[i]
 
         if side != 0:
             mid = df["match_id"].iloc[i]
             t_dec = df["t_dec"].iloc[i]
             t_settle = df["t_settle"].iloc[i]
-            net_clv = o_taken * c_tax * p_close - 1.0
+            net_clv = net_clv_from_close(o_taken, p_close, tax_rate)
             heapq.heappush(heap, (t_dec, 1, tie, "decision", {
                 "match_id": mid, "side": side, "odds": o_taken, "p_claim": p_claim,
                 "ev_claim": ev_claim, "p_close": p_close, "won": won, "net_clv": net_clv,
@@ -661,53 +728,104 @@ def run_cohort_sim(
 
     settled = pd.DataFrame(wallet.settled_bets)
     if settled.empty:
-        return {"n_bets": 0, "net_clv_pct": 0.0, "ev_hyb_pct": 0.0, "b_hyb_pp": 0.0, "b_dro_pp": 0.0, "ccr_hyb": 0.0, "total_clv_profit_pln": 0.0, "profit_pln": 0.0, "realized_yield_pct": 0.0}
+        return label_cohort_clv({
+            "n_bets": 0,
+            "n_clv_bets": 0,
+            "n_missing_close": 0,
+            "net_clv_pct": None,
+            "ev_hyb_pct": None,
+            "ev_dro_pct": None,
+            "b_hyb_pp": None,
+            "b_dro_pp": None,
+            "ccr_hyb": None,
+            "ccr_dro": None,
+            "edge_retention_pct": None,
+            "total_clv_profit_pln": None,
+            "profit_pln": 0.0,
+            "realized_yield_pct": 0.0,
+            "final_equity_pln": initial_capital,
+        }, clv_by_construction, net_clv_reason)
 
     n = len(settled)
     turnover = float(settled["stake"].sum())
     profit = float(settled["profit"].sum())
     yd = (profit / turnover) * 100.0 if turnover > 0 else 0.0
-    weights = settled["stake"].to_numpy(dtype=float) / turnover
-    net_clvs = settled["clv"].to_numpy(dtype=float)
-    ev_claims = settled["ev_claimed"].to_numpy(dtype=float)
+    all_weights = settled["stake"].to_numpy(dtype=float) / turnover
+    all_ev_claims = settled["ev_claimed"].to_numpy(dtype=float)
+    ev_hyb_weighted = float(np.sum(all_weights * all_ev_claims)) * 100.0
+    odds_all = settled["odds"].to_numpy(dtype=float)
+    ev_dro_weighted = float(np.sum(all_weights * (all_ev_claims - eps * c_tax * odds_all))) * 100.0
 
-    net_clv_weighted = float(np.sum(weights * net_clvs)) * 100.0
-    ev_hyb_weighted = float(np.sum(weights * ev_claims)) * 100.0
-    b_hyb_weighted = ev_hyb_weighted - net_clv_weighted
+    clv_bets = observed_clv_rows(settled)
+    if clv_by_construction:
+        clv_bets = clv_bets.iloc[0:0]
+    n_clv_bets = len(clv_bets)
+    n_missing_close = n - n_clv_bets
+    if n_clv_bets:
+        clv_turnover = float(clv_bets["stake"].sum())
+        clv_weights = clv_bets["stake"].to_numpy(dtype=float) / clv_turnover
+        net_clvs = clv_bets["clv"].to_numpy(dtype=float)
+        ev_claims = clv_bets["ev_claimed"].to_numpy(dtype=float)
+        net_clv_weighted = float(np.sum(clv_weights * net_clvs)) * 100.0
+        ev_hyb_clv_weighted = float(np.sum(clv_weights * ev_claims)) * 100.0
+        bias_hyb = ev_hyb_clv_weighted - net_clv_weighted
+        clv_yield = float(clv_bets["profit"].sum() / clv_turnover) * 100.0
+        luck_eta = clv_yield - net_clv_weighted
+        odds_arr = clv_bets["odds"].to_numpy(dtype=float)
+        ev_dro_clv = ev_claims - eps * c_tax * odds_arr
+        bias_dro = float(np.sum(clv_weights * ev_dro_clv)) * 100.0 - net_clv_weighted
+        ccr_hyb = bias_hyb / net_clv_weighted if net_clv_weighted != 0 else None
+        ccr_dro = bias_dro / net_clv_weighted if net_clv_weighted != 0 else None
+        total_clv_profit_pln = float(np.sum(clv_bets["stake"].to_numpy(dtype=float) * net_clvs))
+        net_clv_mean_unw = float(np.mean(net_clvs))
+        net_clv_std_unw = float(np.std(net_clvs, ddof=1)) if n_clv_bets > 1 else 0.0
+        t_clv = net_clv_mean_unw / (net_clv_std_unw / np.sqrt(n_clv_bets)) if n_clv_bets > 1 and net_clv_std_unw > 0 else None
+        p_clv = float(1.0 - t_dist.cdf(t_clv, df=n_clv_bets - 1)) if t_clv is not None else None
+        resolved_clv_reason = None
+    else:
+        net_clv_weighted = bias_hyb = bias_dro = luck_eta = None
+        ccr_hyb = ccr_dro = total_clv_profit_pln = net_clv_mean_unw = t_clv = p_clv = None
+        resolved_clv_reason = net_clv_reason or (
+            "Odds are de-vigged fair odds from the same q used as the CLV reference."
+            if clv_by_construction else "no_bets_with_independent_close"
+        )
 
-    odds_arr = settled["odds"].to_numpy(dtype=float)
-    ev_dro_arr = ev_claims - eps * c_tax * odds_arr
-    ev_dro_weighted = float(np.sum(weights * ev_dro_arr)) * 100.0
-    b_dro_weighted = ev_dro_weighted - net_clv_weighted
+    equities = np.array([initial_capital] + [r["total_equity"] for r in wallet.settled_bets])
+    running_max = np.maximum.accumulate(equities)
+    dd = (running_max - equities) / running_max * 100.0
+    max_dd = float(np.max(dd))
+    gross_wins = float(settled[settled["profit"] > 0]["profit"].sum())
+    gross_losses = float(abs(settled[settled["profit"] < 0]["profit"].sum()))
+    pf = (gross_wins / gross_losses) if gross_losses > 0 else (999.0 if gross_wins > 0 else 0.0)
+    returns = settled["profit"] / settled["stake"]
+    ret_std = float(returns.std(ddof=1)) if len(returns) > 1 else 0.0
+    sharpe = (float(returns.mean()) / ret_std) * np.sqrt(n) if ret_std > 0 else 0.0
 
-    ccr_hyb = (b_hyb_weighted / net_clv_weighted) if net_clv_weighted != 0 else float("inf")
-    ccr_dro = (b_dro_weighted / net_clv_weighted) if net_clv_weighted != 0 else float("inf")
-    total_clv_profit_pln = float(np.sum(settled["stake"].to_numpy(dtype=float) * net_clvs))
-
-    net_clv_mean_unw = float(np.mean(net_clvs))
-    net_clv_std_unw = float(np.std(net_clvs, ddof=1)) if n > 1 else 0.0
-    t_clv = (net_clv_mean_unw / (net_clv_std_unw / np.sqrt(n))) if (n > 1 and net_clv_std_unw > 0) else 0.0
-    p_clv = float(1.0 - t_dist.cdf(t_clv, df=n - 1)) if n > 1 else 1.0
-
-    return {
+    return label_cohort_clv({
         "n_bets": n,
+        "n_clv_bets": n_clv_bets,
+        "n_missing_close": n_missing_close,
         "win_rate_pct": round(float(settled["won"].mean()) * 100.0, 2),
         "turnover_pln": round(turnover, 2),
         "profit_pln": round(profit, 2),
         "realized_yield_pct": round(yd, 2),
-        "net_clv_pct": round(net_clv_weighted, 2),
         "ev_hyb_pct": round(ev_hyb_weighted, 2),
         "ev_dro_pct": round(ev_dro_weighted, 2),
-        "b_hyb_pp": round(b_hyb_weighted, 2),
-        "b_dro_pp": round(b_dro_weighted, 2),
-        "ccr_hyb": round(ccr_hyb, 3),
-        "ccr_dro": round(ccr_dro, 3),
-        "edge_retention_pct": round((net_clv_weighted / ev_hyb_weighted) * 100.0, 2) if ev_hyb_weighted != 0 else 0.0,
-        "total_clv_profit_pln": round(total_clv_profit_pln, 2),
-        "t_clv": round(float(t_clv), 3),
-        "p_clv": round(p_clv, 4),
+        "net_clv_pct": round(net_clv_weighted, 2) if net_clv_weighted is not None else None,
+        "net_clv_unweighted_pct": round(net_clv_mean_unw * 100.0, 2) if net_clv_mean_unw is not None else None,
+        "b_hyb_pp": round(bias_hyb, 2) if bias_hyb is not None else None,
+        "b_dro_pp": round(bias_dro, 2) if bias_dro is not None else None,
+        "ccr_hyb": round(ccr_hyb, 3) if ccr_hyb is not None else None,
+        "ccr_dro": round(ccr_dro, 3) if ccr_dro is not None else None,
+        "edge_retention_pct": round((net_clv_weighted / ev_hyb_weighted) * 100.0, 2) if net_clv_weighted is not None and ev_hyb_weighted != 0 else None,
+        "total_clv_profit_pln": round(total_clv_profit_pln, 2) if total_clv_profit_pln is not None else None,
+        "t_clv": round(float(t_clv), 3) if t_clv is not None else None,
+        "p_clv": round(p_clv, 4) if p_clv is not None else None,
+        "max_drawdown_pct": round(max_dd, 2),
+        "profit_factor": round(pf, 2),
+        "sharpe": round(sharpe, 2),
         "final_equity_pln": round(wallet.total_equity, 2),
-    }
+    }, clv_by_construction, resolved_clv_reason)
 
 
 # -----------------------------------------------------------------------------
@@ -725,10 +843,11 @@ def main() -> None:
     quotes_by_match = prod_data["quotes_by_match"]
     closing_dict = prod_data["closing_dict"]
 
-    print("[2/5] Pre-extracting multi-horizon snapshots for Cohort A and B...")
+    in_sample_selection = prod_data["in_sample_selection"]
+    print("[2/5] Pre-extracting causal 2-hour snapshots for Cohort A and later disjoint Cohort B...")
     snaps_a = preextract_snapshots(cohort_a, quotes_by_match, closing_dict)
     snaps_b = preextract_snapshots(cohort_b, quotes_by_match, closing_dict)
-    print(f"Cohort A snapshots: {len(snaps_a)} | Cohort B snapshots: {len(snaps_b)}")
+    print(f"Cohort A snapshots: {len(snaps_a)} | Later disjoint Cohort B snapshots: {len(snaps_b)}")
 
     # Parameters to sweep
     alphas = [0.35, 0.40, 0.50]
@@ -746,7 +865,7 @@ def main() -> None:
     top_configs_summary = {}
 
     for model_name, model_col in models:
-        print(f"\n--- Running 90-parameter sweep for {model_name} on Realistic 5-Check Walk-Forward ---")
+        print(f"\n--- Running {len(param_grid)}-cell selection grid for {model_name} on Cohort A ---")
         model_results = []
         for alpha, eps, guard_b, max_odds in param_grid:
             # 5-Check simulation
@@ -758,6 +877,8 @@ def main() -> None:
                 "guard_b": guard_b,
                 "max_odds": max_odds,
                 "schedule": "5-Check",
+                "grid_cells_tried": len(param_grid),
+                "market_prefilter_applied": False,
             })
             model_results.append(res_5check)
 
@@ -784,7 +905,8 @@ def main() -> None:
                 res["max_odds"] = None
             return res
 
-        # Best configs by CLV Profit
+        # A configuration is selectable only when observed independent-close CLV
+        # satisfies the stated eligibility rule; never promote a fallback row.
         if not feasible.empty:
             best_clv_profit = sanitize_dict(feasible.sort_values("total_clv_profit_pln", ascending=False).iloc[0].to_dict())
             best_n_bets = sanitize_dict(feasible.sort_values(["n_bets", "total_clv_profit_pln"], ascending=[False, False]).iloc[0].to_dict())
@@ -792,87 +914,171 @@ def main() -> None:
             feasible_mo4 = feasible[feasible["max_odds"] == 4.0]
             best_mo4_clv = sanitize_dict(feasible_mo4.sort_values("total_clv_profit_pln", ascending=False).iloc[0].to_dict()) if not feasible_mo4.empty else best_clv_profit
         else:
-            best_clv_profit = sanitize_dict(df_m.sort_values("total_clv_profit_pln", ascending=False).iloc[0].to_dict())
-            best_n_bets = sanitize_dict(df_m.sort_values(["n_bets", "total_clv_profit_pln"], ascending=[False, False]).iloc[0].to_dict())
-            best_t_clv = sanitize_dict(df_m.sort_values(["t_clv", "total_clv_profit_pln"], ascending=[False, False]).iloc[0].to_dict())
-            best_mo4_clv = best_clv_profit
+            best_clv_profit = None
+            best_n_bets = None
+            best_t_clv = None
+            best_mo4_clv = None
 
         top_configs_summary[model_name] = {
+            "selection_status": "SELECTED" if best_clv_profit is not None else "NOT_EVALUATED",
+            "selection_reason": None if best_clv_profit is not None else "no_configuration_with_eligible_independent_close_CLV",
             "best_clv_profit": best_clv_profit,
             "best_n_bets": best_n_bets,
             "best_t_clv": best_t_clv,
             "best_max_odds_4": best_mo4_clv,
+            "grid_cells_tried": len(param_grid),
         }
 
-    # Cross-Cohort Verification
-    preds_df = pd.read_parquet(PRED_PATH)
-    preds_df["golgg_match_id"] = preds_df["golgg_match_id"].astype(str)
-    pol_df, pin_df = load_cross_cohort_data(preds_df)
+    # Evaluate only a genuinely selected configuration against a later,
+    # match-disjoint production cohort. An empty Cohort B is not evaluation.
+    independent_evaluation_results = {
+        "status": "NOT_EVALUATED",
+        "reason": (
+            "no_later_disjoint_cohort_b"
+            if in_sample_selection
+            else "no_configuration_with_eligible_independent_close_CLV"
+        ),
+    }
+    if not in_sample_selection and any(
+        summary["best_clv_profit"] is not None
+        for summary in top_configs_summary.values()
+    ):
+        preds_df = pd.read_parquet(PRED_PATH)
+        preds_df["golgg_match_id"] = preds_df["golgg_match_id"].astype(str)
+        pol_df, pin_df = load_cross_cohort_data(preds_df)
 
-    verification_results = {}
-    for model_name, model_col in models:
-        top_cfg = top_configs_summary[model_name]["best_clv_profit"]
-        top_mo4 = top_configs_summary[model_name]["best_max_odds_4"]
+        independent_evaluation_results = {}
+        for model_name, model_col in models:
+            top_cfg = top_configs_summary[model_name]["best_clv_profit"]
+            top_mo4 = top_configs_summary[model_name]["best_max_odds_4"]
+            if top_cfg is None:
+                independent_evaluation_results[model_name] = {
+                    "status": "NOT_EVALUATED",
+                    "reason": "no_configuration_with_eligible_independent_close_CLV",
+                }
+                continue
 
-        # Run on Cohort B (Extended Production DB)
-        res_cohort_b_top = run_simulation(snaps_b, model_col, top_cfg["alpha"], top_cfg["eps"], top_cfg["guard_b"], top_cfg["max_odds"], schedule_mode="5-Check")
-        res_cohort_b_mo4 = run_simulation(snaps_b, model_col, top_mo4["alpha"], top_mo4["eps"], top_mo4["guard_b"], top_mo4["max_odds"], schedule_mode="5-Check") if top_mo4 else None
+            res_cohort_b_top = run_simulation(
+                snaps_b, model_col, top_cfg["alpha"], top_cfg["eps"], top_cfg["guard_b"],
+                top_cfg["max_odds"], schedule_mode="5-Check",
+            )
+            res_cohort_b_mo4 = run_simulation(
+                snaps_b, model_col, top_mo4["alpha"], top_mo4["eps"], top_mo4["guard_b"],
+                top_mo4["max_odds"], schedule_mode="5-Check",
+            ) if top_mo4 else None
+            polish_clv_reason = "independent closing reference unavailable; best odds and consensus both use closing market"
+            pinnacle_clv_reason = "fair Pinnacle odds are inverse of the same q used as CLV reference"
 
-        # Run on Polish Bookmakers (N=1,467)
-        res_pol_top = run_cohort_sim(pol_df, model_col, top_cfg["alpha"], top_cfg["eps"], top_cfg["guard_b"], top_cfg["max_odds"], "o1_raw", "o2_raw", tax_rate=0.12)
-        res_pol_mo4 = run_cohort_sim(pol_df, model_col, top_mo4["alpha"], top_mo4["eps"], top_mo4["guard_b"], top_mo4["max_odds"], "o1_raw", "o2_raw", tax_rate=0.12) if top_mo4 else None
+            # Run on Polish Bookmakers (N=1,467)
+            res_pol_top = run_cohort_sim(
+                pol_df, model_col, top_cfg["alpha"], top_cfg["eps"], top_cfg["guard_b"],
+                top_cfg["max_odds"], "o1_raw", "o2_raw", tax_rate=0.12,
+                close_reference_available=False, net_clv_reason=polish_clv_reason,
+            )
+            res_pol_mo4 = run_cohort_sim(
+                pol_df, model_col, top_mo4["alpha"], top_mo4["eps"], top_mo4["guard_b"],
+                top_mo4["max_odds"], "o1_raw", "o2_raw", tax_rate=0.12,
+                close_reference_available=False, net_clv_reason=polish_clv_reason,
+            ) if top_mo4 else None
 
-        # Run on Pinnacle (N=1,668) under 12% Polish tax and 0% International tax
-        res_pin_tax_top = run_cohort_sim(pin_df, model_col, top_cfg["alpha"], top_cfg["eps"], top_cfg["guard_b"], top_cfg["max_odds"], "o1", "o2", tax_rate=0.12)
-        res_pin_tax_mo4 = run_cohort_sim(pin_df, model_col, top_mo4["alpha"], top_mo4["eps"], top_mo4["guard_b"], top_mo4["max_odds"], "o1", "o2", tax_rate=0.12) if top_mo4 else None
+            # Pinnacle odds are exact fair-odds inverses of the same q used as reference.
+            res_pin_tax_top = run_cohort_sim(
+                pin_df, model_col, top_cfg["alpha"], top_cfg["eps"], top_cfg["guard_b"],
+                top_cfg["max_odds"], "o1", "o2", tax_rate=0.12,
+                clv_by_construction=True, close_reference_available=False,
+                net_clv_reason=pinnacle_clv_reason,
+            )
+            res_pin_tax_mo4 = run_cohort_sim(
+                pin_df, model_col, top_mo4["alpha"], top_mo4["eps"], top_mo4["guard_b"],
+                top_mo4["max_odds"], "o1", "o2", tax_rate=0.12,
+                clv_by_construction=True, close_reference_available=False,
+                net_clv_reason=pinnacle_clv_reason,
+            ) if top_mo4 else None
+            res_pin_0tax_top = run_cohort_sim(
+                pin_df, model_col, top_cfg["alpha"], top_cfg["eps"], top_cfg["guard_b"],
+                top_cfg["max_odds"], "o1", "o2", tax_rate=0.00,
+                clv_by_construction=True, close_reference_available=False,
+                net_clv_reason=pinnacle_clv_reason,
+            )
+            res_pin_0tax_mo4 = run_cohort_sim(
+                pin_df, model_col, top_mo4["alpha"], top_mo4["eps"], top_mo4["guard_b"],
+                top_mo4["max_odds"], "o1", "o2", tax_rate=0.00,
+                clv_by_construction=True, close_reference_available=False,
+                net_clv_reason=pinnacle_clv_reason,
+            ) if top_mo4 else None
 
-        res_pin_0tax_top = run_cohort_sim(pin_df, model_col, top_cfg["alpha"], top_cfg["eps"], top_cfg["guard_b"], top_cfg["max_odds"], "o1", "o2", tax_rate=0.00)
-        res_pin_0tax_mo4 = run_cohort_sim(pin_df, model_col, top_mo4["alpha"], top_mo4["eps"], top_mo4["guard_b"], top_mo4["max_odds"], "o1", "o2", tax_rate=0.00) if top_mo4 else None
+            horizons_breakdown = {}
+            for h_name in ["T-24h", "T-12h", "T-6h", "T-2h", "T-1h"]:
+                h_res = run_simulation(snaps_a, model_col, top_cfg["alpha"], top_cfg["eps"], top_cfg["guard_b"], top_cfg["max_odds"], schedule_mode=h_name)
+                horizons_breakdown[h_name] = h_res
 
-        # Horizon Breakdown on Cohort A
-        horizons_breakdown = {}
-        for h_name in ["T-24h", "T-12h", "T-6h", "T-2h", "T-1h"]:
-            h_res = run_simulation(snaps_a, model_col, top_cfg["alpha"], top_cfg["eps"], top_cfg["guard_b"], top_cfg["max_odds"], schedule_mode=h_name)
-            horizons_breakdown[h_name] = h_res
-
-        verification_results[model_name] = {
-            "top_unconstrained_config": {
-                "config": {"alpha": top_cfg["alpha"], "eps": top_cfg["eps"], "guard_b": top_cfg["guard_b"], "max_odds": top_cfg["max_odds"]},
-                "cohort_a_5check": top_cfg,
-                "cohort_b_5check": res_cohort_b_top,
-                "cohort_a_individual_horizons": horizons_breakdown,
-                "polish_1467_cohort": res_pol_top,
-                "pinnacle_1668_tax12": res_pin_tax_top,
-                "pinnacle_1668_tax0": res_pin_0tax_top,
-            },
-            "top_max_odds_4_config": {
-                "config": {"alpha": top_mo4["alpha"], "eps": top_mo4["eps"], "guard_b": top_mo4["guard_b"], "max_odds": top_mo4["max_odds"]} if top_mo4 else None,
-                "cohort_a_5check": top_mo4,
-                "cohort_b_5check": res_cohort_b_mo4,
-                "polish_1467_cohort": res_pol_mo4,
-                "pinnacle_1668_tax12": res_pin_tax_mo4,
-                "pinnacle_1668_tax0": res_pin_0tax_mo4,
+            independent_evaluation_results[model_name] = {
+                "status": "EVALUATED",
+                "top_unconstrained_config": {
+                    "config": {"alpha": top_cfg["alpha"], "eps": top_cfg["eps"], "guard_b": top_cfg["guard_b"], "max_odds": top_cfg["max_odds"]},
+                    "cohort_a_5check": top_cfg,
+                    "later_disjoint_cohort_b_5check": res_cohort_b_top,
+                    "cohort_a_individual_horizons": horizons_breakdown,
+                    "polish_1467_cohort": res_pol_top,
+                    "pinnacle_1668_tax12": res_pin_tax_top,
+                    "pinnacle_1668_tax0": res_pin_0tax_top,
+                },
+                "top_max_odds_4_config": {
+                    "config": {"alpha": top_mo4["alpha"], "eps": top_mo4["eps"], "guard_b": top_mo4["guard_b"], "max_odds": top_mo4["max_odds"]} if top_mo4 else None,
+                    "cohort_a_5check": top_mo4,
+                    "later_disjoint_cohort_b_5check": res_cohort_b_mo4,
+                    "polish_1467_cohort": res_pol_mo4,
+                    "pinnacle_1668_tax12": res_pin_tax_mo4,
+                    "pinnacle_1668_tax0": res_pin_0tax_mo4,
+                }
             }
-        }
+
 
     # Structure Output JSON
     output_data = {
         "title": "Empirical Net CLV vs Optimizer's Curse Optimization & Frontier Exploration",
         "timestamp_utc": pd.Timestamp.now("UTC").isoformat(),
+        "selection": {
+            "selected_on": "cohort_a",
+            "grid_cells_tried_per_model": len(param_grid),
+            "later_disjoint_cohort_b_available": not in_sample_selection,
+            "in_sample_selection": in_sample_selection,
+            "verification_status": (
+                "EVALUATED"
+                if not in_sample_selection and any(
+                    summary["best_clv_profit"] is not None
+                    for summary in top_configs_summary.values()
+                )
+                else "NOT_EVALUATED"
+            ),
+            "verification_reason": (
+                None
+                if not in_sample_selection and any(
+                    summary["best_clv_profit"] is not None
+                    for summary in top_configs_summary.values()
+                )
+                else (
+                    "no_later_disjoint_cohort_b"
+                    if in_sample_selection
+                    else "no_configuration_with_eligible_independent_close_CLV"
+                )
+            ),
+        },
         "methodology": {
-            "definition_net_clv": "Net CLV_i = q_close_i * O_i * 0.88 - 1 (Shin devigged closing probability under 12% Polish turnover tax)",
-            "definition_ev_hyb": "EV_hyb_i = p_hyb_i * O_i * 0.88 - 1 (Pre-DRO claimed edge)",
-            "definition_b_hyb": "B_hyb_i = EV_hyb_i - Net CLV_i = (p_hyb_i - q_close_i) * O_i * 0.88 (Pre-DRO Optimizer's Curse / Selection Disappointment)",
-            "definition_ev_dro": "EV_dro_i = (p_hyb_i - eps) * O_i * 0.88 - 1 (Post-DRO claimed edge)",
-            "definition_b_dro": "B_dro_i = EV_dro_i - Net CLV_i = (p_hyb_i - eps - q_close_i) * O_i * 0.88 (Post-DRO Post-Decision Surprise)",
-            "definition_ccr_hyb": "Curse-to-CLV Ratio CCR_hyb = B_hyb / Net CLV. Hard rule: CCR_hyb < 1.0 <=> B_hyb < Net CLV <=> Edge Retention ERR > 50%",
-            "definition_ccr_dro": "Curse-to-CLV Ratio CCR_dro = B_dro / Net CLV. Stricter rule: B_dro <= 0 <=> CCR_dro <= 0 (Conservative Claim)",
-            "definition_clv_profit": "Total Expected Luck-Free CLV Profit = sum_i (Stake_i * Net CLV_i) in PLN",
-            "t_clv_statistic": "t_CLV = mean(Net CLV_unweighted) / (std(Net CLV_unweighted) / sqrt(N))",
-            "simulation_setup": "Realistic 5-Check Walk-Forward (T-24h, T-12h, T-6h, T-2h, T-1h), strictly max 1 bet per match, OperationalWallet 3h locked capital, 10,000 PLN initial capital, 1/4 Kelly sizing [20, 150] PLN",
+            "definition_net_clv": "Net CLV_i = q_close_i * O_i * (1 - tax) - 1, only for bets with an observed independent pre-kickoff closing probability.",
+            "definition_ev_hyb": "EV_hyb_i = p_hyb_i * O_i * (1 - tax) - 1 (Pre-DRO claimed edge)",
+            "definition_b_hyb": "B_hyb_i = EV_hyb_i - Net CLV_i, computed only on bets with an observed independent close.",
+            "definition_ev_dro": "EV_dro_i = (p_hyb_i - eps) * O_i * (1 - tax) - 1 (Post-DRO claimed edge)",
+            "definition_b_dro": "B_dro_i = EV_dro_i - Net CLV_i, computed only on bets with an observed independent close.",
+            "definition_ccr_hyb": "Curse-to-CLV Ratio CCR_hyb = B_hyb / Net CLV; null when no valid close statistic is available.",
+            "definition_ccr_dro": "Curse-to-CLV Ratio CCR_dro = B_dro / Net CLV; null when no valid close statistic is available.",
+            "definition_clv_profit": "Total Expected CLV Profit = sum_i (Stake_i * Net CLV_i), only for observed independent closes.",
+            "market_prefilter_applied": False,
+            "pinnacle_clv_by_construction": "Pinnacle fair odds are inverse probabilities from the same q used as the reference; all CLV-derived output fields are null.",
+            "simulation_setup": "Causal 2-hour decision snapshots use only quotes observed at or before decision time; 5-Check Walk-Forward, max 1 bet per match, OperationalWallet 3-hour locked capital, quarter Kelly capped at [20, 150] PLN.",
         },
         "top_configurations_summary": top_configs_summary,
-        "verification_results": verification_results,
+        "independent_evaluation_results": independent_evaluation_results,
         "full_grid_sweep": all_sweep_results,
     }
 

@@ -624,3 +624,104 @@ def test_is_bet_eligible_wasserstein_dro_gate() -> None:
     assert reason_w == "wasserstein_dro_ambiguous_edge"
     assert diag_w["quarantine"] is True
     assert diag_w["ev_wasserstein"] < 0.0
+def test_dynamic_logit_gate_uses_c0_probability_and_fails_closed_without_it() -> None:
+    eligible, reason, diagnostics = is_bet_eligible(
+        prob_model=0.90,
+        odds=1.50,
+        prob_market_novig=0.50,
+        prob_base=0.55,
+        base_prob_required=True,
+        dynamic_hurdle=False,
+        max_ev_net=None,
+    )
+    assert eligible
+    assert reason == "eligible"
+    assert diagnostics["prob_base"] == pytest.approx(0.55)
+    assert diagnostics["logit_disagreement"] < 0.85
+
+    missing, missing_reason, missing_diag = is_bet_eligible(
+        prob_model=0.90,
+        odds=1.50,
+        prob_market_novig=0.50,
+        base_prob_required=True,
+        dynamic_hurdle=False,
+        max_ev_net=None,
+    )
+    assert not missing
+    assert missing_reason == "missing_base_probability"
+    assert missing_diag["quarantine_reason"] == "missing_base_probability"
+
+
+@pytest.mark.parametrize(
+    ("probability", "odds", "expected"),
+    [
+        (0.65, 2.0, True),
+        (0.50, 4.5, False),  # odds ceiling
+        (0.90, 2.0, False),  # maximum EV
+        (0.345, 3.5, False),  # Wasserstein DRO
+    ],
+)
+def test_dashboard_qualification_matches_signal_pipeline_gate_set(
+    probability, odds, expected
+) -> None:
+    from betting_app.services.bet_qualification_service import (
+        SIGNAL_GATE_KWARGS,
+        qualify_prediction_sides,
+    )
+
+    from betting_app.core.models import C0_NATIVE
+
+    diagnostics = {"uncertainty_required": False}
+    ui = qualify_prediction_sides(
+        prob_a=probability,
+        prob_b=1.0 - probability,
+        diagnostics=diagnostics,
+        model_name=C0_NATIVE.name,
+        odds_a=odds,
+        odds_b=2.0,
+        market_prob_a=0.5,
+    )["a"]
+    signal = is_bet_eligible(
+        prob_model=probability,
+        odds=odds,
+        prob_market_novig=0.5,
+        tax_rate=0.12,
+        min_ev_net=DEFAULT_BASE_MIN_EV,
+        wasserstein_epsilon=0.025,
+        **SIGNAL_GATE_KWARGS,
+    )
+    assert ui[0] is expected
+    assert signal[0] is expected
+
+
+def test_hybrid_prediction_qualification_requires_c0_probability() -> None:
+    from betting_app.services.bet_qualification_service import qualify_prediction_sides
+
+    result = qualify_prediction_sides(
+        prob_a=0.65,
+        prob_b=0.35,
+        diagnostics={"base_model_name": "c0-native"},
+        model_name="Hybrid-Test",
+        odds_a=2.0,
+        odds_b=2.0,
+        market_prob_a=0.5,
+    )
+    assert result["a"][0] is False
+    assert result["a"][1] == "missing_base_probability"
+
+
+def test_native_base_provenance_is_not_mistaken_for_hybrid_probability() -> None:
+    from betting_app.core.models import C0_NATIVE
+    from betting_app.services.bet_qualification_service import qualify_prediction_sides
+
+    result = qualify_prediction_sides(
+        prob_a=0.90,
+        prob_b=0.10,
+        diagnostics={"base_model_name": C0_NATIVE.name},
+        model_name=C0_NATIVE.name,
+        odds_a=1.50,
+        odds_b=8.0,
+        market_prob_a=0.50,
+    )
+    assert result["a"][1] == "dynamic_logit_market_divergence"
+    assert result["a"][2]["prob_base"] == pytest.approx(0.90)

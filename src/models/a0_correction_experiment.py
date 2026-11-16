@@ -21,6 +21,7 @@ from src.analysis.ev_approach_data import (
 )
 from src.analysis.research_benchmark import losses, validate_frame
 from src.models.a0_uncertainty import _resolve_research_root
+from src.models.a0_sports_correction import AnchoredSportsCorrection
 
 CODE_FILES = (
     "scripts/train_a0_sports_correction.py",

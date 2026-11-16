@@ -1,0 +1,5 @@
+outs:
+- md5: 89315b2d294976861707480a47a41b2a
+  size: 6651845
+  hash: md5
+  path: loo_case_accounting.parquet

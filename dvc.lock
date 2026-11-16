@@ -400,3 +400,592 @@ stages:
       hash: md5
       md5: eb3bb4965d6cf4f05b5705a3b27796bd
       size: 1892
+  project_results_replay_v4:
+    cmd: .venv/bin/python scripts/reproduce_project_results.py --output-dir 
+      data/08_reporting/project_results_replay_v4_dvc_20261116
+    deps:
+    - path: betting_app/core/config.py
+      hash: md5
+      md5: 38fe1b11f798646d7b7b74fa077b703d
+      size: 1378
+    - path: betting_app/core/db.py
+      hash: md5
+      md5: 3839733214f09b13f0febb1652f9a203
+      size: 12056
+    - path: betting_app/core/ev.py
+      hash: md5
+      md5: 88aa2481f92ab5665079631cc3beb92a
+      size: 5215
+    - path: betting_app/core/matching.py
+      hash: md5
+      md5: 7f0a7ccdee650e3e828aa458b3ac6e82
+      size: 7367
+    - path: betting_app/core/models/__init__.py
+      hash: md5
+      md5: b3619124c29ef60126af05700d96685b
+      size: 1597
+    - path: betting_app/core/models/contract.py
+      hash: md5
+      md5: 5e70c2c174c19ff27d3ee93ee51b9b6b
+      size: 4784
+    - path: betting_app/core/models/engine.py
+      hash: md5
+      md5: 329942616d9bc26da75cab88dd2862c6
+      size: 8273
+    - path: betting_app/core/models/native_c0.py
+      hash: md5
+      md5: af1975f5f40acf5aea741571103db736
+      size: 78315
+    - path: betting_app/core/models/registry.py
+      hash: md5
+      md5: a3f5bc8b7230f769aeb21859ae005ec4
+      size: 28222
+    - path: betting_app/core/staking.py
+      hash: md5
+      md5: 69de2fc9a693a2f320088980b50ac3e4
+      size: 5012
+    - path: betting_app/models/base.py
+      hash: md5
+      md5: 0486ec5e6fc64235160d158299659e12
+      size: 2489
+    - path: betting_app/models/prediction.py
+      hash: md5
+      md5: 6ab8f93fe4f0f103817e7c9c7cac4e80
+      size: 20939
+    - path: betting_app/scrapers/lineup_scraper.py
+      hash: md5
+      md5: ef2dbb912dda34441643fadfd5f67bd3
+      size: 11988
+    - path: betting_app/services/__init__.py
+      hash: md5
+      md5: 1461b31e43dbe2034c07072bb604517c
+      size: 41
+    - path: betting_app/services/bet_qualification_service.py
+      hash: md5
+      md5: 5b24564c8dc1061a4de8d31ad1f68143
+      size: 28483
+    - path: betting_app/services/c0_inference.py
+      hash: md5
+      md5: 049cec5bda8fd0756186f95777f871f1
+      size: 28897
+    - path: betting_app/services/c0_shadow_readiness.py
+      hash: md5
+      md5: 018504474e59e188579a69939fad09ad
+      size: 53122
+    - path: betting_app/services/canonical_match_service.py
+      hash: md5
+      md5: 7b896e54b5d4c17436cd6c928155014d
+      size: 30291
+    - path: betting_app/services/current_roster_service.py
+      hash: md5
+      md5: baa15c174bd294a2a6a4f3c9205be20c
+      size: 11870
+    - path: betting_app/services/forecast_evidence.py
+      hash: md5
+      md5: f2aa215f3705df8904a163d400ccf163
+      size: 97191
+    - path: betting_app/services/mapping_service.py
+      hash: md5
+      md5: e6a33bd2b5c5a6f2c932dfe72964aaf3
+      size: 18506
+    - path: betting_app/services/prematch_quote_service.py
+      hash: md5
+      md5: 741e9e8533f593ed7f4d3593726b4ca3
+      size: 28103
+    - path: betting_app/services/team_alias_service.py
+      hash: md5
+      md5: fa09c0559610969696d11d3e69b3f279
+      size: 14705
+    - path: betting_app/services/thesis_inference_service.py
+      hash: md5
+      md5: 3d9d0da06a99ffaed4f6cda31e43e573
+      size: 38770
+    - path: betting_app/services/upcoming_inference_service.py
+      hash: md5
+      md5: 7da42eb016e7d334a475b75478bd23f4
+      size: 137381
+    - path: conf/base/c0_serving.json
+      hash: md5
+      md5: f4e0184c61948f7046a9f1e3fcf0a1bd
+      size: 1652
+    - path: 
+        data/04_feature/long_term_market_edge/long_term_market_edge_20261022_01/oddsportal_identity_complete_v3/events.parquet
+      hash: md5
+      md5: 21d3c97a4eaf15589cd6f757964907a2
+      size: 1025618
+    - path: 
+        data/05_model_input/c0_gate_optimizer/c0_gate_optimizer_20261023_01/binding.json
+      hash: md5
+      md5: 932706a08cf51832fc11148104a30cd6
+      size: 3970
+    - path: 
+        data/05_model_input/c0_gate_optimizer/c0_gate_optimizer_20261023_01/configurations.json
+      hash: md5
+      md5: d7180ba1a6c5e098b968836c676bfe21
+      size: 84851
+    - path: 
+        data/05_model_input/c0_gate_optimizer/c0_gate_optimizer_20261023_01/events.parquet
+      hash: md5
+      md5: 2f63b2a009bad5d76d5d423f62e80639
+      size: 3196145
+    - path: 
+        data/05_model_input/c0_gate_optimizer/c0_gate_optimizer_20261023_01/fixtures.parquet
+      hash: md5
+      md5: 480184b5e169249360de35dacc0c6b32
+      size: 14677
+    - path: 
+        data/05_model_input/c0_gate_optimizer/c0_gate_optimizer_20261023_01/protocol.json
+      hash: md5
+      md5: 15bc04e8ccc9e50d4db1a4b589b03629
+      size: 6533
+    - path: 
+        data/05_model_input/c0_model_improvement/c0_model_improvement_20261026_01/execution_binding.json
+      hash: md5
+      md5: 6e4fa39124893054d61f6d2178ca92eb
+      size: 3810
+    - path: 
+        data/05_model_input/c0_model_improvement/c0_model_improvement_20261026_01/protocol.json
+      hash: md5
+      md5: 6df644391e3eb8dbd201b3afec0aeec9
+      size: 5102
+    - path: 
+        data/05_model_input/fresh20_oddsportal/fresh20_oddsportal_20261111_02/protocol.json
+      hash: md5
+      md5: 95aa5c8bb338abe35691c216d612484e
+      size: 6508
+    - path: 
+        data/07_model_output/c0_model_improvement/c0_model_improvement_20261026_01/predictions.parquet
+      hash: md5
+      md5: 52c0f63885c5a062ef91fbdf9ec29032
+      size: 527026
+    - path: 
+        data/07_model_output/pinnacle_model_comparison/pinnacle_model_comparison_20261112_043418/comparison_ledger.parquet
+      hash: md5
+      md5: 1cdcfbd0a9283dfb2094f891c1dc967c
+      size: 1385844
+    - path: 
+        data/08_reporting/audit/model_betting_reconciliation_20261113_01/checked_suggestions.parquet
+      hash: md5
+      md5: d9ebef22150061f175508f5c6a30ccc5
+      size: 77188
+    - path: 
+        data/08_reporting/audit/model_betting_reconciliation_20261113_01/results.json
+      hash: md5
+      md5: 9901e7cbf9bb450639d1d550d90c49b2
+      size: 8273
+    - path: 
+        data/08_reporting/audit/model_betting_reconciliation_20261113_01/sampled_checks.parquet
+      hash: md5
+      md5: 0f9c7d6eab1512f31f8c3e93e56f41c4
+      size: 155278
+    - path: 
+        data/08_reporting/c0_gate_optimizer/c0_gate_optimizer_20261023_01/final_verification.json
+      hash: md5
+      md5: 04c74004e5df24b8f8eba01820078a18
+      size: 20543
+    - path: 
+        data/08_reporting/c0_gate_optimizer/c0_gate_optimizer_20261023_01/sweep/funded_ledger.parquet
+      hash: md5
+      md5: b2917dca21a8b5d475ef57d96552ae68
+      size: 3853447
+    - path: 
+        data/08_reporting/c0_gate_optimizer/c0_gate_optimizer_20261023_01/sweep/selected.parquet
+      hash: md5
+      md5: 66996e4d7074b5959728634c6b4d4dce
+      size: 5036385
+    - path: 
+        data/08_reporting/c0_gate_optimizer/c0_gate_optimizer_20261023_01/sweep/summary.parquet
+      hash: md5
+      md5: 1f883243faebc23785b066d0e7fb9216
+      size: 349687
+    - path: 
+        data/08_reporting/c0_model_improvement/c0_model_improvement_20261026_01/sealed_verification.json
+      hash: md5
+      md5: a1a671ed5b2fd29095e5085ff3992a8c
+      size: 1908
+    - path: 
+        data/08_reporting/fresh20_oddsportal/fresh20_oddsportal_20261111_02/evaluation/evaluation_receipt.json
+      hash: md5
+      md5: 9db9765ec9fb75cf35f96814a247b6d0
+      size: 4631
+    - path: 
+        data/08_reporting/fresh20_oddsportal/fresh20_oddsportal_20261111_02/evaluation/execution_binding.json
+      hash: md5
+      md5: a74799c0b885534b593bc4d60620ad18
+      size: 3247
+    - path: 
+        data/08_reporting/fresh20_oddsportal/fresh20_oddsportal_20261111_02/evaluation/oddsportal_annual_endpoint_ledger.parquet
+      hash: md5
+      md5: 3e9937c0b6028519aafbef2a4e039ea5
+      size: 11844921
+    - path: 
+        data/08_reporting/fresh20_oddsportal/fresh20_oddsportal_20261111_02/evaluation/probability_quality.parquet
+      hash: md5
+      md5: d01904fa88f125e2771758a492054a64
+      size: 11142
+    - path: 
+        data/08_reporting/pinnacle_model_comparison/pinnacle_model_comparison_20261112_043418/scores.csv
+      hash: md5
+      md5: f90807f8219bf926bf26809955b859ef
+      size: 2845
+    - path: 
+        data/08_reporting/pinnacle_model_comparison/pinnacle_model_comparison_20261112_043418/summary.json
+      hash: md5
+      md5: 123c61f3a8b153ba6285776e40186c7c
+      size: 27851
+    - path: 
+        data/08_reporting/pinnacle_model_comparison/pinnacle_model_comparison_20261112_043418/verification.json
+      hash: md5
+      md5: 406a847aacb1380b8b4f441dfcec0a94
+      size: 8282
+    - path: 
+        data/08_reporting/production_probability/production_probability_20261023_02/shrinkage/loo_case_accounting.parquet
+      hash: md5
+      md5: 89315b2d294976861707480a47a41b2a
+      size: 6651845
+    - path: 
+        data/08_reporting/production_probability/production_probability_20261023_02/shrinkage/loo_consensus_paired_contrasts.csv
+      hash: md5
+      md5: 3629e29ba24a701288b4df0f696e7541
+      size: 49859
+    - path: 
+        data/08_reporting/production_probability/production_probability_20261023_02/shrinkage/loo_consensus_scores.csv
+      hash: md5
+      md5: 7e6ae7bb14b0bd7a8c7f917ae8c35363
+      size: 17153
+    - path: 
+        data/08_reporting/production_probability/production_probability_20261023_02/shrinkage/loo_matched_panel.parquet
+      hash: md5
+      md5: da83b134705a55d7fec5ad8779a8a683
+      size: 2135256
+    - path: 
+        data/08_reporting/production_probability/production_probability_20261023_02/verification/sealed_verification.json
+      hash: md5
+      md5: ff1e7fdc8a98cc37b2198cd0c92f3153
+      size: 10647
+    - path: 
+        data/08_reporting/production_zero_tax_clv/production_zero_tax_clv_20261023_01/clv/closing_states.parquet
+      hash: md5
+      md5: 8d2e323f6d120fd84f78944c7c8494fd
+      size: 161593
+    - path: 
+        data/08_reporting/production_zero_tax_clv/production_zero_tax_clv_20261023_01/clv/entry_clv_panel.parquet
+      hash: md5
+      md5: 5ddf547d0e67a123d361fa3099e16ca9
+      size: 5289576
+    - path: 
+        data/08_reporting/production_zero_tax_clv/production_zero_tax_clv_20261023_01/verification/sealed_verification.json
+      hash: md5
+      md5: 197eb03e4f33cb646cfbfde70fb9183b
+      size: 16292
+    - path: 
+        data/artifacts/corrected-ratings-logloss-20260908-full/holdout_predictions.csv
+      hash: md5
+      md5: 15d21e3d56be5e191c64108ad3bea062
+      size: 14687634
+    - path: data/artifacts/corrected-ratings-logloss-20260908-full/summary.json
+      hash: md5
+      md5: 49c6993503a36e6fd86e0e8237150cbf
+      size: 65591
+    - path: 
+        data/artifacts/corrected-ratings-logloss-20260908-full/verification.json
+      hash: md5
+      md5: e86ea53f791faf44dea82bb0efe16d31
+      size: 52824
+    - path: pyproject.toml
+      hash: md5
+      md5: bc28445752f609f02d87dcbbc3ff2938
+      size: 930
+    - path: scripts/reproduce_project_results.py
+      hash: md5
+      md5: 1e7fa79ea8655f64ad062a9fa8051606
+      size: 79346
+      isexec: true
+    - path: scripts/train_c0_multiscale_20token.py
+      hash: md5
+      md5: 2268a9ec3caaee023952ca863df6051f
+      size: 26307
+      isexec: true
+    - path: scripts/train_c0_year_anchor_distilled.py
+      hash: md5
+      md5: 51301465720587c1d9f42d4c197187bb
+      size: 58240
+      isexec: true
+    - path: src/analysis/__init__.py
+      hash: md5
+      md5: db9b134d720c99d3aab66d7f106847f7
+      size: 1387
+    - path: src/analysis/a0_capacity_experiment.py
+      hash: md5
+      md5: c315269042f6d817d90a5b860de79f30
+      size: 40482
+    - path: src/analysis/betting_guards_a_to_d.py
+      hash: md5
+      md5: 0f60a94bf9ef11afc90f0cda6bc04576
+      size: 10085
+    - path: src/analysis/bootstrap.py
+      hash: md5
+      md5: 9a0f7e707fb3673eaef20b2ba79fdc4e
+      size: 12895
+    - path: src/analysis/c0_betting_development.py
+      hash: md5
+      md5: f3ecf3884ec17049aa90cc27f3f6cc1b
+      size: 34400
+    - path: src/analysis/c0_betting_development_evaluation.py
+      hash: md5
+      md5: 90c5eccb7c9c7f3c71e3c0939f71ec6d
+      size: 16389
+    - path: src/analysis/c0_distilled_reproduction_evaluation.py
+      hash: md5
+      md5: 59df1f71335bc32f9ce18c5e893efa3b
+      size: 12165
+    - path: src/analysis/c0_edge_alpha_audit.py
+      hash: md5
+      md5: 01adb154cacebcf3b72c6eca5bf1b54c
+      size: 92817
+    - path: src/analysis/c0_edge_policy_audit.py
+      hash: md5
+      md5: b90f647172896978c2e0e6a603df2c43
+      size: 102926
+    - path: src/analysis/c0_ev_loss_evaluation.py
+      hash: md5
+      md5: 82b17514ddd52b8fafb7042411208d7c
+      size: 13814
+    - path: src/analysis/c0_ev_loss_study.py
+      hash: md5
+      md5: 1ee05694d009c70fcb5c575fbbbc8e17
+      size: 33409
+    - path: src/analysis/c0_input_aligned_data.py
+      hash: md5
+      md5: 8661a126133610286707ad72030f041d
+      size: 33295
+    - path: src/analysis/c0_input_aligned_forward.py
+      hash: md5
+      md5: e1d60fb327595565be12ae1a233647e5
+      size: 23280
+    - path: src/analysis/c0_input_aligned_study.py
+      hash: md5
+      md5: 2d30857230bb070284cb62cca1868761
+      size: 28662
+    - path: src/analysis/c0_policy_data.py
+      hash: md5
+      md5: c2a5cc3408fd18d264d0242421fce0ba
+      size: 23531
+    - path: src/analysis/c0_region_factorial.py
+      hash: md5
+      md5: 945a16f40355020aa52c6d68323115fb
+      size: 80704
+    - path: src/analysis/c0_region_finance.py
+      hash: md5
+      md5: 72b88fcd992d9309f969929c20bff70b
+      size: 39945
+    - path: src/analysis/devig_comparison.py
+      hash: md5
+      md5: d602585351f88b8f25c32028247dd040
+      size: 2967
+    - path: src/analysis/ev_approach_data.py
+      hash: md5
+      md5: 4cc43d29a14c3206171eab63e0716ffc
+      size: 133441
+    - path: src/analysis/ev_approach_evaluation.py
+      hash: md5
+      md5: 77e42ac1922ce487d7dd5ab547bbe37b
+      size: 62221
+    - path: src/analysis/ev_approach_policies.py
+      hash: md5
+      md5: 0a4cee5ac6d84d920505ad5b1fbeb2db
+      size: 46270
+    - path: src/analysis/ev_approach_risk.py
+      hash: md5
+      md5: 9f9e4f164d45b6e040b21dd63ff3f742
+      size: 36257
+    - path: src/analysis/ev_approach_runner.py
+      hash: md5
+      md5: c960feca95a7ebc77c4a81dddc9fb974
+      size: 118932
+    - path: src/analysis/ev_asof_replay.py
+      hash: md5
+      md5: c850fb91984bddd98c51734d69009699
+      size: 127254
+    - path: src/analysis/financial_benchmark.py
+      hash: md5
+      md5: 13dd88ec4710747929f80cf9fb3643fb
+      size: 27877
+    - path: src/analysis/historical_production_simulator.py
+      hash: md5
+      md5: 3ec7a6445db0641600b1bd928ee27d04
+      size: 17395
+    - path: src/analysis/long_term_market_evaluation.py
+      hash: md5
+      md5: 7c2e185bb159851fbde58022f0b33b5c
+      size: 46278
+    - path: src/analysis/metrics.py
+      hash: md5
+      md5: 16942d4ff88d55053606e0e06cd7aeab
+      size: 11473
+    - path: src/analysis/model_benchmark.py
+      hash: md5
+      md5: 5b85ca978a01ea27a32e54b606392eec
+      size: 23914
+    - path: src/analysis/odds_bracket_benchmark.py
+      hash: md5
+      md5: 5fa0c45251ee24adf704d9b95d3f9c62
+      size: 12319
+    - path: src/analysis/probability_metrics.py
+      hash: md5
+      md5: 6e08993e46ddd529f4095f6d1a07b05a
+      size: 801
+    - path: src/analysis/production_market_benchmark.py
+      hash: md5
+      md5: 66548839b23284cea9eca30378a11173
+      size: 67712
+    - path: src/analysis/production_saved_evidence.py
+      hash: md5
+      md5: b652e09ec389a0579dc546e58e64efb7
+      size: 25227
+    - path: src/analysis/quote_provenance.py
+      hash: md5
+      md5: 2f74c4a749522091a90ae5ff82734e7b
+      size: 27620
+    - path: src/analysis/replacement_guards.py
+      hash: md5
+      md5: 56fdb343b969d01df4dff6298dcc4148
+      size: 10956
+    - path: src/analysis/research_benchmark.py
+      hash: md5
+      md5: 8f3fb1d4b78cdd7e9634ef3f586a3ba6
+      size: 12762
+    - path: src/analysis/roster_provenance.py
+      hash: md5
+      md5: 267cf25be4ba1a53c0f5fa844ac84cdf
+      size: 11242
+    - path: src/analysis/saved_market_comparisons.py
+      hash: md5
+      md5: c6c4f319022af8296ab67199a8d854c6
+      size: 15952
+    - path: src/analysis/shin_devig.py
+      hash: md5
+      md5: 4b2b17934b8b24bbd71604be2cb6f17a
+      size: 2294
+    - path: src/analysis/thesis_metrics.py
+      hash: md5
+      md5: c80a1413aacd59ace7dd2319625853fc
+      size: 2303
+    - path: src/analysis/unified_evaluation_engine.py
+      hash: md5
+      md5: 8eb6f4ff80a5390220dc3a0024683b32
+      size: 36100
+    - path: src/models/__init__.py
+      hash: md5
+      md5: a066811853449d27bbee72ea03a30c5e
+      size: 69
+    - path: src/models/a0_accelerator.py
+      hash: md5
+      md5: 759e55f9b468415f3d774791e1ca7505
+      size: 7418
+    - path: src/models/a0_capacity_experiment.py
+      hash: md5
+      md5: 90634cee759a77e0792f16b367906a33
+      size: 14117
+    - path: src/models/a0_capacity_runner.py
+      hash: md5
+      md5: b48a2cca34e129187848bbe0709860d5
+      size: 55523
+    - path: src/models/a0_data_focus.py
+      hash: md5
+      md5: c1f92a1129820b997c0e88d06927ab16
+      size: 36009
+    - path: src/models/a0_history_reconstruction.py
+      hash: md5
+      md5: dc1dc9676b5e96d13b0334059ba93554
+      size: 9293
+    - path: src/models/a0_native_refit.py
+      hash: md5
+      md5: 749d13cbaf2457927abcd7d886737ac1
+      size: 93704
+    - path: src/models/a0_target_experiment.py
+      hash: md5
+      md5: 7e41157fe02b4ab8d266e6b11fe440b1
+      size: 74944
+    - path: src/models/a0_target_objectives.py
+      hash: md5
+      md5: 80bb358a4da811915cb3a6b9dad05d06
+      size: 12420
+    - path: src/models/a0_uncertainty.py
+      hash: md5
+      md5: 2473d0f7e55f9079e695d7df42951cd0
+      size: 69909
+    - path: src/models/c0_betting_price_head.py
+      hash: md5
+      md5: 7349042decd8df7349d36f134e819877
+      size: 10207
+    - path: src/models/c0_causal_anchor_bank.py
+      hash: md5
+      md5: 71a58f9d7bf877503e88a617b6b1cac4
+      size: 30144
+    - path: src/models/c0_distilled_proof.py
+      hash: md5
+      md5: e86e56dc1bd115f616caf74819a1c562
+      size: 24157
+    - path: src/models/c0_distilled_replay.py
+      hash: md5
+      md5: 156af0cced9dca56de122a81fe1c6810
+      size: 14546
+    - path: src/models/c0_distilled_reproduction.py
+      hash: md5
+      md5: 35689f08c01770cd94e4e9a8d699cc9a
+      size: 26495
+    - path: src/models/c0_edge_model_audit.py
+      hash: md5
+      md5: 829dc7896e3c9935aef644c3eae33e6e
+      size: 70169
+    - path: src/models/c0_ev_loss_head.py
+      hash: md5
+      md5: fbed745d96c0e4a14b0fc5a8d6fe8d27
+      size: 14750
+    - path: src/models/c0_live_query.py
+      hash: md5
+      md5: 611f56c30d001e15f8f7014ae1e3a564
+      size: 22090
+    - path: src/models/c0_regional_replay.py
+      hash: md5
+      md5: 9e40d645b0e211e11b3fd4cb3324d22e
+      size: 28161
+    - path: src/models/competition_tiers.py
+      hash: md5
+      md5: 3c08a97b2497bd301cf180c40e63a340
+      size: 20650
+    - path: src/models/cross_region_input_normalizer.py
+      hash: md5
+      md5: f9e501944a543f1b903f76ce9110b72a
+      size: 12998
+    - path: src/models/ev_approach_models.py
+      hash: md5
+      md5: d15d7ecf549e540cac99b91c744bdec7
+      size: 51585
+    - path: src/models/symmetric_series.py
+      hash: md5
+      md5: 8f7b0b278bd840a770b3cb6c83559c5b
+      size: 8600
+    - path: src/ratings/competition_adjustment.py
+      hash: md5
+      md5: a1d3c4cba4380f98cfacedc941b49209
+      size: 2952
+    - path: src/ratings/family_calibrated_glicko2.py
+      hash: md5
+      md5: 6988da4c5bfcd7e00f31d7f2714557ca
+      size: 57583
+    - path: src/ratings/glicko2_core.py
+      hash: md5
+      md5: 4486c6093eb85eb21f893088c3c3a883
+      size: 12034
+    - path: uv.lock
+      hash: md5
+      md5: 96e1e9e299a17608006ff86e2bcf6013
+      size: 592847
+    outs:
+    - path: data/08_reporting/project_results_replay_v4_dvc_20261116
+      hash: md5
+      md5: 9029a3a178b16be3d07a10ce1e06e2a0.dir
+      size: 298936
+      nfiles: 2

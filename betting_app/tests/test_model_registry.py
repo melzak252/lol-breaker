@@ -6,6 +6,7 @@ from betting_app.core.models import (
     A1_CONSOLIDATED,
     ACTIVE_MODEL_NAME,
     BAYESIAN_SHRUNK_HYBRID,
+    C0_DISTILLED_20T,
     C0_NATIVE,
     EXP039_THESIS,
     EXP078_LINEAR,
@@ -32,7 +33,21 @@ def test_registry_lookups_keep_legacy_and_semantic_models_distinct():
     assert get_model("Residual-Tier-Calibration-Challenger") is A1_CONSOLIDATED
 
     # Contract properties
-    assert C0_NATIVE.effective_display_name == "PlayerHistory-Attention-Ensemble"
+    assert C0_NATIVE.version == "c0-native-fresh20-2026-10-21-v1-regional-v1"
+    assert C0_NATIVE.feature_version == "native-c0-fresh20-history19-regional-v1"
+    assert C0_NATIVE.metadata["weights_model_version"] == "c0-native-fresh20-2026-10-21-v1"
+    assert C0_NATIVE.metadata["weights_feature_version"] == "native-c0-fresh20-history19-v1"
+    assert C0_NATIVE.metadata["regional_adjustment_version"] == "regional-input-correction-v1"
+    assert C0_NATIVE.metadata["token_count"] == 20
+    assert C0_NATIVE.metadata["observed_history_slots"] == 19
+    assert C0_NATIVE.metadata["learned_model_tokens"] == 1
+    assert BAYESIAN_SHRUNK_HYBRID.version == f"{C0_NATIVE.version}-a0.50-t1.00"
+    assert (C0_NATIVE.version, C0_NATIVE.feature_version) != (
+        "c0-native-2026-w32-e12-v1-regional-v1",
+        "native-c0-history16-regional-v1",
+    )
+    assert C0_NATIVE is not C0_DISTILLED_20T
+    assert C0_NATIVE.version != C0_DISTILLED_20T.version
     assert C0_NATIVE.effective_short_code == "C0"
     assert BAYESIAN_SHRUNK_HYBRID.effective_display_name == "MarketShrunk-Hybrid-50"
     assert BAYESIAN_SHRUNK_HYBRID.effective_short_code == "Hybrid-50"
@@ -59,6 +74,7 @@ def test_registry_lookups_keep_legacy_and_semantic_models_distinct():
     c0_reg = next(m for m in registered if m["name"] == C0_NATIVE.name)
     assert c0_reg["display_name"] == "PlayerHistory-Attention-Ensemble"
     assert c0_reg["short_code"] == "C0"
+
 def test_registry_switching_keeps_shrinkage_on_selected_base():
     try:
         assert get_active_model() is C0_NATIVE
@@ -207,3 +223,5 @@ def test_unknown_environment_model_cannot_fall_back(monkeypatch):
     monkeypatch.setenv("ACTIVE_PREDICTION_MODEL", "nonexistent-model")
     with pytest.raises(ValueError):
         get_active_model()
+
+

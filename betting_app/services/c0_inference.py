@@ -24,6 +24,16 @@ from betting_app.core.models.native_c0 import (
     MODEL_NAME,
     MODEL_VERSION,
     PROJECT_ROOT,
+    REGIONAL_ADJUSTMENT_VERSION,
+    WEIGHTS_FEATURE_VERSION,
+    WEIGHTS_MODEL_VERSION,
+    _FRESH_BUNDLE_MANIFEST_SHA256,
+    _FRESH_CALIBRATION_SHA256,
+    _FRESH_CHECKPOINT_SHA256,
+    _FRESH_REFERENCE_CALIBRATION_SHA256,
+    _FRESH_SHARED_SHA256,
+    _FRESH_MODEL_ROOT_RELATIVE,
+    _COMPLETION_SHA256,
     encode_snapshot,
     load_serving_config,
     snapshot_request,
@@ -102,26 +112,60 @@ def _known_exception(kind: str, message: str) -> BaseException:
 def _validate_identity(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise C0InferenceError("C0 worker omitted its runtime model identity")
+    try:
+        config, config_path, config_sha256 = load_serving_config()
+    except (OSError, ValueError) as exc:
+        raise C0InferenceError("C0 serving source contract is unavailable or invalid") from exc
     required = {
         "name", "version", "family", "feature_version", "has_uncertainty", "run_id", "variant",
         "artifact_path", "execution_sha256", "completion_sha256", "artifact_hashes",
         "training_source_hashes", "training_source_provenance", "serving_source_hashes",
         "raw_feature_replay_source", "canonical_raw_history_source",
-        "serving_config_path", "serving_config_sha256", "scope", "forward_status",
+        "serving_config_path", "serving_config_sha256", "scope", "source_contract_version",
+        "forward_status", "weights_model_version", "weights_feature_version",
+        "regional_default_enabled", "regional_adjustment_version", "fresh_candidate",
+        "fresh_protocol_path", "fresh_bundle_manifest_sha256", "fresh_checkpoint_hashes",
+        "fresh_calibration_sha256", "shared_expert_sha256", "reference_calibration_sha256",
     }
     if set(value) != required or (
         value["name"] != MODEL_NAME or value["version"] != MODEL_VERSION
         or value["family"] != "native_c0" or value["feature_version"] != FEATURE_VERSION
+        or value["weights_model_version"] != WEIGHTS_MODEL_VERSION
+        or value["weights_feature_version"] != WEIGHTS_FEATURE_VERSION
+        or value["regional_default_enabled"] is not True
+        or value["regional_adjustment_version"] != REGIONAL_ADJUSTMENT_VERSION
         or value["has_uncertainty"] is not False
-        or value["run_id"] != "a0_data_focus_20260929_192443" or value["variant"] != "control"
+        or value["run_id"] != "c0d_repro_20261021_01" or value["variant"] != "20t"
+        or value["artifact_path"] != str(PROJECT_ROOT / _FRESH_MODEL_ROOT_RELATIVE)
         or value["scope"] != "DEVELOPMENT_ONLY"
-        or value["forward_status"] != "frozen_static_2026_artifact_not_prospective_certified"
-        or value["training_source_provenance"] != "pinned_frozen_execution_contract"
+        or value["source_contract_version"] != config["source_contract_version"]
+        or value["forward_status"] != config["forward_status"]
+        or value["training_source_provenance"] != "fresh_execution_binding_with_original_shared_expert"
+        or value["fresh_candidate"] != config["fresh_candidate"]
+        or value["fresh_protocol_path"] != str(PROJECT_ROOT / config["fresh_protocol_path"])
+        or not isinstance(value["fresh_checkpoint_hashes"], Mapping)
+        or value["fresh_calibration_sha256"] is None
+        or value["shared_expert_sha256"] is None
+        or value["fresh_bundle_manifest_sha256"] != _FRESH_BUNDLE_MANIFEST_SHA256
+        or value["fresh_checkpoint_hashes"] != _FRESH_CHECKPOINT_SHA256
+        or value["fresh_calibration_sha256"] != _FRESH_CALIBRATION_SHA256
+        or value["shared_expert_sha256"] != _FRESH_SHARED_SHA256
+        or value["reference_calibration_sha256"] != _FRESH_REFERENCE_CALIBRATION_SHA256
+        or value["reference_calibration_sha256"] is None
         or not isinstance(value["artifact_hashes"], Mapping)
+        or value["completion_sha256"] != _COMPLETION_SHA256
+        or value["artifact_hashes"].get("bundle_manifest.json") != _FRESH_BUNDLE_MANIFEST_SHA256
+        or value["artifact_hashes"].get("calibration.json") != _FRESH_CALIBRATION_SHA256
+        or any(
+            value["artifact_hashes"].get(f"seed_{seed}/checkpoint_epoch16.pt") != digest
+            for seed, digest in _FRESH_CHECKPOINT_SHA256.items()
+        )
         or not isinstance(value["training_source_hashes"], Mapping)
         or not isinstance(value["serving_source_hashes"], Mapping)
         or not isinstance(value["raw_feature_replay_source"], Mapping)
         or not isinstance(value["canonical_raw_history_source"], Mapping)
+        or value["serving_config_path"] != str(config_path)
+        or value["serving_config_sha256"] != config_sha256
     ):
         raise C0InferenceError("C0 worker returned a runtime identity outside the pinned C0 contract")
     replay_source = value["raw_feature_replay_source"]
@@ -129,12 +173,19 @@ def _validate_identity(value: Any) -> dict[str, Any]:
         raise C0InferenceError("C0 worker omitted the raw feature replay source identity")
     if replay_source["implementation_sha256"] != value["serving_source_hashes"].get(
         "project:src/analysis/ev_asof_replay.py"
-    ):
+    ) or replay_source["implementation_sha256"] != config["feature_replay_sha256"]:
         raise C0InferenceError("C0 raw feature replay source differs from the verified serving-source pin")
     raw_source = value["canonical_raw_history_source"]
-    if set(raw_source) != {"path", "sha256", "source_kind"} or raw_source["source_kind"] != "canonical_frozen_golgg_history":
+    if (
+        set(raw_source) != {"path", "sha256", "source_kind"}
+        or raw_source["source_kind"] != config["raw_history_source_kind"]
+        or raw_source["sha256"] != config["raw_history_sha256"]
+    ):
         raise C0InferenceError("C0 worker omitted the canonical raw-history source identity")
-    return json.loads(json.dumps(value, allow_nan=False))
+    try:
+        return json.loads(json.dumps(value, allow_nan=False))
+    except (TypeError, ValueError) as exc:
+        raise C0InferenceError("C0 worker returned a non-JSON runtime identity") from exc
 
 
 class C0InferenceClient:

@@ -68,6 +68,172 @@ def _price(value: Any) -> float | None:
         return None
 
 
+# ONE de-vig method for the whole live decision path: multiplicative two-way
+# normalisation. It is what the stored forecast contexts (`prob_a` in
+# market_context_json), `stored_market_context_is_current` and the hybrid
+# forecasts already use, so every persisted value stays reproducible. Shin
+# (betting_app.core.ev.devig_shin) is NOT used anywhere in this chain; mixing it
+# in for opening quotes made the gates compare two different estimators.
+MIN_CONSENSUS_BOOKS = 2
+CONSENSUS_INSUFFICIENT_REASON = 'market_consensus_insufficient_books'
+
+
+def devig_prob_a(odds_a: float, odds_b: float) -> float:
+    """Multiplicative de-vig probability of side A for a valid two-way price."""
+    inv_a, inv_b = 1 / odds_a, 1 / odds_b
+    return inv_a / (inv_a + inv_b)
+
+
+@dataclass(frozen=True)
+class MarketConsensus:
+    """Mean per-book no-vig probability of side A over distinct bookmakers.
+
+    `prob_a` is None (never a fallback) when fewer than `min_books` distinct
+    bookmakers contribute after the optional focal-book exclusion; `reason`
+    then explains the withholding.
+    """
+    prob_a: float | None
+    book_count: int
+    bookmaker_ids: tuple[int, ...]
+    excluded_bookmaker_id: int | None
+    reason: str | None
+
+
+def loo_consensus(prob_a_by_book: Mapping[int, float], *, exclude_bookmaker_id: int | None = None,
+                  min_books: int = MIN_CONSENSUS_BOOKS) -> MarketConsensus:
+    """Leave-one-out consensus over one no-vig probability per bookmaker.
+
+    The focal book (`exclude_bookmaker_id`) never contributes to its own
+    consensus. At least `min_books` OTHER distinct books must remain.
+    """
+    book_ids = tuple(sorted(int(b) for b in prob_a_by_book if exclude_bookmaker_id is None or int(b) != int(exclude_bookmaker_id)))
+    excluded = None if exclude_bookmaker_id is None else int(exclude_bookmaker_id)
+    if len(book_ids) < min_books:
+        return MarketConsensus(None, len(book_ids), book_ids, excluded, CONSENSUS_INSUFFICIENT_REASON)
+    probs = [float(prob_a_by_book[b]) for b in book_ids]
+    if any(not math.isfinite(p) or not 0 < p < 1 for p in probs):
+        return MarketConsensus(None, len(book_ids), book_ids, excluded, 'market_consensus_invalid_probability')
+    return MarketConsensus(sum(probs) / len(probs), len(book_ids), book_ids, excluded, None)
+
+
+def quotes_consensus(quotes: Sequence[PrematchQuote], *, exclude_bookmaker_id: int | None = None,
+                     min_books: int = MIN_CONSENSUS_BOOKS) -> MarketConsensus:
+    """Consensus of already admitted (fresh, pre-start, aligned) quotes.
+
+    One quote per bookmaker counts: the newest by (scraped_at, snapshot id).
+    """
+    latest: dict[int, PrematchQuote] = {}
+    for quote in quotes:
+        prior = latest.get(quote.bookmaker_id)
+        if prior is None or (quote.scraped_at, quote.odds_snapshot_id) > (prior.scraped_at, prior.odds_snapshot_id):
+            latest[quote.bookmaker_id] = quote
+    return loo_consensus({b: devig_prob_a(q.odds_a, q.odds_b) for b, q in latest.items()},
+                         exclude_bookmaker_id=exclude_bookmaker_id, min_books=min_books)
+
+
+def serialize_focal_consensus(consensus: MarketConsensus) -> dict[str, Any]:
+    return {'excluded_bookmaker_id': consensus.excluded_bookmaker_id, 'bookmaker_ids': list(consensus.bookmaker_ids),
+            'book_count': consensus.book_count, 'prob_a': consensus.prob_a, 'method': 'multiplicative_loo_mean'}
+
+
+def blend_hybrid_for_consensus(diagnostics: Mapping[str, Any], market_prob_a: float) -> tuple[dict[str, float | None] | None, str | None]:
+    """Re-blend a stored hybrid forecast's C0 probability with a given consensus.
+
+    Uses only the persisted `base_prob_a` (the sports-only C0 probability for
+    side A) and the persisted blend parameters. Returns (None, reason) when the
+    forecast does not carry them, never an approximation from the hybrid p.
+    """
+    from betting_app.core.models.engine import blend_market_probability
+    base = diagnostics.get('base_prob_a')
+    if isinstance(base, bool) or not isinstance(base, (int, float)) or not math.isfinite(base) or not 0 < base < 1:
+        return None, 'hybrid_base_prob_missing'
+    try:
+        params = dict(alpha=diagnostics['alpha'], temperature=diagnostics['temperature'], blending_mode=diagnostics['blending_mode'])
+        probability = blend_market_probability(float(base), market_prob_a, **params)
+        base_diag = diagnostics.get('base_diagnostics')
+        low_a = low_b = None
+        if isinstance(base_diag, Mapping) and base_diag.get('p_low_a') is not None and base_diag.get('p_low_b') is not None:
+            low_a = blend_market_probability(float(base_diag['p_low_a']), market_prob_a, **params)
+            low_b = min(1.0 - probability, blend_market_probability(float(base_diag['p_low_b']), 1.0 - market_prob_a, **params))
+    except (KeyError, TypeError, ValueError):
+        return None, 'hybrid_parameters_invalid'
+    return {'prob_a': probability, 'p_low_a': low_a, 'p_low_b': low_b}, None
+def _prediction_diagnostics(value: Any) -> dict[str, Any] | None:
+    """Decode persisted diagnostics without trusting malformed JSON or containers."""
+    decoded = _saved(value)
+    return dict(decoded) if decoded is not None else None
+
+
+def qualify_prediction_for_quote(
+    *,
+    context: PrematchMarketContext | None,
+    quote: PrematchQuote | None,
+    prob_a: float | None,
+    prob_b: float | None,
+    diagnostics: Any,
+    model_name: str,
+    league: str | None = None,
+    match_date: Any = None,
+    best_of: int | None = None,
+    tax_rate: float = 0.12,
+    rating_disagreement: float | None = None,
+) -> dict[str, Any]:
+    """Re-assess one prediction against the independent consensus for its quote."""
+    from betting_app.services.bet_qualification_service import (
+        is_market_hybrid_prediction,
+        qualify_prediction_sides,
+    )
+
+    source_diag = _prediction_diagnostics(diagnostics)
+    fail_reason = None
+    focal = None
+    view = None
+    if context is None or quote is None:
+        fail_reason = 'market_context_missing'
+    else:
+        focal = quotes_consensus(context.quotes, exclude_bookmaker_id=quote.bookmaker_id)
+        if focal.prob_a is None:
+            fail_reason = focal.reason or CONSENSUS_INSUFFICIENT_REASON
+    is_hybrid = is_market_hybrid_prediction(model_name, source_diag or {})
+    assessed_a, assessed_b = prob_a, prob_b
+    assessed_diag = dict(source_diag) if source_diag is not None else {}
+    if fail_reason is None and is_hybrid:
+        if source_diag is None:
+            fail_reason = 'hybrid_diagnostics_missing'
+        else:
+            view, fail_reason = blend_hybrid_for_consensus(source_diag, focal.prob_a)
+            if view is not None:
+                assessed_a, assessed_b = view['prob_a'], 1.0 - view['prob_a']
+                # Preserve immutable source diagnostics; assessed bounds are focal-specific.
+                if view['p_low_a'] is None or view['p_low_b'] is None:
+                    assessed_diag.pop('p_low_a', None)
+                    assessed_diag.pop('p_low_b', None)
+                else:
+                    assessed_diag['p_low_a'] = view['p_low_a']
+                    assessed_diag['p_low_b'] = view['p_low_b']
+    elif fail_reason is None:
+        if prob_a is None or prob_b is None:
+            fail_reason = 'prediction_probability_missing'
+    if fail_reason is not None or assessed_a is None or assessed_b is None:
+        reason = fail_reason or 'prediction_probability_missing'
+        return {
+            'prob_a': assessed_a, 'prob_b': assessed_b,
+            'diagnostics': assessed_diag, 'market_prob_a': focal.prob_a if focal else None,
+            'qualified': {side: (False, reason, {}) for side in ('a', 'b')},
+            'reason': reason,
+        }
+    decisions = qualify_prediction_sides(
+        prob_a=assessed_a, prob_b=assessed_b, diagnostics=assessed_diag,
+        model_name=model_name, odds_a=quote.odds_a, odds_b=quote.odds_b,
+        market_prob_a=focal.prob_a, league=league, match_date=match_date,
+        best_of=best_of, tax_rate=tax_rate, rating_disagreement=rating_disagreement,
+    )
+    return {
+        'prob_a': assessed_a, 'prob_b': assessed_b, 'diagnostics': assessed_diag,
+        'market_prob_a': focal.prob_a, 'qualified': decisions, 'reason': None,
+    }
+
+
 def load_prematch_quotes(canonical_match_ids: Sequence[int], *, decision_at: datetime, max_age_seconds: float = 300.0, session=None) -> dict[int, PrematchMarketContext]:
     decision = parse_aware_utc(decision_at)
     if not isinstance(decision_at, datetime) or decision is None:
@@ -131,7 +297,10 @@ def load_prematch_quotes(canonical_match_ids: Sequence[int], *, decision_at: dat
         quotes.sort(key=lambda q:(q.bookmaker_id,q.odds_snapshot_id))
         if not quotes and not rejects:
             rejects.append(QuoteRejection(None,None,common or 'quote_missing'))
-        q = sum((1/x.odds_a)/(1/x.odds_a+1/x.odds_b) for x in quotes)/len(quotes) if quotes else None
+        consensus = quotes_consensus(quotes)
+        if quotes and consensus.prob_a is None:
+            rejects.append(QuoteRejection(None, None, consensus.reason))
+        q = consensus.prob_a
         result[mid] = PrematchMarketContext(mid,a,b,match.get('league'),status,start,decision,tuple(quotes),q,tuple(rejects))
     return result
 
@@ -142,9 +311,23 @@ def latest_predictions(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
         row = dict(item)
         clock = parse_aware_utc(row.get('predicted_at'))
         key = (row.get('canonical_match_id'),row.get('model_name'),row.get('model_version'))
-        rank = (clock is not None, clock or datetime.min.replace(tzinfo=UTC), int(row['id']))
-        if key not in latest or rank > latest[key][0]: latest[key] = (rank,row)
-    return [pair[1] for pair in latest.values()]
+        row_id = int(row['id'])
+        timed, unorderable = latest.get(key, (None, None))
+        if clock is None:
+            if unorderable is None or row_id > unorderable[0]:
+                unorderable = (row_id, row)
+        elif timed is None or (clock, row_id) > (timed[0], timed[1]):
+            timed = (clock, row_id, row)
+        latest[key] = (timed, unorderable)
+    selected = []
+    for timed, unorderable in latest.values():
+        if unorderable is not None and (timed is None or unorderable[0] > timed[1]):
+            selected.append(unorderable[1])
+        elif timed is not None:
+            selected.append(timed[2])
+        else:
+            selected.append(unorderable[1])
+    return selected
 
 
 def prediction_time_is_actionable(row, *, decision_at, start_at, model_name, model_version):
@@ -216,8 +399,19 @@ def signal_is_actionable(signal, prediction, *, evaluation_context, current_cont
     if side not in ('a','b'): return False,'signal_side_invalid'
     quote=next((q for q in current_context.quotes if q.odds_snapshot_id==sg('odds_snapshot_id') and q.bookmaker_id==sg('bookmaker_id')),None)
     if quote is None or sg('odds') != getattr(quote,'odds_'+side): return False,'execution_quote_changed'
-    if sg('model_prob') != pg('prob_'+side): return False,'signal_probability_changed'
-    expected_market = current_context.prob_a if side=='a' else 1-current_context.prob_a
+    # The signal was priced against a leave-one-out consensus that excludes its own book.
+    focal = quotes_consensus(current_context.quotes, exclude_bookmaker_id=quote.bookmaker_id)
+    if focal.prob_a is None: return False,focal.reason
+    if saved.get('focal_consensus') != serialize_focal_consensus(focal): return False,'signal_consensus_changed'
+    if diagnostics.get('market_context'):
+        view,reason = blend_hybrid_for_consensus(diagnostics, focal.prob_a)
+        if view is None: return False,reason
+        expected_model = view['prob_a'] if side=='a' else 1-view['prob_a']
+        if sg('model_prob') != expected_model:
+            expected_model = _persisted_real_probability(expected_model, column='model_prob', session=session)
+            if sg('model_prob') != expected_model: return False,'signal_probability_changed'
+    elif sg('model_prob') != pg('prob_'+side): return False,'signal_probability_changed'
+    expected_market = focal.prob_a if side=='a' else 1-focal.prob_a
     if sg('market_prob') != expected_market:
         expected_market = _persisted_real_probability(expected_market, column='market_prob', session=session)
         if sg('market_prob') != expected_market: return False,'signal_market_changed'

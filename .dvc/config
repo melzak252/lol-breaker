@@ -1,5 +1,4 @@
-[core]
-    remote = gdrive-storage
+# Historical studies only; README replay restores the public release into cache.
 ['remote "gdrive-storage"']
     url = gdrive://1Koo0-3d-1BssznDWXzz9PactUfmZbn7g
     gdrive_acknowledge_abuse = true

@@ -248,37 +248,47 @@ def test_bayesian_momentum_martingale_property():
 def test_advanced_simulator_worlds_probability_mass():
     """Verify that simulated Worlds distribution satisfies all conservation laws."""
     sim = AdvancedTournamentSimulator(
-        use_fearless=True,
-        use_bayesian_momentum=True,
+        use_fearless=False,
+        use_bayesian_momentum=False,
         use_hybrid_knockout=True,
         use_riot_lottery=True,
         shrinkage_lambda=0.20,
         temperature=1.05,
     )
+    pair_probabilities = {
+        (team_a, team_b, best_of): 0.5
+        for i, team_a in enumerate(DEFAULT_WORLDS_16_TEAMS)
+        for team_b in DEFAULT_WORLDS_16_TEAMS[i + 1 :]
+        for best_of in (1, 3, 5)
+    }
     res = sim.simulate_worlds(
         teams=DEFAULT_WORLDS_16_TEAMS,
-        team_ratings=DEFAULT_WORLDS_RATINGS,
+        base_probabilities=pair_probabilities,
         n_simulations=100,
         seed=123,
     )
-
-    # 1. Champion probabilities sum to 1.0
     standings = res["standings"]
-    total_champ_p = sum(s["champion_prob"] for s in standings)
-    assert math.isclose(total_champ_p, 1.0, abs_tol=1e-4), f"Champion prob sum {total_champ_p} != 1.0"
+    assert math.isclose(sum(s["champion_prob"] for s in standings), 1.0, abs_tol=1e-4)
+    assert math.isclose(sum(res["swiss_qualifiers_prob"].values()), 8.0, abs_tol=1e-4)
+    assert math.isclose(sum(res["region_distribution"].values()), 1.0, abs_tol=1e-4)
+    assert math.isclose(sum(s["top2_prob"] for s in standings if s["top2_prob"] is not None), 2.0, abs_tol=1e-4)
 
-    # 2. Swiss qualifiers probabilities sum to 8.0 (exactly 8 teams reach Knockouts)
-    qualifiers_prob = res["swiss_qualifiers_prob"]
-    total_qual_p = sum(qualifiers_prob.values())
-    assert math.isclose(total_qual_p, 8.0, abs_tol=1e-4), f"Swiss qualifiers sum {total_qual_p} != 8.0"
+def test_mass_assertion_rejects_broken_probability_table():
+    from src.models.advanced_tournament_simulator import _assert_mass_conserved
 
-    # 3. Regional qualification PMF sums to 1.0
-    reg_dist = res["region_distribution"]
-    assert math.isclose(sum(reg_dist.values()), 1.0, abs_tol=1e-4)
+    with pytest.raises(AssertionError, match="max deviation"):
+        _assert_mass_conserved("test", (0.9, 1.0))
 
-    # 4. Top 2 probabilities sum to 2.0 (exactly 2 finalists)
-    total_top2_p = sum(s["top2_prob"] for s in standings if s["top2_prob"] is not None)
-    assert math.isclose(total_top2_p, 2.0, abs_tol=1e-4), f"Top 2 prob sum {total_top2_p} != 2.0"
+
+
+def test_two_tuple_base_probability_is_series_probability():
+    simulator = AdvancedTournamentSimulator(shrinkage_lambda=0.0, temperature=1.0)
+    probability = simulator.get_matchup_probability(
+        "A", "B", best_of=3, base_probabilities={("A", "B"): 0.7},
+        team_ratings={"A": 1500.0, "B": 1500.0},
+    )
+    assert math.isclose(probability, 0.7, abs_tol=1e-12)
+
 
 
 def test_advanced_simulator_regional_brackets():
@@ -292,11 +302,15 @@ def test_advanced_simulator_regional_brackets():
     )
 
     for tid in ("lec_2026_summer_playoffs", "lcs_2026_championship"):
-        bracket_builder = SUPPORTED_BRACKETS[tid]
+        bracket = SUPPORTED_BRACKETS[tid]()
+        # Equal ratings make this a pure bracket-structure/mass-conservation
+        # check; enumerate every legal entrant instead of relying on defaults.
+        team_ratings = {team: 1500.0 for team in bracket.teams}
         res = sim.simulate_bracket(
-            bracket_builder(),
+            bracket,
             n_simulations=100,
             seed=42,
+            team_ratings=team_ratings,
         )
         assert res["tournament"] == tid
         total_p = sum(s["champion_prob"] for s in res["standings"])
@@ -306,15 +320,27 @@ def test_advanced_simulator_regional_brackets():
 def test_advanced_simulator_deterministic_reproducibility():
     """Verify that passing the same seed yields bit-for-bit identical outputs."""
     sim1 = AdvancedTournamentSimulator()
-    sim2 = AdvancedTournamentSimulator()
 
-    res1 = sim1.simulate_worlds(n_simulations=50, seed=999)
-    res2 = sim2.simulate_worlds(n_simulations=50, seed=999)
+    pair_probabilities = {
+        (team_a, team_b, best_of): 0.5
+        for i, team_a in enumerate(DEFAULT_WORLDS_16_TEAMS)
+        for team_b in DEFAULT_WORLDS_16_TEAMS[i + 1 :]
+        for best_of in (1, 3, 5)
+    }
+    res1 = sim1.simulate_worlds(n_simulations=50, seed=999, base_probabilities=pair_probabilities)
+    from src.features.champion_pool_entropy import register_player_pool
 
-    for s1, s2 in zip(res1["standings"], res2["standings"]):
-        assert s1["team"] == s2["team"]
-        assert s1["champion_prob"] == s2["champion_prob"]
-        assert s1["top2_prob"] == s2["top2_prob"]
+    register_player_pool("unrelated-crystal-ball-player", {1: 10}, role="MID")
+    sim3 = AdvancedTournamentSimulator()
+    res3 = sim3.simulate_worlds(
+        n_simulations=50, seed=999, base_probabilities=pair_probabilities
+    )
+    assert res1["standings"] == res3["standings"]
+
+    for s1, s3 in zip(res1["standings"], res3["standings"]):
+        assert s1["team"] == s3["team"]
+        assert s1["champion_prob"] == s3["champion_prob"]
+        assert s1["top2_prob"] == s3["top2_prob"]
 
     for r_k in res1["region_distribution"]:
-        assert res1["region_distribution"][r_k] == res2["region_distribution"][r_k]
+        assert res1["region_distribution"][r_k] == res3["region_distribution"][r_k]

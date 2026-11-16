@@ -199,7 +199,9 @@ def test_single_match_inference_resolves_missing_team_ids_before_feature_build(m
     assert observed == {"team_a_id": 11, "team_b_id": 22}
 
 
-def test_upcoming_batch_skips_closed_fixtures_and_isolates_invalid_rows(client, monkeypatch):
+def test_upcoming_batch_skips_closed_fixtures_and_isolates_invalid_rows(
+    client, monkeypatch, require_native_artifacts,
+):
     now = datetime.now(UTC)
     with get_session() as session:
         expired = _match(session, now - timedelta(minutes=1))
@@ -238,7 +240,9 @@ def test_upcoming_batch_skips_closed_fixtures_and_isolates_invalid_rows(client, 
         )).all()
         assert [row.canonical_match_id for row in predictions] == [ids["good"]]
 
-def test_native_c0_prediction_records_exact_model_artifact_and_history_cutoff(client, monkeypatch):
+def test_native_c0_prediction_records_exact_model_artifact_and_history_cutoff(
+    client, monkeypatch, require_native_artifacts,
+):
     cutoff = "2026-10-05T00:00:00+00:00"
     monkeypatch.setattr(
         service,
@@ -351,15 +355,17 @@ def test_batch_hybrid_shrinks_saved_c0_against_available_market_once(client):
             prob_a=base_probability, prob_b=1.0 - base_probability,
             diagnostics_json=json.dumps(base_diagnostics),
         ))
-        for timestamp, oa, ob in [
-            (now - timedelta(seconds=30), 4 / 3, 4.0),
-            (now + timedelta(minutes=30), 9.0, 1.125),
-        ]:
+        for bookmaker in (1, 2, 3):
             session.add(OddsSnapshot(
-                bookmaker_id=1, canonical_match_id=match_id, market_type="match_winner",
-                raw_team_a="Alpha", raw_team_b="Beta", odds_a=oa, odds_b=ob,
-                is_live=0, scraped_at=timestamp,
+                bookmaker_id=bookmaker, canonical_match_id=match_id, market_type="match_winner",
+                raw_team_a="Alpha", raw_team_b="Beta", odds_a=4 / 3, odds_b=4.0,
+                is_live=0, scraped_at=now - timedelta(seconds=30),
             ))
+        session.add(OddsSnapshot(
+            bookmaker_id=1, canonical_match_id=match_id, market_type="match_winner",
+            raw_team_a="Alpha", raw_team_b="Beta", odds_a=9.0, odds_b=1.125,
+            is_live=0, scraped_at=now + timedelta(minutes=30),
+        ))
         session.commit()
     expected_probability = PredictionEngine.blend_with_market(
         base_probability, 0.75, get_active_hybrid(),
@@ -368,6 +374,8 @@ def test_batch_hybrid_shrinks_saved_c0_against_available_market_once(client):
     assert len(batch) == 1
     assert batch[0]["prob_a"] == pytest.approx(expected_probability)
     assert batch[0]["diagnostics"]["model_prob_a"] == pytest.approx(base_probability)
+    assert batch[0]["diagnostics"]["base_prob_a"] == pytest.approx(base_probability)
+    assert batch[0]["diagnostics"]["hybrid_prob_a"] == pytest.approx(expected_probability)
     assert batch[0]["diagnostics"]["market_prob_a_avg_no_vig"] == pytest.approx(0.75)
     with get_session() as session:
         row = session.get(CanonicalPrediction, batch[0]["prediction_id"])
@@ -376,9 +384,41 @@ def test_batch_hybrid_shrinks_saved_c0_against_available_market_once(client):
         assert datetime.fromisoformat(row.data_cutoff_at) <= datetime.fromisoformat(row.predicted_at)
         hybrid_diagnostics = json.loads(row.diagnostics_json)
         assert hybrid_diagnostics["model_identity"] == base_identity
+        assert hybrid_diagnostics["base_prob_a"] == pytest.approx(base_probability)
+        assert hybrid_diagnostics["hybrid_prob_a"] == pytest.approx(expected_probability)
         assert hybrid_diagnostics["base_diagnostics"]["data_cutoff_at"] == base_cutoff
         assert hybrid_diagnostics["base_data_cutoff_at"] == base_cutoff
 
+
+def test_batch_hybrid_withholds_one_book_with_explicit_reason(client):
+    now = datetime.now(UTC)
+    with get_session() as session:
+        match = _match(session, now + timedelta(hours=1))
+        match_id = match.id
+        session.add(CanonicalPrediction(
+            canonical_match_id=match_id,
+            model_name=C0_NATIVE.name,
+            model_version=C0_NATIVE.version,
+            predicted_at=(now - timedelta(minutes=5)).isoformat(),
+            data_cutoff_at=(now - timedelta(days=1)).isoformat(),
+            prob_a=0.68,
+            prob_b=0.32,
+            prediction_status="active",
+            diagnostics_json="{}",
+        ))
+        session.add(OddsSnapshot(
+            bookmaker_id=1, canonical_match_id=match_id, market_type="match_winner",
+            raw_team_a="Alpha", raw_team_b="Beta", odds_a=2.4, odds_b=2.4,
+            is_live=0, scraped_at=now - timedelta(seconds=30),
+        ))
+        session.commit()
+
+    assert service.generate_hybrid_predictions() == []
+    assert service.generate_hybrid_predictions.last_withheld == [{
+        "canonical_match_id": match_id,
+        "reason": "market_consensus_insufficient_books",
+        "book_count": 1,
+    }]
 
 def test_failed_lineup_refresh_preserves_last_published_forecast(client, monkeypatch):
     now = datetime.now(UTC)
@@ -537,7 +577,7 @@ def test_direct_prediction_save_failure_rolls_back_request_session(client, monke
 
 
 @pytest.fixture(scope="module")
-def native_evidence_replay_client():
+def native_evidence_replay_client(require_native_artifacts):
     """Retain genuine origin evidence, replaying exact cached arrays in one child."""
     from betting_app.core.models.native_c0 import NativeC0Adapter
     from betting_app.services.c0_inference import C0InferenceClient
@@ -971,7 +1011,7 @@ def _wait_for_pg_blocker(session, pid, *, timeout=8):
     ],
 )
 def test_native_publication_serializes_absent_insert_existing_replace_and_delete(
-    client, monkeypatch, basis, mutation,
+    client, monkeypatch, basis, mutation, require_native_artifacts,
 ):
     clock = {"now": datetime.now(UTC)}
     match_data, player_ids = _seed_current_native_roster_match(clock)
@@ -1052,7 +1092,7 @@ def test_native_publication_serializes_absent_insert_existing_replace_and_delete
 
 
 def test_actual_native_batch_commits_first_fixture_before_concurrent_roster_editor(
-    client, monkeypatch,
+    client, monkeypatch, require_native_artifacts,
 ):
     from betting_app.api.routers import matches as matches_router
     from betting_app.api.schemas import MatchRosterOverrideRequest
@@ -1156,7 +1196,9 @@ def test_actual_native_batch_commits_first_fixture_before_concurrent_roster_edit
         assert second_predictions[0].prediction_status == "active"
 
 
-def test_native_batch_later_commit_failure_rolls_back_only_its_fixture(client, monkeypatch):
+def test_native_batch_later_commit_failure_rolls_back_only_its_fixture(
+    client, monkeypatch, require_native_artifacts,
+):
     from sqlalchemy.exc import DBAPIError
 
     clock = {"now": datetime.now(UTC)}

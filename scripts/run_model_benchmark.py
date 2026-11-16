@@ -60,6 +60,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--thesis-identities", type=Path)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--production-market", type=Path, help="Read-only production sports snapshot directory.")
+    parser.add_argument("--production-probability", type=Path, help="Prepared all-snapshot production probability comparison inputs.")
+    parser.add_argument("--production-replay", type=Path, help="Optional fresh20 research replay forecasts for the production probability comparison.")
     parser.add_argument("--market-identities", type=Path, help="Verified fixture and quote identity directory.")
     parser.add_argument("--monthly-a0-predictions", type=Path, help="Optional sealed monthly A0 sensitivity, distinct from annual A0.")
     parser.add_argument("--reliability-study", type=Path, help="Frozen multi-origin model reliability evaluation protocol; no fitting or promotion.")
@@ -68,6 +70,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--c0-meta", type=Path, help="Frozen C0 role-aware thirty-day meta protocol; score saved corrections without fitting.")
     parser.add_argument("--champion-history", help="Completed frozen champion-history run ID; score saved models without fitting.")
     args = parser.parse_args()
+    if args.production_probability:
+        if any((args.suite, args.data, args.production_market, args.thesis_audit,
+                args.candidate_data, args.doctor, args.champion_history, args.c0_meta,
+                args.reliability_tradeoff, args.reliability_study, args.reliability_integration,
+                args.market_identities, args.monthly_a0_predictions)):
+            parser.error("--production-probability cannot be combined with another evaluation mode")
+        if not args.output_dir:
+            parser.error("--production-probability requires a new --output-dir")
+        if args.bootstraps != 5000:
+            parser.error("--production-probability uses the 5000 resamples in its frozen protocol")
+        return args
+    if args.production_replay:
+        parser.error("--production-replay requires --production-probability")
     if args.champion_history:
         if any((args.c0_meta, args.reliability_tradeoff, args.reliability_study,
                 args.reliability_integration, args.suite, args.data, args.production_market,
@@ -139,6 +154,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.production_probability:
+        import json
+        from src.analysis.production_probability_evaluation import run_prepared_probability_comparison
+
+        result = run_prepared_probability_comparison(
+            args.production_probability, args.output_dir, replay_forecasts=args.production_replay,
+        )
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
     if args.champion_history:
         import json
         from src.analysis.champion_history_benchmark import benchmark_saved

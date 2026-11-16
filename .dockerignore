@@ -7,9 +7,15 @@ __pycache__
 .mypy_cache
 .ruff_cache
 data/
+google_drive_upload/
 thesis/build
 node_modules
 .env*
+secrets/
+.dvc/cache/
+*.egg-info/
+closing_proxy_bets.parquet
+closing_proxy_audit.json
 .cache/
 backups/
 reports/

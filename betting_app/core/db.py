@@ -20,12 +20,15 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import URL, create_engine, text, pool
 from sqlalchemy.orm import Session, sessionmaker
 
 from betting_app.core.config import load_config
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 _DATABASE_URL: str | None = None
 _sync_engine = None

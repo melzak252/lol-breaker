@@ -568,3 +568,100 @@ def test_financial_exhausted_reserved_capital_is_a_cash_exclusion(
     assert payload["total_staked"] == 1000
     assert payload["final_bankroll"] == 1232
     assert payload["result_status"] == "computed"
+def test_financial_ledger_exposes_exact_forecast_and_quote_trace(
+    monkeypatch, financial_api_client
+):
+    prediction = _prediction(
+        1,
+        start="2026-01-01T18:00:00+00:00",
+        result_available_at="2026-01-01T22:00:00+00:00",
+        cutoff="2026-01-01T10:30:00+00:00",
+    )
+    odds = [
+        dict(
+            _snapshot(1, "2026-01-01T12:00:00+00:00"),
+            odds_snapshot_id=1201,
+        ),
+        dict(
+            _snapshot(1, "2026-01-01T14:00:00+00:00"),
+            odds_snapshot_id=1202,
+        ),
+    ]
+    odds_queries: list[str] = []
+
+    def query(_db: object, statement: str, _params: dict[str, Any]):
+        if "canonical_predictions p" in statement:
+            return [prediction]
+        odds_queries.append(statement)
+        return odds
+
+    monkeypatch.setattr(financial, "query_df", query)
+
+    response = financial_api_client.get("/financial/analysis", params={
+        "model_name": C0_NATIVE.name,
+        "model_version": C0_NATIVE.version,
+        "days_back": 730,
+        "data_scope": "live",
+        "odds_mode": "open",
+        "use_conformal_gating": False,
+    })
+
+    assert response.status_code == 200, response.text
+    assert any("os.id AS odds_snapshot_id" in query for query in odds_queries)
+    entry = response.json()["ledger"][0]
+    assert entry["prediction_id"] == 1
+    assert entry["predicted_at"] == prediction["predicted_at"]
+    assert entry["data_cutoff_at"] == prediction["data_cutoff_at"]
+    assert entry["result_available_at"] == "2026-01-01T22:00:00Z"
+    assert entry["entry_quote_snapshot_id"] == 1201
+    assert entry["reference_quote_snapshot_id"] == 1202
+    assert entry["bookmaker_id"] == 1
+    assert entry["entry_scraped_at"] == odds[0]["scraped_at"]
+    assert entry["close_scraped_at"] == odds[1]["scraped_at"]
+    # The latest retained pre-start price is comparison evidence, not a
+    # certified closing quote or proof of an executable fill.
+    assert entry["close_odds"] == 2.0
+
+
+def test_financial_ledger_keeps_unrecorded_cutoff_null(
+    monkeypatch, financial_api_client
+):
+    prediction = _prediction(
+        1,
+        start="2026-01-01T18:00:00+00:00",
+        result_available_at="2026-01-01T22:00:00+00:00",
+        cutoff=None,
+    )
+    odds = [_snapshot(1, "2026-01-01T12:00:00+00:00")]
+    monkeypatch.setattr(
+        financial, "query_df", _stub_query([prediction], odds),
+    )
+
+    response = financial_api_client.get("/financial/analysis", params={
+        "model_name": C0_NATIVE.name,
+        "model_version": C0_NATIVE.version,
+        "days_back": 730,
+        "data_scope": "historical",
+        "use_conformal_gating": False,
+    })
+
+    assert response.status_code == 200, response.text
+    entry = response.json()["ledger"][0]
+    assert entry["data_cutoff_at"] is None
+def test_financial_default_model_identity_uses_active_hybrid_contract(
+    monkeypatch, financial_api_client
+):
+    monkeypatch.setattr(financial, "query_df", _stub_query([], []))
+
+    response = financial_api_client.get("/financial/analysis")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["model_name"] == BAYESIAN_SHRUNK_HYBRID.name
+    assert payload["model_version"] == BAYESIAN_SHRUNK_HYBRID.version
+
+    stale = financial_api_client.get("/financial/analysis", params={
+        "model_name": BAYESIAN_SHRUNK_HYBRID.name,
+        "model_version": "c0-native-2026-w32-e12-v1-a0.50-t1.00",
+    })
+    assert stale.status_code == 400

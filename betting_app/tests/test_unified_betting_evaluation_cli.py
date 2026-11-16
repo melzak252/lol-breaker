@@ -65,6 +65,7 @@ def test_scraped_empty_portfolio_formatting_requires_no_financial_replay(module,
     assert roi_line.endswith("N/A (no eligible bets)")
 
 
+@pytest.mark.requires_artifacts(unified_cli.PROJECT_ROOT / "data/08_reporting/48h_betting_benchmark_results.json")
 def test_saved_populated_portfolio_keeps_displayed_numerics_without_replay(capsys):
     # Read the existing sealed result, never execute its historical financial study.
     path = unified_cli.PROJECT_ROOT / "data/08_reporting/48h_betting_benchmark_results.json"

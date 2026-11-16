@@ -110,6 +110,19 @@ def test_worlds_api_requires_manual_participants(client: TestClient, monkeypatch
     )
     assert response.status_code == 200
     assert len(response.json()["standings"]) == 19
+    duplicate_direct = [*direct_teams, direct_teams[0]]
+    duplicate_response = client.post(
+        "/tournaments/worlds/simulate",
+        json={"direct_teams": duplicate_direct, "play_in_teams": play_in_teams},
+    )
+    assert duplicate_response.status_code == 422
+
+    unknown_direct = [{"team": "Unknown Team", "region": "UNK"}, *direct_teams[1:]]
+    unknown_response = client.post(
+        "/tournaments/worlds/simulate",
+        json={"direct_teams": unknown_direct, "play_in_teams": play_in_teams},
+    )
+    assert unknown_response.status_code == 422
 
 
 def test_worlds_rejects_an_unbalanced_swiss_pool(client: TestClient) -> None:

@@ -9,15 +9,14 @@ import pytest
 from src.analysis.c0_input_aligned_forward import inspect_forward_readiness
 
 UTC = timezone.utc
-ROOT = Path(__file__).resolve().parents[2]
-MATRIX = ROOT / "data/08_reporting/a0_context_reliability/source_activation_20261004_01/matrix.json"
-CONTRACTS = ROOT / "data/05_model_input/betting_ev_reliability/forward_protocol_20260930_234022/source_contracts.json"
-SOURCE_IDS = {
+SOURCE_IDS = (
     "oddspapi:v4:fixtures", "oddspapi:v4:pinnacle:match_winner",
     "bookmaker:totalbet:match_winner", "bookmaker:lebull:match_winner",
     "golgg:completed-history", "liquipedia:context",
     "official:unit-and-announcement", "official:actual-start-and-settlement",
-}
+)
+DEADLINE = "2026-10-31T00:00:00+00:00"
+TRAIN_START = "2026-11-01T00:00:00+00:00"
 
 
 def write_json(path, value):
@@ -29,10 +28,36 @@ def write_json(path, value):
 def bound_protocol(tmp_path):
     evidence = tmp_path / "retained"
     evidence.mkdir()
+    contracts = [
+        {"source_id": source_id, "approved_locator": f"https://provider-{index}.example.org/api"}
+        for index, source_id in enumerate(SOURCE_IDS)
+    ]
+    originals = tmp_path / "source_contracts.json"
+    write_json(originals, {"sources": [{"source_id": source_id} for source_id in SOURCE_IDS]})
+    matrix = tmp_path / "matrix.json"
+    sources = []
+    for source_id in SOURCE_IDS:
+        candidate = ("https://api.oddspapi.io/v4/odds"
+                     if source_id == "oddspapi:v4:pinnacle:match_winner"
+                     else f"https://provider-{source_id.replace(':', '-')}.example.org/api")
+        sources.append({
+            "source_id": source_id, "purpose": f"synthetic {source_id} evidence",
+            "authorization_retention_entitlement": {},
+            "quota": {},
+            "locator": {"configured_candidate": candidate},
+            "binding_and_capture_unmet": {},
+        })
+    write_json(matrix, {
+        "sources": sources,
+        "frozen_dates": {"readiness_deadline": DEADLINE, "train_start": TRAIN_START},
+        "cross_source_activation_prerequisites": [],
+        "common_capture_prerequisites": [],
+        "probe_limits": {},
+    })
     forward = tmp_path / "forward.json"
     write_json(forward, {
         "schema": "c0_market_study_v1", "protocol_id": "native-c0-market-study-v1",
-        "source_contracts": json.loads(CONTRACTS.read_text())["sources"],
+        "source_contracts": contracts,
         "evidence_root": str(evidence), "trusted_evidence_refs": [],
     })
     protocol = tmp_path / "protocol.json"
@@ -40,14 +65,13 @@ def bound_protocol(tmp_path):
         "schema": "c0_input_aligned_study_v1", "run_id": "unit_readiness",
         "forward_protocol_path": str(forward),
         "forward_protocol_sha256": hashlib.sha256(forward.read_bytes()).hexdigest(),
-        "activation_matrix_path": str(MATRIX),
-        "activation_matrix_sha256": hashlib.sha256(MATRIX.read_bytes()).hexdigest(),
-        "source_contracts_path": str(CONTRACTS),
-        "source_contracts_sha256": hashlib.sha256(CONTRACTS.read_bytes()).hexdigest(),
+        "activation_matrix_path": str(matrix),
+        "activation_matrix_sha256": hashlib.sha256(matrix.read_bytes()).hexdigest(),
+        "source_contracts_path": str(originals),
+        "source_contracts_sha256": hashlib.sha256(originals.read_bytes()).hexdigest(),
     }
     write_json(protocol, value)
     return protocol, value, forward, evidence
-
 
 def test_missing_authority_is_resolved_per_source_without_approving_candidate_urls(bound_protocol, tmp_path):
     protocol, _, _, _ = bound_protocol
@@ -55,7 +79,7 @@ def test_missing_authority_is_resolved_per_source_without_approving_candidate_ur
     assert result["status"] == "BLOCKED_EXTERNAL_PREREQUISITES"
     assert result["g0_status"] == "G0_BLOCKED"
     assert result["external_requests"] == result["real_fit_count"] == 0
-    assert {row["source_id"] for row in result["sources"]} == SOURCE_IDS
+    assert {row["source_id"] for row in result["sources"]} == set(SOURCE_IDS)
     for source in result["sources"]:
         assert source["effective_authentication"] == "unverified"
         assert source["acquisition_approved"] is False

@@ -2,37 +2,49 @@
 from __future__ import annotations
 
 import base64
+from collections import OrderedDict
+from datetime import date, datetime, time, timezone
 import hashlib
 import json
 import math
 import os
 from pathlib import Path, PurePosixPath
 import re
-from datetime import date, datetime, time, timezone
 from typing import Any, Mapping
 
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 MODEL_NAME = "Causal-C0"
-MODEL_VERSION = "c0-native-2026-w32-e12-v1"
-FEATURE_VERSION = "native-c0-history16-v1"
+MODEL_VERSION = "c0-native-fresh20-2026-10-21-v1-regional-v1"
+FEATURE_VERSION = "native-c0-fresh20-history19-regional-v1"
+WEIGHTS_MODEL_VERSION = "c0-native-fresh20-2026-10-21-v1"
+WEIGHTS_FEATURE_VERSION = "native-c0-fresh20-history19-v1"
+REGIONAL_ADJUSTMENT_VERSION = "regional-input-correction-v1"
 MODEL_FAMILY = "native_c0"
 _CANONICAL_RAW_HISTORY_RELATIVE = "data/artifacts/golgg-database-recovery-20260909/matches.json"
 _CANONICAL_RAW_HISTORY_SHA256 = "991c23cdc67a119a6a2be6b04cb60018ab0f3eeec979f34871f8213f9d6899ca"
 _CANONICAL_RAW_HISTORY_KIND = "canonical_frozen_golgg_history"
 VARIANT = "control"
 _MODEL_ROOT_RELATIVE = "data/06_models/a0_data_focus/a0_data_focus_20260929_192443"
+_FRESH_MODEL_ROOT_RELATIVE = "data/06_models/c0_distilled_verification/c0d_repro_20261021_01/fresh/20t"
 _COMPLETION_RELATIVE = "data/08_reporting/a0_data_focus/a0_data_focus_20260929_192443/completed.json"
 MODES = ("full", "no_w20", "no_organization")
 _MINIMUM_DECISION_DATE = date(2026, 1, 1)
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
-# These pins identify the adopted original C0 control run, never the separate W32/E12
-# capacity challenger. Completion and execution bytes bind the training contract and
-# receipt inventory; the selected joblib bytes are checked against both static pins
-# and the immutable completion inventory before any archive module or pickle is loaded.
+# Original control artifacts are provenance for the shared expert and reference
+# calibration; public scoring uses the separately pinned fresh20 bundle.
 _EXECUTION_SHA256 = "02a41a6b99097086cb0d75c67e85e832643a24ed2214d9c4dcaa32d3613ee2b8"
+_FRESH_BUNDLE_MANIFEST_SHA256 = "eb96aa68ab750a8a307478bd366200adacc4404020411d0bf241384845ea287d"
+_FRESH_CHECKPOINT_SHA256 = {
+    "20260910": "fbe96411f801b90dbf9ae60badb248b17df6b97f5c557f60d907ec30d26e52a2",
+    "20260911": "b56720824a959cd24e92a0e908ac5b2639cbc306e3ce7ed2145e110b68b8354e",
+    "20260912": "3999aba94c1d8f5a7ae7c02c051f01d2094acd5b2bec3d12c7c70e7332404649",
+}
+_FRESH_CALIBRATION_SHA256 = "c9d84d64bd99dacb78f8110a15c871f618d39e1d4dda4d1916736aace3b78b7a"
+_FRESH_SHARED_SHA256 = "94106b0bc9a675108eaff6b11c9ff22c670b183471c262e56c8aff5cc61c8c78"
+_FRESH_REFERENCE_CALIBRATION_SHA256 = "2303add90fd36b1724e1e381c91706860221484080edf66968e170017710182a"
 _COMPLETION_SHA256 = "9056ecfdc5e3f3764e61320017c3114aea6e3554d316ca2c8c21b6e1bd735a15"
 _ARTIFACT_SHA256 = {
     "data/06_models/a0_data_focus/a0_data_focus_20260929_192443/control/calibration/model.joblib": "2303add90fd36b1724e1e381c91706860221484080edf66968e170017710182a",
@@ -82,13 +94,14 @@ _SERVING_SOURCE_SHA256 = {
     "project:src/models/a0_accelerator.py": "4d9cc185fdc4a6392586c59b00f8c977000a06142a0977564a8526f8a2f1d8f6",
     "project:src/models/a0_history_reconstruction.py": "147fa35c6848ea9a2a98357509c127ae61a412428818c4cfed5ecb8f821b6b91",
     "project:src/models/competition_tiers.py": "5ace7ea27148dee921b09e9d6b47ebcbcc33d83fcc3fe0423280473b115f825c",
-    "project:src/analysis/ev_asof_replay.py": "f01fdc9eef9ff551cc1bc592628f44b0b17dacba84750dfb0328f21b9994e58d",
+    "project:src/analysis/ev_asof_replay.py": "2ea6aa190e28515acc8b2155df93b9395637e10cf5bfc0ead6b6c57c3d673863",
 }
-_FEATURE_REPLAY_SHA256 = "f01fdc9eef9ff551cc1bc592628f44b0b17dacba84750dfb0328f21b9994e58d"
+_FEATURE_REPLAY_SHA256 = "2ea6aa190e28515acc8b2155df93b9395637e10cf5bfc0ead6b6c57c3d673863"
+_SOURCE_CONTRACT_VERSION = "native-c0-serving-source-v3"
 _RAW_SHAPES = {
     "players": (2, 5, 21), "core": (2, 5), "team": (2, 11), "w20": (2, 10), "gates": (2, 2),
 }
-_TEMPORAL_SHAPES = {"history": (2, 5, 16, 33), "mask": (2, 5, 16), "champions": (2, 5, 16)}
+_TEMPORAL_SHAPES = {"history": (2, 5, 19, 33), "mask": (2, 5, 19), "champions": (2, 5, 16)}
 _WIRE_DTYPES = {
     "float32": np.dtype("float32"), "float16": np.dtype("float16"),
     "uint8": np.dtype("uint8"), "uint16": np.dtype("uint16"),
@@ -238,26 +251,33 @@ def load_serving_config(config_path: str | Path | None = None) -> tuple[dict[str
         raise ValueError("Unsupported native C0 serving configuration")
     config_keys = {
         "schema", "model_name", "model_version", "feature_version", "model_family",
+        "serving_model_version", "serving_feature_version", "regional_default_enabled",
+        "regional_adjustment_version", "fresh_protocol_path", "fresh_candidate",
         "model_root", "completion_report", "variant", "raw_history_path",
-        "raw_history_sha256", "raw_history_source_kind", "release_map_relative",
-        "startup_timeout_seconds", "request_timeout_seconds", "max_worker_requests",
-        "max_worker_lifetime_seconds", "minimum_decision_date", "feature_replay_sha256",
-        "forward_status",
+        "serving_raw_history_path", "raw_history_sha256", "raw_history_source_kind",
+        "release_map_relative", "startup_timeout_seconds", "request_timeout_seconds",
+        "max_worker_requests", "max_worker_lifetime_seconds", "minimum_decision_date",
+        "feature_replay_sha256", "source_contract_version", "forward_status",
     }
     if set(value) != config_keys:
         raise ValueError("C0 serving configuration fields differ from the pinned schema")
     expected = {
-        "model_name": MODEL_NAME, "model_version": MODEL_VERSION,
-        "feature_version": FEATURE_VERSION, "model_family": MODEL_FAMILY,
-        "variant": VARIANT, "forward_status": "frozen_static_2026_artifact_not_prospective_certified",
+        "model_name": MODEL_NAME, "model_version": WEIGHTS_MODEL_VERSION,
+        "feature_version": WEIGHTS_FEATURE_VERSION, "model_family": MODEL_FAMILY,
+        "serving_model_version": MODEL_VERSION,
+        "serving_feature_version": FEATURE_VERSION,
+        "regional_default_enabled": True,
+        "regional_adjustment_version": REGIONAL_ADJUSTMENT_VERSION,
         "raw_history_path": _CANONICAL_RAW_HISTORY_RELATIVE,
         "raw_history_sha256": _CANONICAL_RAW_HISTORY_SHA256,
         "raw_history_source_kind": _CANONICAL_RAW_HISTORY_KIND,
+        "fresh_candidate": "20t",
+        "fresh_protocol_path": "data/05_model_input/c0_distilled_verification/c0d_repro_20261021_01/protocol.json",
     }
     for key, wanted in expected.items():
         if value.get(key) != wanted:
             raise ValueError(f"C0 configuration {key} differs from the pinned native identity")
-    for key in ("model_root", "completion_report", "release_map_relative"):
+    for key in ("model_root", "completion_report", "release_map_relative", "serving_raw_history_path", "fresh_protocol_path"):
         if not isinstance(value.get(key), str) or not value[key]:
             raise ValueError(f"C0 configuration {key} must be a nonempty path")
     for key, lower, upper in (
@@ -273,11 +293,13 @@ def load_serving_config(config_path: str | Path | None = None) -> tuple[dict[str
         raise ValueError("C0 configuration minimum decision date differs from its frozen input contract")
     if value.get("feature_replay_sha256") != _FEATURE_REPLAY_SHA256:
         raise ValueError("C0 feature replay source differs from its pinned input contract")
+    if value.get("source_contract_version") != _SOURCE_CONTRACT_VERSION:
+        raise ValueError("C0 serving source-contract version differs from the pinned contract")
     return value, path, config_sha
 
 
 class NativeC0Adapter:
-    """Worker-only adapter over the immutable C0 control trio/shared/CAL assembly."""
+    """Worker-only adapter over the hash-pinned fresh20 ensemble and regional law."""
 
     def __init__(self, config_path: str | Path | None = None):
         if os.environ.get("BETTING_APP_C0_WORKER") != "1":
@@ -293,6 +315,7 @@ class NativeC0Adapter:
         self._prepared: dict[str, Any] | None = None
         self._feature_replay: Any = None
         self._release_map_cache: tuple[Path, tuple[int, int, int, int, int], str, dict[str, str]] | None = None
+        self._regional_replay_cache: OrderedDict[tuple[Any, ...], tuple[dict[str, Any], dict[str, Any]]] = OrderedDict()
         self._contract: dict[str, Any] | None = None
 
     def _preflight(self) -> dict[str, Any]:
@@ -376,6 +399,10 @@ class NativeC0Adapter:
             "version": MODEL_VERSION,
             "family": MODEL_FAMILY,
             "feature_version": FEATURE_VERSION,
+            "weights_model_version": WEIGHTS_MODEL_VERSION,
+            "weights_feature_version": WEIGHTS_FEATURE_VERSION,
+            "regional_default_enabled": self.config["regional_default_enabled"],
+            "regional_adjustment_version": self.config["regional_adjustment_version"],
             "has_uncertainty": False,
             "run_id": "a0_data_focus_20260929_192443",
             "variant": VARIANT,
@@ -391,6 +418,7 @@ class NativeC0Adapter:
             "serving_config_path": str(self.config_path),
             "serving_config_sha256": self.config_sha256,
             "scope": "DEVELOPMENT_ONLY",
+            "source_contract_version": _SOURCE_CONTRACT_VERSION,
             "forward_status": self.config["forward_status"],
         }
 
@@ -401,46 +429,108 @@ class NativeC0Adapter:
         return json.loads(json.dumps(self._identity, allow_nan=False))
 
     def load(self) -> dict[str, Any]:
-        if self._backend is not None:
-            return self.identity
-        identity = self.identity
-        contract = self._contract
-        if contract is None:
-            raise RuntimeError("C0 artifact contract was not preflight verified")
-        from src.models import a0_data_focus
-
-        if Path(a0_data_focus.__file__).resolve() != (PROJECT_ROOT / "src/models/a0_data_focus.py").resolve():
-            raise ImportError("C0 assembly did not resolve to the pinned local a0_data_focus module")
-        backend, backend_source_hashes = a0_data_focus.uncertainty._activate_archive_backend(self.research_root)
-        expected_backend_sources = {
-            key: digest for key, digest in _SOURCE_SHA256.items()
-            if key.startswith("research:nonlinear-history-20260912/")
-            or key.startswith("research:a0-phase-walkforward-20260914/")
-            or key in {"project:src/models/a0_uncertainty.py", "project:src/models/a0_accelerator.py"}
-        }
-        if backend_source_hashes != expected_backend_sources:
-            raise ValueError("Loaded C0 native backend modules differ from the pinned inference source inventory")
-        shared = a0_data_focus._load_checkpoint(
-            self.project_model_root / "shared/model.joblib", {**contract, "component": "shared"},
-        )
-        models = [
-            a0_data_focus._load_checkpoint(
-                self.project_model_root / VARIANT / f"seed_{seed}/model.joblib",
-                {**contract, "component": "neural", "variant": VARIANT, "seed": seed},
-            )
-            for seed in a0_data_focus.SEEDS
+        protocol_path = _project_path(self.config["fresh_protocol_path"])
+        # Resolve artifacts from the frozen model root, not mutable protocol aliases.
+        model_dir = _project_path(_FRESH_MODEL_ROOT_RELATIVE)
+        manifest_path = model_dir / "bundle_manifest.json"
+        files = [
+            protocol_path, protocol_path.parent / "fresh_execution_binding.json",
+            manifest_path, model_dir / "calibration.json",
         ]
-        calibration = a0_data_focus._load_checkpoint(
-            self.project_model_root / VARIANT / "calibration/model.joblib",
-            {**contract, "component": "calibration", "variant": VARIANT},
+        files.extend(model_dir / f"seed_{seed}/checkpoint_epoch16.pt" for seed in (20260910, 20260911, 20260912))
+        files.extend((
+            _project_path("data/06_models/a0_data_focus/a0_data_focus_20260929_192443/shared/model.joblib"),
+            _project_path("data/06_models/a0_data_focus/a0_data_focus_20260929_192443/control/calibration/model.joblib"),
+        ))
+        signatures = tuple(
+            (path, path.stat().st_dev, path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns, path.stat().st_ctime_ns)
+            for path in files
         )
+        if self._backend is not None and getattr(self, "_fresh_signatures", None) == signatures:
+            return self.identity
+        identity = dict(self.identity)
+        self._fresh_ready(protocol_path)
+        manifest, manifest_sha = _read_pinned_json(
+            manifest_path, _FRESH_BUNDLE_MANIFEST_SHA256, "fresh20 bundle manifest",
+        )
+        fresh_binding = _read_json(protocol_path.parent / "fresh_execution_binding.json", "fresh20 execution binding")
+        fresh_training_hashes = fresh_binding.get("inputs")
+        if not isinstance(fresh_training_hashes, Mapping):
+            raise ValueError("Fresh20 execution binding omits source-input hashes")
+        if manifest.get("candidate") != self.config["fresh_candidate"]:
+            raise ValueError("Fresh C0 bundle candidate differs from serving configuration")
+        expected_hashes = manifest.get("checkpoint_sha256")
+        if expected_hashes != _FRESH_CHECKPOINT_SHA256:
+            raise ValueError("Fresh20 bundle checkpoint inventory differs from its immutable pin")
+        if manifest.get("calibration_sha256") != _FRESH_CALIBRATION_SHA256:
+            raise ValueError("Fresh20 bundle calibration hash differs from its immutable pin")
+        if manifest.get("shared_sha256") != _FRESH_SHARED_SHA256:
+            raise ValueError("Fresh20 bundle shared-expert hash differs from its immutable pin")
+        if manifest.get("reference_calibration_sha256") != _FRESH_REFERENCE_CALIBRATION_SHA256:
+            raise ValueError("Fresh20 bundle reference-calibration hash differs from its immutable pin")
+        checkpoint_hashes = {}
+        for seed in (20260910, 20260911, 20260912):
+            checkpoint = model_dir / f"seed_{seed}/checkpoint_epoch16.pt"
+            checkpoint_hashes[str(seed)] = _verify_hash(
+                checkpoint, _FRESH_CHECKPOINT_SHA256[str(seed)], f"fresh20 checkpoint seed {seed}",
+            )
+        calibration_sha = _verify_hash(
+            model_dir / "calibration.json", _FRESH_CALIBRATION_SHA256, "fresh20 calibration",
+        )
+        import joblib
+        from src.models import c0_distilled_reproduction as fresh
+        module, backend, _ = fresh._activate()
+        if module is None or backend is None:
+            raise RuntimeError("Fresh20 inference backend activation failed")
+        shared_path, reference_path = files[-2:]
+        _verify_hash(shared_path, _FRESH_SHARED_SHA256, "fresh20 shared expert")
+        _verify_hash(reference_path, _FRESH_REFERENCE_CALIBRATION_SHA256, "fresh20 reference calibration")
+        shared = joblib.load(shared_path)
+        reference = joblib.load(reference_path)
+        models = fresh._load_models("20t", model_dir, shared)
+        calibration = _read_json(model_dir / "calibration.json", "fresh20 calibration")
         self._backend, self._shared, self._models, self._calibration = backend, shared, models, calibration
+        self._fresh_reference = reference
+        self._fresh_module = fresh
+        self._fresh_signatures = signatures
+        identity.update({
+            "run_id": "c0d_repro_20261021_01",
+            "variant": "20t",
+            "artifact_path": str(model_dir),
+            "execution_sha256": _sha256(protocol_path.parent / "fresh_execution_binding.json"),
+            "completion_sha256": _COMPLETION_SHA256,
+            "artifact_hashes": {
+                "bundle_manifest.json": manifest_sha,
+                "calibration.json": calibration_sha,
+                **{
+                    f"seed_{seed}/checkpoint_epoch16.pt": checkpoint_hashes[str(seed)]
+                    for seed in (20260910, 20260911, 20260912)
+                },
+            },
+            "training_source_hashes": dict(sorted(fresh_training_hashes.items())),
+            "training_source_provenance": "fresh_execution_binding_with_original_shared_expert",
+            "fresh_candidate": "20t",
+            "fresh_protocol_path": str(protocol_path),
+            "fresh_bundle_manifest_sha256": manifest_sha,
+            "fresh_checkpoint_hashes": checkpoint_hashes,
+            "fresh_calibration_sha256": calibration_sha,
+            "shared_expert_sha256": manifest["shared_sha256"],
+            "reference_calibration_sha256": manifest["reference_calibration_sha256"],
+        })
         self._identity = identity
         return self.identity
 
+    @staticmethod
+    def _fresh_ready(protocol_path: Path):
+        from src.models.c0_distilled_reproduction import _ready
+        protocol, bank = _ready(protocol_path)
+        if protocol.get("fresh_models", {}).get("candidate") not in (None, "20t"):
+            raise ValueError("Serving protocol does not bind the genuine fresh20 candidate")
+        return protocol, bank
+
     def _load_history(self) -> tuple[Path, str, str, dict[str, Any]]:
         raw_path, source_kind, raw_is_canonical = _resolve_raw_history_source(
-            self.config, os.environ.get("C0_RAW_HISTORY_PATH"),
+            self.config, os.environ.get("C0_RAW_HISTORY_PATH", self.config["serving_raw_history_path"]),
         )
         release_override = os.environ.get("C0_RELEASE_MAP_PATH")
         release_relative = str(self.config["release_map_relative"])
@@ -726,7 +816,7 @@ class NativeC0Adapter:
             for key, shape in _RAW_SHAPES.items()
         }
         hist = {
-            "history": self._decode_array(hist_value["history"], _TEMPORAL_SHAPES["history"], "hist.history", {"float16"}),
+            "history": self._decode_array(hist_value["history"], _TEMPORAL_SHAPES["history"], "hist.history", {"float32"}),
             "mask": self._decode_array(hist_value["mask"], _TEMPORAL_SHAPES["mask"], "hist.mask", {"uint8"}),
             "champions": self._decode_array(hist_value["champions"], _TEMPORAL_SHAPES["champions"], "hist.champions", {"uint16"}),
         }
@@ -792,6 +882,46 @@ class NativeC0Adapter:
             "mask": np.asarray(history["mask"], dtype=np.uint8),
             "champions": np.asarray(history["champions"], dtype=np.uint16),
         }
+        # Fresh20 uses three causal full-source horizon aggregates and native recent16.
+        if prepared.get("player_map_records") is None:
+            from src.models.c0_live_query import collect_player_map_records
+            records, map_receipt = collect_player_map_records(
+                raw_path, prepared["release_path"], research_root=self.research_root,
+            )
+            if map_receipt.get("raw_history_sha256") != raw_sha or map_receipt.get("release_map_sha256") != release_sha:
+                raise ValueError("C0 full-history anchors are not bound to current raw/release sources")
+            prepared["player_map_records"] = records
+            prepared["player_map_receipt"] = map_receipt
+        from src.models.c0_live_query import build_player_history_anchors
+        anchors = build_player_history_anchors(
+            prepared["player_map_records"], roster_a=request["roster_a"],
+            roster_b=request["roster_b"], cutoff_day=cutoff,
+        )
+        arrays_hist["history"] = np.concatenate(
+            [*(np.asarray(anchors[f"history_{h}"], dtype=np.float32) for h in (365, 180, 90)),
+             arrays_hist["history"]], axis=2,
+        )
+        arrays_hist["mask"] = np.concatenate(
+            [*(np.asarray(anchors[f"mask_{h}"], dtype=np.uint8) for h in (365, 180, 90)),
+             arrays_hist["mask"]], axis=2,
+        )
+        if arrays_hist["history"].shape[2] != 19 or arrays_hist["mask"].shape[2] != 19:
+            raise ValueError("Fresh20 native generation requires three causal anchors plus native recent16")
+        anchor_members = {
+            str(horizon): [
+                [
+                    sorted(
+                        record["map_id"]
+                        for record in prepared["player_map_records"].get(player_id, ())
+                        if 0 < (cutoff.toordinal() - record["played_day"]) < horizon
+                        and record["release_day"] < cutoff.toordinal()
+                    )
+                    for player_id in roster
+                ]
+                for roster in (request["roster_a"], request["roster_b"])
+            ]
+            for horizon in (365, 180, 90)
+        }
         if any(arrays_raw[key].shape != shape for key, shape in _RAW_SHAPES.items()):
             raise ValueError("Native C0 feature builder returned an invalid raw tensor shape")
         if any(arrays_hist[key].shape != shape for key, shape in _TEMPORAL_SHAPES.items()):
@@ -811,6 +941,20 @@ class NativeC0Adapter:
             "raw_history_sha256": raw_sha,
             "release_map_path": prepared["release_path"],
             "release_map_sha256": release_sha,
+            "fresh20_anchor_proof": {
+                "anchor_order": ["365", "180", "90"],
+                "observed_history_slots": 19,
+                "recent_slots": 16,
+                "anchor_source_receipt": prepared["player_map_receipt"],
+                "anchor_members": anchor_members,
+                "anchor_counts": {
+                    str(horizon): np.asarray(anchors[f"count_{horizon}"]).tolist()
+                    for horizon in (365, 180, 90)
+                },
+                "history_tensor_sha256": self._array_digest({"history": arrays_hist["history"]})["history"],
+                "mask_tensor_sha256": self._array_digest({"mask": arrays_hist["mask"]})["mask"],
+                "champions_tensor_sha256": self._array_digest({"champions": arrays_hist["champions"]})["champions"],
+            },
             "release_day_policy": prepared["release_audit"]["effective_release_precedence"],
             "source_game_day_fallback_event_count": prepared["release_audit"]["source_game_day_fallback_event_count"],
             "history_series_total": len(prepared["series"]),
@@ -841,21 +985,31 @@ class NativeC0Adapter:
             self.load()
         if not raw or not hist:
             raise ValueError("Native C0 requires real snapshot arrays; empty tensors are not a fallback")
+        if any(raw[key].shape != shape for key, shape in _RAW_SHAPES.items()):
+            raise ValueError("Fresh20 C0 raw inputs have an invalid tensor shape")
+        if any(hist[key].shape != shape for key, shape in _TEMPORAL_SHAPES.items()):
+            raise ValueError("Fresh20 C0 requires exactly nineteen observed history and mask slots")
+        if any(raw[key].dtype != np.float32 for key in _RAW_SHAPES):
+            raise ValueError("Fresh20 C0 raw inputs must retain float32 tensors")
+        if (
+            hist["history"].dtype != np.float32
+            or hist["mask"].dtype != np.uint8
+            or hist["champions"].dtype != np.uint16
+        ):
+            raise ValueError("Fresh20 C0 history must be float32 with uint8 masks and uint16 champions")
         before = self._array_digest({**raw, **hist})
         raw_batch = {key: value[None, ...].copy() for key, value in raw.items()}
         hist_batch = {key: value[None, ...].copy() for key, value in hist.items()}
-        from src.models import a0_data_focus
-
-        predictions = a0_data_focus.predict_models(
-            self._backend, self._shared, self._models, self._calibration,
-            raw_batch, hist_batch, np.asarray([request["best_of"]], dtype=np.int64),
-        )
+        probability = float(self._fresh_module._predict(
+            self._models, {"raw": raw_batch, "history": hist_batch},
+            np.asarray([request["best_of"]], dtype=np.int64), request["mode"],
+            self._backend, self._shared, self._fresh_reference, self._calibration,
+        )[0])
         if self._array_digest({**raw, **hist}) != before:
             raise ValueError("C0 native inference mutated its input snapshot")
-        full = np.asarray(predictions.get("full"), dtype=np.float64)
-        if full.shape != (1, len(MODES)) or not np.isfinite(full).all() or ((full <= 0.) | (full >= 1.)).any():
-            raise ValueError("Genuine C0 returned invalid all-mode series probabilities")
-        mode_probabilities = {name: float(full[0, index]) for index, name in enumerate(MODES)}
+        if not np.isfinite(probability) or not 0.0 < probability < 1.0:
+            raise ValueError("Genuine fresh20 C0 returned an invalid series probability")
+        mode_probabilities = {request["mode"]: probability}
         probability = mode_probabilities[request["mode"]]
         cutoff = datetime.combine(request["decision_at"].date(), time.min, tzinfo=timezone.utc).isoformat()
         diagnostics = {
@@ -903,6 +1057,219 @@ class NativeC0Adapter:
         request, target, raw, hist, provenance = self._prepare_prediction(request_value, snapshot_value)
         return self._predict_arrays(request, target, raw, hist, provenance, canonical_match_id)
 
+    def _regional_state(
+        self,
+        request: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        raw_path, raw_sha, release_sha, prepared = self._load_history()
+        source_identity = (raw_sha, release_sha)
+        if getattr(self, "_regional_replay_source", None) != source_identity:
+            self._regional_replay_cache.clear()
+            self._regional_replay_source = source_identity
+        cache_key = (
+            raw_sha, release_sha, request["decision_at"].date().isoformat(),
+            request["team1_id"], request["team2_id"],
+            tuple(request["roster_a"]), tuple(request["roster_b"]),
+        )
+        cached = self._regional_replay_cache.get(cache_key)
+        if cached is None:
+            from src.models.c0_regional_replay import build_regional_query_states
+            replay = build_regional_query_states(
+                [{
+                    "team1_id": request["team1_id"],
+                    "team2_id": request["team2_id"],
+                    "roster_a": request["roster_a"],
+                    "roster_b": request["roster_b"],
+                    "cutoff_day": request["decision_at"].date().isoformat(),
+                }],
+                raw_history_path=raw_path,
+                release_map_path=prepared["release_path"],
+            )
+            if (
+                replay["receipt"]["raw_history_sha256"] != raw_sha
+                or replay["receipt"]["release_map_sha256"] != release_sha
+            ):
+                raise ValueError("C0 regional source changed between verification and replay")
+            cached = (dict(replay["rows"][0]), dict(replay["receipt"]))
+            self._regional_replay_cache[cache_key] = cached
+            self._regional_replay_cache.move_to_end(cache_key)
+            while len(self._regional_replay_cache) > 64:
+                self._regional_replay_cache.popitem(last=False)
+        else:
+            self._regional_replay_cache.move_to_end(cache_key)
+        return dict(cached[0]), dict(cached[1])
+
+    @staticmethod
+    def _regional_preimage(raw: Mapping[str, np.ndarray], hist: Mapping[str, np.ndarray]) -> dict[str, Any]:
+        encoded = encode_snapshot({"target": {}, "raw": raw, "hist": hist})
+        return {"raw": encoded["raw"], "hist": encoded["hist"]}
+
+    def _decode_regional_preimage(
+        self, encoded: Any,
+    ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+        if not isinstance(encoded, Mapping) or set(encoded) != {"raw", "hist"}:
+            raise ValueError("Regional evidence omits its exact pre-adjustment tensor snapshot")
+        raw_value, hist_value = encoded["raw"], encoded["hist"]
+        if not isinstance(raw_value, Mapping) or set(raw_value) != set(_RAW_SHAPES):
+            raise ValueError("Regional evidence raw preimage tensor set is invalid")
+        if not isinstance(hist_value, Mapping) or set(hist_value) != set(_TEMPORAL_SHAPES):
+            raise ValueError("Regional evidence history preimage tensor set is invalid")
+        raw = {
+            key: self._decode_array(raw_value[key], shape, f"regional.raw.{key}", {"float32"})
+            for key, shape in _RAW_SHAPES.items()
+        }
+        hist = {
+            "history": self._decode_array(hist_value["history"], _TEMPORAL_SHAPES["history"], "regional.hist.history", {"float32"}),
+            "mask": self._decode_array(hist_value["mask"], _TEMPORAL_SHAPES["mask"], "regional.hist.mask", {"uint8"}),
+            "champions": self._decode_array(hist_value["champions"], _TEMPORAL_SHAPES["champions"], "regional.hist.champions", {"uint16"}),
+        }
+        return raw, hist
+
+    @staticmethod
+    def _mask_regional_context(mode: str, raw: Mapping[str, np.ndarray]) -> None:
+        # Excluded context must not indirectly change the regional gate or player inputs.
+        if mode in {"no_w20", "no_organization"}:
+            raw["w20"].fill(0.0)
+            raw["gates"][:, 1] = 0.0
+        if mode == "no_organization":
+            raw["team"].fill(0.0)
+            raw["gates"][:, 0] = 0.0
+
+    def _apply_regional_default(
+        self,
+        request: Mapping[str, Any],
+        target: dict[str, Any],
+        raw: dict[str, np.ndarray],
+        hist: dict[str, np.ndarray],
+    ) -> dict[str, Any]:
+        existing = target.get("regional_adjustment")
+        if existing is not None:
+            if (
+                not isinstance(existing, Mapping)
+                or existing.get("version") != REGIONAL_ADJUSTMENT_VERSION
+                or existing.get("mode") != request["mode"]
+            ):
+                raise ValueError("C0 snapshot regional-adjustment proof has an invalid version or mode")
+            pre_raw, pre_hist = self._decode_regional_preimage(existing.get("pre_adjustment_tensors"))
+            self._mask_regional_context(request["mode"], pre_raw)
+            preimage_hashes = self._array_digest({**pre_raw, **pre_hist})
+            actual_hashes = self._array_digest({**raw, **hist})
+            if (
+                existing.get("cutoff_day") != request["decision_at"].date().isoformat()
+                or existing.get("preimage_tensor_hashes") != preimage_hashes
+                or existing.get("tensor_hashes") != actual_hashes
+            ):
+                raise ValueError("C0 snapshot regional-adjustment tensor proof is inconsistent")
+            if not np.any(pre_hist["mask"]) and not np.any(pre_raw["gates"]):
+                if (
+                    existing.get("status") != "neutral_cold_start"
+                    or preimage_hashes != actual_hashes
+                ):
+                    raise ValueError("C0 cold-start regional evidence does not match its preimage")
+                return {**dict(existing), "status": "neutral_cold_start_evidence_snapshot"}
+
+            row, receipt = self._regional_state(request)
+            proof_fields = {
+                "cutoff_day": row.get("cutoff_day"),
+                "status": "adjusted",
+                "family_a": row.get("family_a"),
+                "family_b": row.get("family_b"),
+                "offset_a": row.get("offset_a"),
+                "offset_b": row.get("offset_b"),
+                "raw_history_sha256": receipt.get("raw_history_sha256"),
+                "release_map_sha256": receipt.get("release_map_sha256"),
+                "state_sha256": row.get("state_sha256"),
+                "max_release_day": row.get("max_release_day"),
+                "source_max_release_day": receipt.get("max_release_day"),
+                "law_version": REGIONAL_ADJUSTMENT_VERSION,
+                "parameter_law": receipt.get("parameter_law"),
+                "implementation_binding": receipt.get("implementation_binding"),
+                "replay_receipt_sha256": hashlib.sha256(
+                    json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+            }
+            if row.get("status") != "ok" or any(existing.get(key) != value for key, value in proof_fields.items()):
+                raise ValueError("C0 regional evidence is not bound to the causal cutoff state and law")
+            from src.analysis.c0_region_factorial import transform_batch_once
+            expected_raw, expected_hist = transform_batch_once(
+                {key: value[None, ...] for key, value in pre_raw.items()},
+                {key: value[None, ...] for key, value in pre_hist.items()},
+                np.asarray([row["offset_a"]], dtype=np.float32),
+                np.asarray([row["offset_b"]], dtype=np.float32),
+            )
+            expected_hashes = self._array_digest({
+                **{key: value[0] for key, value in expected_raw.items()},
+                **{key: value[0] for key, value in expected_hist.items()},
+            })
+            if expected_hashes != actual_hashes:
+                raise ValueError("C0 regional evidence tensors do not match the exact normalizer output")
+            return {**dict(existing), "status": "verified_evidence_snapshot"}
+
+        self._mask_regional_context(request["mode"], raw)
+        preimage = self._regional_preimage(raw, hist)
+        preimage_hashes = self._array_digest({**raw, **hist})
+        if not np.any(hist["mask"]) and not np.any(raw["gates"]):
+            proof = {
+                "version": REGIONAL_ADJUSTMENT_VERSION,
+                "mode": request["mode"],
+                "status": "neutral_cold_start",
+                "cutoff_day": request["decision_at"].date().isoformat(),
+                "family_a": None, "family_b": None, "offset_a": None, "offset_b": None,
+                "raw_history_sha256": None, "release_map_sha256": None,
+                "state_sha256": None, "max_release_day": None,
+                "law_version": REGIONAL_ADJUSTMENT_VERSION,
+                "implementation_binding": None,
+                "pre_adjustment_tensors": preimage,
+                "preimage_tensor_hashes": preimage_hashes,
+                "tensor_hashes": preimage_hashes,
+            }
+            target["regional_adjustment"] = proof
+            return proof
+
+        row, receipt = self._regional_state(request)
+        if row.get("status") != "ok" or row.get("offset_a") is None or row.get("offset_b") is None:
+            raise ValueError(
+                "Regional C0 adjustment unavailable: one or both teams lack supported "
+                "strictly prior domestic-family identity"
+            )
+        from src.analysis.c0_region_factorial import transform_batch_once
+        adjusted_raw, adjusted_hist = transform_batch_once(
+            {key: value[None, ...] for key, value in raw.items()},
+            {key: value[None, ...] for key, value in hist.items()},
+            np.asarray([row["offset_a"]], dtype=np.float32),
+            np.asarray([row["offset_b"]], dtype=np.float32),
+        )
+        raw.clear()
+        raw.update({key: value[0] for key, value in adjusted_raw.items()})
+        hist.clear()
+        hist.update({key: value[0] for key, value in adjusted_hist.items()})
+        proof = {
+            "version": REGIONAL_ADJUSTMENT_VERSION,
+            "mode": request["mode"],
+            "status": "adjusted",
+            "cutoff_day": row["cutoff_day"],
+            "family_a": row["family_a"],
+            "family_b": row["family_b"],
+            "offset_a": row["offset_a"],
+            "offset_b": row["offset_b"],
+            "raw_history_sha256": receipt["raw_history_sha256"],
+            "release_map_sha256": receipt["release_map_sha256"],
+            "state_sha256": row["state_sha256"],
+            "max_release_day": row["max_release_day"],
+            "source_max_release_day": receipt["max_release_day"],
+            "law_version": REGIONAL_ADJUSTMENT_VERSION,
+            "parameter_law": receipt["parameter_law"],
+            "implementation_binding": receipt["implementation_binding"],
+            "replay_receipt_sha256": hashlib.sha256(
+                json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "pre_adjustment_tensors": preimage,
+            "preimage_tensor_hashes": preimage_hashes,
+            "tensor_hashes": self._array_digest({**raw, **hist}),
+        }
+        target["regional_adjustment"] = proof
+        return proof
+        
     def _prepare_prediction(self, request_value: Any, snapshot_value: Any):
         self.load()
         request = self._validate_request(request_value)
@@ -918,6 +1285,11 @@ class NativeC0Adapter:
                 "release_map_sha256": None,
                 "raw_feature_replay_source": None,
             }
+        regional_proof = self._apply_regional_default(request, target, raw, hist)
+        provenance["regional_adjustment"] = {
+            key: value for key, value in regional_proof.items()
+            if key != "pre_adjustment_tensors"
+        }
         return request, target, raw, hist, provenance
 
     def predict_evidence(
@@ -952,6 +1324,7 @@ def encode_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "tensor_player_order_a", "tensor_player_order_b",
         "raw_tensor_player_order_a", "raw_tensor_player_order_b",
         "temporal_tensor_player_order_a", "temporal_tensor_player_order_b",
+        "regional_adjustment",
     )
     output: dict[str, Any] = {
         "target": {key: target[key] for key in target_fields if key in target},
@@ -960,7 +1333,7 @@ def encode_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     }
     for family, shapes, permitted in (
         ("raw", _RAW_SHAPES, {"float32"}),
-        ("hist", _TEMPORAL_SHAPES, {"history": "float16", "mask": "uint8", "champions": "uint16"}),
+        ("hist", _TEMPORAL_SHAPES, {"history": "float32", "mask": "uint8", "champions": "uint16"}),
     ):
         values = snapshot[family]
         if not isinstance(values, Mapping) or set(values) != set(shapes):

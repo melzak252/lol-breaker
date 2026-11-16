@@ -18,13 +18,8 @@ import numpy as np
 import pandas as pd
 from scipy.special import expit, logit
 
-from src.analysis.betting_guards_a_to_d import (
-    apply_guard_b_dynamic_disagreement,
-    calculate_clv,
-    devig_shin,
-    dynamic_logit_disagreement,
-)
-
+from betting_app.core.ev import fair_market_probabilities
+from src.analysis.betting_guards_a_to_d import dynamic_logit_disagreement
 
 @dataclass
 class OpenBet:
@@ -38,7 +33,8 @@ class OpenBet:
     ev_claimed: float
     p_model: float
     p_market: float
-    clv: float
+    clv: float | None
+    shin_edge_vs_focal: float | None
 
 
 class OperationalWallet:
@@ -76,7 +72,8 @@ class OperationalWallet:
         ev_claimed: float = 0.0,
         p_model: float = 0.5,
         p_market: float = 0.5,
-        clv: float = 0.0,
+        clv: float | None = None,
+        shin_edge_vs_focal: float | None = None,
     ) -> None:
         """Lock stake amount from free capital to reserve."""
         if amount <= 0.0 or not math.isfinite(amount):
@@ -102,6 +99,7 @@ class OperationalWallet:
             p_model=p_model,
             p_market=p_market,
             clv=clv,
+            shin_edge_vs_focal=shin_edge_vs_focal,
         )
         self.equity_history.append({
             "timestamp": placed_at,
@@ -143,6 +141,7 @@ class OperationalWallet:
             "ev_claimed": bet.ev_claimed,
             "p_model": bet.p_model,
             "p_market": bet.p_market,
+            "shin_edge_vs_focal": bet.shin_edge_vs_focal,
             "clv": bet.clv,
             "placed_at": bet.placed_at,
             "settled_at": settled_at,
@@ -265,8 +264,7 @@ class HistoricalProductionSimulator:
                     continue
 
                 oa, ob = float(r["odds_a"]), float(r["odds_b"])
-                psa = float(r["p_shin_a"])
-                psb = 1.0 - psa
+                psa, psb = fair_market_probabilities(oa, ob)
 
                 # Obtain model probability
                 if pd.isna(r.get("p_model_a")):
@@ -323,8 +321,17 @@ class HistoricalProductionSimulator:
                 if stake <= 0.0 or stake > wallet.free_capital:
                     continue
 
-                bet_id = f"bet_{mid}_{r.get('snapshot_id', len(wallet.open_bets))}"
-                clv = calculate_clv(odds_pick, 1.0 / pmkt_pick, tax_rate=self.tax_rate)
+                close_p_a = r.get("p_close_a", np.nan)
+                close_p_pick = close_p_a if side == "a" else (1.0 - close_p_a if pd.notna(close_p_a) else np.nan)
+                net_clv = (
+                    float(odds_pick * (1.0 - self.tax_rate) * close_p_pick - 1.0)
+                    if pd.notna(close_p_pick) else None
+                )
+                shin_edge_vs_focal = float(odds_pick * (1.0 - self.tax_rate) * pmkt_pick - 1.0)
+                quote_identity = r.get("quote_id", r.get("snapshot_id"))
+                if pd.isna(quote_identity):
+                    quote_identity = r.name
+                bet_id = f"{mid}:{side}:{quote_identity}"
                 try:
                     wallet.reserve(
                         bet_id=bet_id,
@@ -337,7 +344,8 @@ class HistoricalProductionSimulator:
                         ev_claimed=ev_pick,
                         p_model=p_pick,
                         p_market=pmkt_pick,
-                        clv=clv,
+                        clv=net_clv,
+                        shin_edge_vs_focal=shin_edge_vs_focal,
                     )
                     matches_bet_ids.add(mid)
                 except ValueError:
@@ -353,6 +361,9 @@ class HistoricalProductionSimulator:
                 "net_profit": 0.0, "roi_pct": 0.0, "final_equity": wallet.total_equity,
                 "max_drawdown_units": 0.0, "max_drawdown_pct": 0.0,
                 "profit_factor": 0.0, "sharpe_ratio": 0.0, "ev_gap": 0.0,
+                "net_clv_pct": None, "n_clv_bets": 0, "n_missing_close": 0,
+                "net_clv_reason": "no_bets_with_independent_close",
+                "shin_edge_vs_focal_pct": None,
             }
 
         n_bets = len(settled)
@@ -363,6 +374,22 @@ class HistoricalProductionSimulator:
 
         claimed_ev = settled["ev_claimed"].mean() * 100.0
         ev_gap = claimed_ev - roi_pct
+        clv_bets = settled.loc[settled["clv"].notna()]
+        n_clv_bets = len(clv_bets)
+        n_missing_close = n_bets - n_clv_bets
+        if n_clv_bets:
+            clv_turnover = float(clv_bets["stake"].sum())
+            net_clv_pct = float((clv_bets["clv"] * clv_bets["stake"]).sum() / clv_turnover * 100.0)
+            net_clv_reason = None
+        else:
+            net_clv_pct = None
+            net_clv_reason = "no_bets_with_independent_close"
+        edge_bets = settled.loc[settled["shin_edge_vs_focal"].notna()]
+        edge_turnover = float(edge_bets["stake"].sum())
+        shin_edge_vs_focal_pct = (
+            float((edge_bets["shin_edge_vs_focal"] * edge_bets["stake"]).sum() / edge_turnover * 100.0)
+            if edge_turnover else None
+        )
 
         # Drawdown analysis on equity curve
         eq_df = pd.DataFrame(wallet.equity_history)
@@ -394,6 +421,11 @@ class HistoricalProductionSimulator:
             "profit_factor": round(profit_factor, 2),
             "sharpe_ratio": round(sharpe, 2),
             "ev_gap": round(ev_gap, 2),
+            "net_clv_pct": round(net_clv_pct, 2) if net_clv_pct is not None else None,
+            "n_clv_bets": n_clv_bets,
+            "n_missing_close": n_missing_close,
+            "net_clv_reason": net_clv_reason,
+            "shin_edge_vs_focal_pct": round(shin_edge_vs_focal_pct, 2) if shin_edge_vs_focal_pct is not None else None,
             "settled_df": settled,
             "equity_df": eq_df,
         }

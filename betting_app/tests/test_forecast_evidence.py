@@ -11,6 +11,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
+from betting_app.models.base import Base
+from betting_app.models.prediction import ForecastEvidenceSnapshot
 from betting_app.services.forecast_evidence import append_forecast_evidence, load_forecast_evidence
 
 
@@ -20,6 +22,8 @@ def session():
     if not url or "_test" not in url:
         pytest.skip("requires an explicitly isolated TEST_DATABASE_URL")
     engine = create_engine(url)
+    # ORM table and trigger listeners mirror the migration; a fresh test DB has no schema yet.
+    Base.metadata.create_all(engine, tables=[ForecastEvidenceSnapshot.__table__])
     with engine.connect() as connection:
         transaction = connection.begin()
         with Session(bind=connection, join_transaction_mode="create_savepoint") as current:

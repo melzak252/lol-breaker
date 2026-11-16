@@ -20,14 +20,16 @@ from urllib.parse import urlsplit
 from sqlalchemy import select
 
 from betting_app.models.prediction import ForecastEvidenceSnapshot
+from betting_app.core.models import C0_NATIVE
 
 if TYPE_CHECKING:
     from betting_app.services.c0_inference import C0InferenceClient
 
 UTC = timezone.utc
 PROTOCOL_ID = "native-c0-market-study-v1"
-NATIVE_NAME = "Causal-C0"
-NATIVE_VERSION = "c0-native-2026-w32-e12-v1"
+NATIVE_NAME = C0_NATIVE.name
+NATIVE_VERSION = C0_NATIVE.version
+FROZEN_NATIVE_VERSION = "c0-native-2026-w32-e12-v1"
 DEADLINE = datetime(2026, 10, 31, tzinfo=UTC)
 SHAPES = {
     "raw.players": ("float32", (2, 5, 21), 4),
@@ -35,8 +37,8 @@ SHAPES = {
     "raw.team": ("float32", (2, 11), 4),
     "raw.w20": ("float32", (2, 10), 4),
     "raw.gates": ("float32", (2, 2), 4),
-    "hist.history": ("float16", (2, 5, 16, 33), 2),
-    "hist.mask": ("uint8", (2, 5, 16), 1),
+    "hist.history": ("float32", (2, 5, 19, 33), 4),
+    "hist.mask": ("uint8", (2, 5, 19), 1),
     "hist.champions": ("uint16", (2, 5, 16), 2),
 }
 DEPENDENCY_KEYS = {
@@ -346,7 +348,7 @@ def evaluate_c0_readiness(protocol: Mapping[str, Any], *, now: datetime, authori
         if not approvals or not any(proof.get("protocol_id") == PROTOCOL_ID and proof.get("activation_deadline") == DEADLINE.isoformat()
                                    and proof.get("approved") is True and _clock(proof["approved_at"]) <= recorded for proof in approvals):
             raise ValueError("authority proof")
-        if compatibility.get("model_name") != NATIVE_NAME or compatibility.get("model_version") != NATIVE_VERSION or compatibility.get("mode") != "full" or compatibility.get("status") != "PASS":
+        if compatibility.get("model_name") != NATIVE_NAME or compatibility.get("model_version") != FROZEN_NATIVE_VERSION or compatibility.get("mode") != "full" or compatibility.get("status") != "PASS":
             raise ValueError("native compatibility")
         native_inventory_hash = protocol.get("native_inventory_sha256")
         if native_inventory_hash is None and isinstance(protocol.get("native_inventory"), Mapping):
@@ -501,10 +503,14 @@ def record_c0_snapshot(session, client: C0InferenceClient, request: Mapping[str,
     protocol = schedule.get("protocol", {"protocol_id": schedule.get("protocol_id")})
     if dependency_receipt is None:
         replay = provenance.get("raw_feature_replay_source", {})
+        replay_sha256 = (
+            replay.get("implementation_sha256") or replay.get("sha256")
+            if isinstance(replay, Mapping) and snapshot is None else None
+        )
         dependency_receipt = {
             "schema": "native_c0_dependency_v1", "protocol_id": schedule.get("protocol_id", PROTOCOL_ID),
             "snapshot_sha256": _sha(encoded), "tensor_sha256": hashes,
-            "builder": {"id": None, "code_sha256": None, "replay_sha256": replay.get("sha256") if snapshot is None else None, "execution_receipt_refs": []},
+            "builder": {"id": None, "code_sha256": None, "replay_sha256": replay_sha256, "execution_receipt_refs": []},
             "raw_history": {"sha256": provenance.get("raw_history_sha256") if snapshot is None else None, "evidence_refs": []},
             "release_map": {"sha256": provenance.get("release_map_sha256") if snapshot is None else None, "evidence_refs": []},
             "feature_cutoff_at": cutoff.isoformat(), "feature_source_max_day": max_day,

@@ -3,6 +3,7 @@
 import logging
 from datetime import UTC, datetime
 
+from betting_app.services.bankroll_service import wallet_bankroll
 from .scrape import _run_module
 
 logger = logging.getLogger(__name__)
@@ -56,9 +57,15 @@ def run_prediction_pipeline() -> dict:
     rematch_ok = rematch_canonical()
     alerts_dispatched = None
     if rematch_ok:
+        try:
+            wallet = wallet_bankroll()
+            bankroll = str(wallet.total) if wallet is not None else "0"
+        except Exception:
+            logger.exception("Could not resolve PLN wallet; scheduled stake sizing will fail closed")
+            bankroll = "0"
         predict_ok = _run_module(
             "betting_app.scripts.run_upcoming_prediction_pipeline",
-            args=["--include-partial", "--operational-hybrid"],
+            args=["--include-partial", "--operational-hybrid", "--bankroll", bankroll],
             timeout=900,
         )
         if predict_ok:

@@ -28,7 +28,7 @@ Simulates production betting operations across ALL settled matches in the Produc
   * C0-D-Core (18-Token) (p_c0_d_year_core__full)
   * C0-Slim (18-Token) (p_c0_slim_year__full)
   * C0 (Baseline) (p_c0__full)
-across both Cohort A (645 exact matches) and Cohort B (Extended Production DB matches up to Sep 21).
+across Cohort A (the production training set) and a strictly later, match-disjoint Cohort B.
 
 Saves structured JSON to:
   data/08_reporting/c0_upgrade_and_distillation_20261017/walk_forward_prod_db_match_level.json
@@ -52,6 +52,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.analysis.historical_production_simulator import OperationalWallet
+from betting_app.core.ev import fair_market_probabilities
 
 
 # -----------------------------------------------------------------------------
@@ -96,6 +97,33 @@ GATE_SPECS = [
     ("G9", "G9 (Control: Turn OFF DRO eps=0.0, keep GuardB/MaxOdds/MaxEV/MinEV)"),
 ]
 
+def quotes_observed_by_decision_time(
+    quotes: pd.DataFrame,
+    decision_time: Any,
+    observed_at_col: str = "scraped_dt",
+) -> pd.DataFrame:
+    """Exclude any quote whose observation timestamp is after the decision."""
+    decision_dt = pd.to_datetime(decision_time, utc=True)
+    observed_at = pd.to_datetime(quotes[observed_at_col], utc=True)
+    return quotes.loc[observed_at <= decision_dt]
+
+
+def net_clv_from_close(odds: float, close_probability: float | None, tax_rate: float) -> float | None:
+    """Return CLV only when an observed independent closing probability exists."""
+    if close_probability is None or pd.isna(close_probability):
+        return None
+    return float(odds * (1.0 - tax_rate) * close_probability - 1.0)
+
+
+def observed_clv_rows(bets: pd.DataFrame, clv_col: str = "clv") -> pd.DataFrame:
+    """Exclude unsettled-reference bets from all CLV-derived statistics."""
+    return bets.loc[bets[clv_col].notna()]
+
+
+def missing_close_count(bets: pd.DataFrame, clv_col: str = "clv") -> int:
+    """Count bets excluded from CLV analysis because their close is unavailable."""
+    return int(bets[clv_col].isna().sum())
+
 
 # -----------------------------------------------------------------------------
 # 3. Data Loading & Alignment
@@ -135,15 +163,10 @@ def load_and_prepare_data():
     q_aligned["scraped_dt"] = pd.to_datetime(q_aligned["scraped_at"], utc=True)
     q_aligned = q_aligned.sort_values("scraped_dt")
 
-    # Devig using Shin to obtain fair p_shin_1
-    inv1 = 1.0 / q_aligned["odds_1"].to_numpy(dtype=float)
-    inv2 = 1.0 / q_aligned["odds_2"].to_numpy(dtype=float)
-    s_tot = inv1 + inv2
-    z_shin = np.maximum(0.0, s_tot - 1.0)
-    denom = np.maximum(1e-9, 2.0 * (1.0 - z_shin))
-    pi1 = (np.sqrt(z_shin**2 + 4.0 * (1.0 - z_shin) * (inv1**2) / s_tot) - z_shin) / denom
-    pi2 = (np.sqrt(z_shin**2 + 4.0 * (1.0 - z_shin) * (inv2**2) / s_tot) - z_shin) / denom
-    q_aligned["p_shin_1"] = pi1 / (pi1 + pi2)
+    q_aligned["p_shin_1"] = [
+        fair_market_probabilities(float(odds_1), float(odds_2))[0]
+        for odds_1, odds_2 in zip(q_aligned["odds_1"], q_aligned["odds_2"])
+    ]
 
     # Pre-compute pre-kickoff sharp closing line consensus
     print("Pre-computing closing lines...")
@@ -212,15 +235,25 @@ def load_and_prepare_data():
 
     all_matches_df = pd.DataFrame(match_rows)
     cohort_a_matches = all_matches_df[all_matches_df["is_cohort_a"]].copy()
-    cohort_b_matches = all_matches_df.copy()
+    selected_ids = set(cohort_a_matches["canonical_match_id"])
+    if cohort_a_matches.empty:
+        cohort_b_matches = all_matches_df.iloc[0:0].copy()
+    else:
+        selection_end = cohort_a_matches["start_dt"].max()
+        cohort_b_matches = all_matches_df[
+            (all_matches_df["start_dt"] > selection_end)
+            & ~all_matches_df["canonical_match_id"].isin(selected_ids)
+        ].copy()
+    in_sample_selection = cohort_b_matches.empty
 
     print(f"Cohort A prepared: {len(cohort_a_matches)} matches")
-    print(f"Cohort B prepared: {len(cohort_b_matches)} matches")
+    print(f"Later disjoint Cohort B prepared: {len(cohort_b_matches)} matches")
 
     return {
         "quotes": q_aligned,
         "cohort_a": cohort_a_matches,
         "cohort_b": cohort_b_matches,
+        "in_sample_selection": in_sample_selection,
         "closing_dict": closing_dict,
         "p039_lookup": p039_lookup,
     }
@@ -252,12 +285,13 @@ def extract_decisions_for_schedule(
                 continue
 
             # <= 12h freshness window before t_dec
-            valid_q = q_mid[(q_mid["scraped_dt"] <= t_dec) & (q_mid["scraped_dt"] < t_start) & (q_mid["scraped_dt"] >= t_dec - pd.Timedelta(hours=12))]
+            valid_q = quotes_observed_by_decision_time(q_mid, t_dec)
+            valid_q = valid_q[(valid_q["scraped_dt"] < t_start) & (valid_q["scraped_dt"] >= t_dec - pd.Timedelta(hours=12))]
             if valid_q.empty:
                 continue
 
             latest_b = valid_q.groupby("bookmaker_id").last()
-            if len(latest_b) < 2:
+            if len(latest_b) < 3:
                 continue
 
             best_1 = None
@@ -265,20 +299,18 @@ def extract_decisions_for_schedule(
             bks_list = latest_b.index.tolist()
             for bk in bks_list:
                 row = latest_b.loc[bk]
+                oth = latest_b.drop(bk)
+                if oth.index.nunique() < 2:
+                    continue
                 o1 = float(row["odds_1"])
                 o2 = float(row["odds_2"])
-                oth = latest_b.drop(bk)
                 ql1 = float(oth["p_shin_1"].mean())
                 ql2 = 1.0 - ql1
-                lag1 = ql1 * o1 - 1.0
-                lag2 = ql2 * o2 - 1.0
+                if o1 > 1.0 and (best_1 is None or o1 > best_1["odds"]):
+                    best_1 = {"odds": o1, "q_loo": ql1}
+                if o2 > 1.0 and (best_2 is None or o2 > best_2["odds"]):
+                    best_2 = {"odds": o2, "q_loo": ql2}
 
-                if 0.00 <= lag1 <= 0.38:
-                    if best_1 is None or o1 > best_1["odds"]:
-                        best_1 = {"odds": o1, "q_loo": ql1}
-                if 0.00 <= lag2 <= 0.38:
-                    if best_2 is None or o2 > best_2["odds"]:
-                        best_2 = {"odds": o2, "q_loo": ql2}
 
             if best_1 is None and best_2 is None:
                 continue
@@ -299,7 +331,8 @@ def extract_decisions_for_schedule(
                 "p_c0_slim_year__full": float(m["p_c0_slim_year__full"]),
                 "p_c0__full": float(m["p_c0__full"]),
                 "golgg_str": str(m["golgg_str"]),
-                "p_close_a": float(closing_dict.get(mid, 0.5)),
+                "p_close_a": float(closing_dict[mid]) if mid in closing_dict else np.nan,
+                "market_prefilter_applied": False,
             })
 
     elif schedule_key == "Twice-Daily":
@@ -329,12 +362,13 @@ def extract_decisions_for_schedule(
                 if q_mid is None:
                     continue
 
-                valid_q = q_mid[(q_mid["scraped_dt"] <= t_check) & (q_mid["scraped_dt"] < t_start) & (q_mid["scraped_dt"] >= t_check - pd.Timedelta(hours=12))]
+                valid_q = quotes_observed_by_decision_time(q_mid, t_check)
+                valid_q = valid_q[(valid_q["scraped_dt"] < t_start) & (valid_q["scraped_dt"] >= t_check - pd.Timedelta(hours=12))]
                 if valid_q.empty:
                     continue
 
                 latest_b = valid_q.groupby("bookmaker_id").last()
-                if len(latest_b) < 2:
+                if len(latest_b) < 3:
                     continue
 
                 best_1 = None
@@ -342,20 +376,17 @@ def extract_decisions_for_schedule(
                 bks_list = latest_b.index.tolist()
                 for bk in bks_list:
                     row = latest_b.loc[bk]
+                    oth = latest_b.drop(bk)
+                    if oth.index.nunique() < 2:
+                        continue
                     o1 = float(row["odds_1"])
                     o2 = float(row["odds_2"])
-                    oth = latest_b.drop(bk)
                     ql1 = float(oth["p_shin_1"].mean())
                     ql2 = 1.0 - ql1
-                    lag1 = ql1 * o1 - 1.0
-                    lag2 = ql2 * o2 - 1.0
-
-                    if 0.00 <= lag1 <= 0.38:
-                        if best_1 is None or o1 > best_1["odds"]:
-                            best_1 = {"odds": o1, "q_loo": ql1}
-                    if 0.00 <= lag2 <= 0.38:
-                        if best_2 is None or o2 > best_2["odds"]:
-                            best_2 = {"odds": o2, "q_loo": ql2}
+                    if o1 > 1.0 and (best_1 is None or o1 > best_1["odds"]):
+                        best_1 = {"odds": o1, "q_loo": ql1}
+                    if o2 > 1.0 and (best_2 is None or o2 > best_2["odds"]):
+                        best_2 = {"odds": o2, "q_loo": ql2}
 
                 if best_1 is not None or best_2 is not None:
                     evaluated_mids.add(mid)
@@ -375,7 +406,8 @@ def extract_decisions_for_schedule(
                         "p_c0_slim_year__full": float(m["p_c0_slim_year__full"]),
                         "p_c0__full": float(m["p_c0__full"]),
                         "golgg_str": str(m["golgg_str"]),
-                        "p_close_a": float(closing_dict.get(mid, 0.5)),
+                        "p_close_a": float(closing_dict[mid]) if mid in closing_dict else np.nan,
+                        "market_prefilter_applied": False,
                     })
 
     return decisions
@@ -486,7 +518,7 @@ def simulate_walk_forward(
             q_mkt = q_b
             won = (d["winner_side"] == "team_b")
             p_close = 1.0 - d["p_close_a"]
-        clv = odds * c_tax * p_close - 1.0
+        clv = net_clv_from_close(odds, p_close, tax_rate)
         qualified_bets[mid] = {
             "match_id": mid,
             "side": side,
@@ -562,10 +594,13 @@ def simulate_walk_forward(
             "profit_pln": 0.0,
             "realized_yield_pct": 0.0,
             "bankroll_roi_pct": 0.0,
-            "net_clv_pct": 0.0,
-            "claimed_ev_pct": 0.0,
-            "optimizers_curse_bias_pp": 0.0,
-            "match_luck_noise_pp": 0.0,
+            "net_clv_pct": None,
+            "claimed_ev_pct": None,
+            "optimizers_curse_bias_pp": None,
+            "match_luck_noise_pp": None,
+            "n_clv_bets": 0,
+            "n_missing_close": 0,
+            "net_clv_reason": "no_bets_with_independent_close",
             "max_drawdown_pct": 0.0,
             "profit_factor": 0.0,
             "sharpe_ratio": 0.0,
@@ -581,10 +616,21 @@ def simulate_walk_forward(
     roi = (profit / initial_capital) * 100.0
     wr = (n_wins / n_bets) * 100.0 if n_bets > 0 else 0.0
 
-    net_clv = float(np.sum((settled["stake"] / turnover) * settled["clv"])) * 100.0
-    claimed_ev = float(np.sum((settled["stake"] / turnover) * settled["ev_claimed"])) * 100.0
-    bias_pp = claimed_ev - net_clv
-    luck_pp = yd - net_clv
+    clv_bets = observed_clv_rows(settled)
+    n_clv_bets = len(clv_bets)
+    n_missing_close = missing_close_count(settled)
+    if n_clv_bets:
+        clv_turnover = float(clv_bets["stake"].sum())
+        clv_weights = clv_bets["stake"].to_numpy(dtype=float) / clv_turnover
+        net_clv = float(np.sum(clv_weights * clv_bets["clv"].to_numpy(dtype=float))) * 100.0
+        claimed_ev = float(np.sum(clv_weights * clv_bets["ev_claimed"].to_numpy(dtype=float))) * 100.0
+        clv_yield = float(clv_bets["profit"].sum() / clv_turnover) * 100.0
+        bias_pp = claimed_ev - net_clv
+        luck_pp = clv_yield - net_clv
+        net_clv_reason = None
+    else:
+        net_clv = claimed_ev = bias_pp = luck_pp = None
+        net_clv_reason = "no_bets_with_independent_close"
 
     equities = np.array([initial_capital] + [r["total_equity"] for r in wallet.settled_bets])
     running_max = np.maximum.accumulate(equities)
@@ -602,15 +648,18 @@ def simulate_walk_forward(
     return {
         "bets": n_bets,
         "wins": n_wins,
+        "n_clv_bets": n_clv_bets,
+        "n_missing_close": n_missing_close,
+        "net_clv_reason": net_clv_reason,
         "win_rate_pct": round(wr, 2),
         "turnover_pln": round(turnover, 2),
         "profit_pln": round(profit, 2),
         "realized_yield_pct": round(yd, 2),
         "bankroll_roi_pct": round(roi, 2),
-        "net_clv_pct": round(net_clv, 2),
-        "claimed_ev_pct": round(claimed_ev, 2),
-        "optimizers_curse_bias_pp": round(bias_pp, 2),
-        "match_luck_noise_pp": round(luck_pp, 2),
+        "net_clv_pct": round(net_clv, 2) if net_clv is not None else None,
+        "claimed_ev_pct": round(claimed_ev, 2) if claimed_ev is not None else None,
+        "optimizers_curse_bias_pp": round(bias_pp, 2) if bias_pp is not None else None,
+        "match_luck_noise_pp": round(luck_pp, 2) if luck_pp is not None else None,
         "max_drawdown_pct": round(max_dd, 2),
         "profit_factor": round(pf, 2),
         "sharpe_ratio": round(sharpe, 2),
@@ -643,11 +692,18 @@ def run_all_simulations():
 
     cohorts = [
         ("cohort_a_645_exact", "Cohort A: 645-Match Production DB (Exact Frozen Distilled Matches)", cohort_a),
-        ("cohort_b_extended_full", "Cohort B: Full Extended Production DB Match Set (Including Post-Sep-8 Matches)", cohort_b),
+        ("cohort_b_later_disjoint", "Cohort B: Strictly Later, Disjoint Production DB Matches", cohort_b),
     ]
 
     results_payload: dict[str, Any] = {
         "title": "Realistic Match-Level Chronological Walk-Forward Simulation (1 Decision Per Match)",
+        "selection": {
+            "cohort_b_strictly_later_disjoint": True,
+            "in_sample_selection": data["in_sample_selection"],
+            "cohort_a_end_utc": cohort_a["start_dt"].max().isoformat() if not cohort_a.empty else None,
+            "verification_status": "NOT_EVALUATED" if data["in_sample_selection"] else "EVALUATED",
+            "verification_reason": "no_later_disjoint_cohort_b" if data["in_sample_selection"] else None,
+        },
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "parameters": {
             "initial_capital_pln": 10000.0,
@@ -656,6 +712,9 @@ def run_all_simulations():
             "capital_locking": "Reserved at t_dec, settled at t_start + 3 hours",
             "market_consensus": "Mean Shin devigged probability across active books (require >= 2 books)",
             "playable_odds": "Best available bookmaker odds at t_dec",
+            "quote_cutoff": "scraped_at <= decision_time",
+            "market_prefilter_applied": False,
+            "clv_missing_close_policy": "exclude missing-close bets from CLV-derived metrics",
         },
         "cohorts": {},
     }
@@ -666,6 +725,8 @@ def run_all_simulations():
         print(f"=======================================================")
         c_dict: dict[str, Any] = {
             "label": c_label,
+            "evaluation_status": "EVALUATED" if not c_df.empty else "NOT_EVALUATED",
+            "evaluation_reason": None if not c_df.empty else "cohort_has_no_matches",
             "n_matches": len(c_df),
             "schedules": {},
         }
@@ -702,9 +763,12 @@ def run_all_simulations():
                     g5_res = m_dict["G5"]
                     g1_res = m_dict["G1"]
                     g7b_res = m_dict["G7b"]
-                    print(f"    [{m_name}] G1: {g1_res['bets']:2d} bets | {g1_res['profit_pln']:+7.2f} PLN ({g1_res['realized_yield_pct']:+5.2f}%) | CLV: {g1_res['net_clv_pct']:+5.2f}%")
-                    print(f"    [{m_name}] G5: {g5_res['bets']:2d} bets | {g5_res['profit_pln']:+7.2f} PLN ({g5_res['realized_yield_pct']:+5.2f}%) | CLV: {g5_res['net_clv_pct']:+5.2f}%")
-                    print(f"    [{m_name}] G7b: {g7b_res['bets']:2d} bets | {g7b_res['profit_pln']:+7.2f} PLN ({g7b_res['realized_yield_pct']:+5.2f}%) | CLV: {g7b_res['net_clv_pct']:+5.2f}%")
+                    g1_clv = f"{g1_res['net_clv_pct']:+5.2f}%" if g1_res["net_clv_pct"] is not None else "N/A"
+                    g5_clv = f"{g5_res['net_clv_pct']:+5.2f}%" if g5_res["net_clv_pct"] is not None else "N/A"
+                    g7b_clv = f"{g7b_res['net_clv_pct']:+5.2f}%" if g7b_res["net_clv_pct"] is not None else "N/A"
+                    print(f"    [{m_name}] G1: {g1_res['bets']:2d} bets | {g1_res['profit_pln']:+7.2f} PLN ({g1_res['realized_yield_pct']:+5.2f}%) | CLV: {g1_clv}")
+                    print(f"    [{m_name}] G5: {g5_res['bets']:2d} bets | {g5_res['profit_pln']:+7.2f} PLN ({g5_res['realized_yield_pct']:+5.2f}%) | CLV: {g5_clv}")
+                    print(f"    [{m_name}] G7b: {g7b_res['bets']:2d} bets | {g7b_res['profit_pln']:+7.2f} PLN ({g7b_res['realized_yield_pct']:+5.2f}%) | CLV: {g7b_clv}")
 
             c_dict["schedules"][s_key] = s_dict
 

@@ -14,6 +14,8 @@ import math
 import subprocess
 import sys
 from pathlib import Path
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 
 import numpy as np
 import pytest
@@ -212,9 +214,17 @@ def test_depletion_monotonicity_deep_vs_shallow():
 
 # ─── Test 4: Regression Check ────────────────────────────────────────────────
 
+@pytest.mark.requires_artifacts(
+    PROJECT_ROOT / "data/research_root.txt",
+    PROJECT_ROOT / "data/05_model_input/canonical_benchmark/rating-foundation-20260915/data/08_reporting/paired.parquet",
+    PROJECT_ROOT / "data/05_model_input/canonical_benchmark/rating-foundation-20260915/data/07_model_output/receipt.json",
+    PROJECT_ROOT / "data/05_model_input/canonical_benchmark/rating-foundation-20260915/data/08_reporting/numeric_audit.json",
+    PROJECT_ROOT / "data/05_model_input/canonical_benchmark/rating-foundation-20260915/STATUS.json",
+    PROJECT_ROOT / "data/05_model_input/canonical_benchmark/a0-phase-walkforward-20260914/RAPORT.md",
+)
 def test_model_benchmark_suite_doctor_passes():
     """Verify scripts/run_model_benchmark.py --suite --doctor reports status READY."""
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = PROJECT_ROOT
     cmd = [sys.executable, str(project_root / "scripts/run_model_benchmark.py"), "--suite", "--doctor"]
     result = subprocess.run(cmd, cwd=project_root, capture_output=True, text=True, check=True)
     assert '"status": "READY"' in result.stdout or "'status': 'READY'" in result.stdout

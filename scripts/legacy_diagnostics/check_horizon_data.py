@@ -31,7 +31,9 @@ cur.execute("""
     ORDER BY os.timestamp DESC
     LIMIT 5
 """)
-print(f"Recent odds snapshots: {cur.fetchall()}")
+recent_rows = cur.fetchall()
+print(f"Recent odds snapshots: {recent_rows}")
+match_ids = list(dict.fromkeys(row[0] for row in recent_rows))
 if match_ids:
     cur.execute("""
         SELECT canonical_match_id FROM upcoming_match_features
@@ -48,4 +50,4 @@ if match_ids:
             cur.execute("SELECT canonical_key, team_a_name, team_b_name, start_time_normalized FROM canonical_matches WHERE id = %s", (m_id,))
             print(f"  Missing: {cur.fetchone()}")
 else:
-    print("No matches with odds found in the last 90 days.")
+    print("No matches with odds found in the recent sample.")

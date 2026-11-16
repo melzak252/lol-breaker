@@ -18,6 +18,7 @@ from betting_app.services.enc_rosters import (
     ENC_ROSTER_SOURCE_URL,
 )
 from betting_app.services.rating_contract import OPERATIONAL_RATINGS_VERSION
+from betting_app.core.models import C0_NATIVE
 from betting_app.services.c0_inference import predict_c0
 
 STANDARD_ROLES = ("TOP", "JUNGLE", "MID", "ADC", "SUPPORT")
@@ -223,7 +224,7 @@ def build_enc_configuration(
         "ratings_version": str(rating_run["ratings_version"]) if rating_run else None,
         "data_cutoff_at": str(rating_run["data_cutoff_at"]) if rating_run else None,
         "probability_model": "Causal-C0",
-        "probability_model_version": "c0-native-2026-w32-e12-v1",
+        "probability_model_version": C0_NATIVE.version,
         "organization_policy": "synthetic_national_identity_no_organization",
         "teams": teams,
         "simulation_ready": not issues,
@@ -295,7 +296,7 @@ class EncSimulator:
         origin = self.decision_at.isoformat()
         key = (
             team_a.organization_id, team_a.roster, team_b.organization_id, team_b.roster,
-            best_of, origin, "enc-2027", "no_organization", "c0-native-2026-w32-e12-v1",
+            best_of, origin, "enc-2027", "no_organization", C0_NATIVE.version,
         )
         if key not in self._probabilities:
             result = predict_c0({
@@ -408,7 +409,7 @@ class EncSimulator:
             "simulations": n_simulations,
             "format": enc_format(),
             "probability_model": "Causal-C0",
-            "probability_model_version": "c0-native-2026-w32-e12-v1",
+            "probability_model_version": C0_NATIVE.version,
             "probability_unit": "series",
             "decision_at": self.decision_at.isoformat(),
             "mode": "no_organization",

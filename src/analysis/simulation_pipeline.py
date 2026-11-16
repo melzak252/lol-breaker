@@ -187,14 +187,14 @@ CANONICAL_MODEL_NOMENCLATURE: dict[str, dict[str, str]] = {
         "architecture": "C0 ensemble with teacher-distilled per-BO logit temperature (T_BO1=0.9598, T_BO3/5=0.9165)",
     },
     "Input-Normalized C0-D": {
-        "display_name": "Input-Normalized Distilled-PlayerHistory-Ensemble",
-        "short_code": "C0-D (Norm)",
-        "architecture": "C0-D with automatic FamilyCalibratedGlicko2 + pyramid-drift cross-regional input tensor normalization",
+        "display_name": "Input-Normalized Distilled-PlayerHistory-Ensemble (look-ahead diagnostic)",
+        "short_code": "C0-D (Norm, look-ahead diagnostic)",
+        "architecture": "C0-D with one CURRENT FamilyCalibratedGlicko2 offsets snapshot applied to all 2024-2026 rows; in-sample look-ahead diagnostic, not a result",
     },
     "Input-Normalized C0": {
-        "display_name": "Input-Normalized PlayerHistory-Attention-Ensemble",
-        "short_code": "C0 (Norm)",
-        "architecture": "C0 with automatic FamilyCalibratedGlicko2 + pyramid-drift cross-regional input tensor normalization",
+        "display_name": "Input-Normalized PlayerHistory-Attention-Ensemble (look-ahead diagnostic)",
+        "short_code": "C0 (Norm, look-ahead diagnostic)",
+        "architecture": "C0 with one CURRENT FamilyCalibratedGlicko2 offsets snapshot applied to all 2024-2026 rows; in-sample look-ahead diagnostic, not a result",
     },
 }
 
@@ -556,8 +556,18 @@ def compute_cross_region_normalization_benchmark(
     calibration = joblib.load(model_root / "control/calibration/model.joblib")
     model_c0d = resolve_model_spec("C0-D")
 
-    idx_map = {str(mid): i for i, mid in enumerate(meta["golgg_match_id"].astype(str))}
     p_eids = df_paired["golgg_match_id"].astype(str).tolist()
+    meta_ids = meta["golgg_match_id"].astype(str)
+    if meta_ids.duplicated().any():
+        raise ValueError("release_corrected_bank metadata has duplicate golgg_match_id values")
+    if len(set(p_eids)) != len(p_eids):
+        raise ValueError("canonical paired benchmark has duplicate golgg_match_id values")
+    idx_map = {mid: i for i, mid in enumerate(meta_ids)}
+    missing_ids = [e for e in p_eids if e not in idx_map]
+    if missing_ids:
+        raise ValueError(
+            f"{len(missing_ids)} paired golgg_match_id values are absent from the bank metadata"
+        )
     b_idx = np.array([idx_map[e] for e in p_eids], dtype=np.int64)
     m_sub = meta.iloc[b_idx].reset_index(drop=True)
 
@@ -596,27 +606,54 @@ def compute_cross_region_normalization_benchmark(
     m2026 = m_sub["date"].to_numpy() >= "2026-01-01"
     y_26 = y_all[m2026]
     bo_26 = m_sub.loc[m2026, "best_of"].to_numpy(dtype=int)
-    p_c0_26_old = df_2026["control__full__full"].to_numpy(dtype=float)
+    ids_26 = np.asarray(p_eids)[m2026]
+
+    def _align_by_match_id(frame: pd.DataFrame, label: str) -> pd.DataFrame:
+        """Return `frame` re-ordered to the paired 2026 rows by golgg_match_id (ID sets must be identical)."""
+        ids = frame["golgg_match_id"].astype(str)
+        if ids.duplicated().any():
+            raise ValueError(f"{label}: duplicate golgg_match_id values")
+        frame_ids = set(ids)
+        paired_ids_26 = set(ids_26.tolist())
+        if frame_ids != paired_ids_26:
+            raise ValueError(
+                f"{label}: golgg_match_id set differs from the paired 2026 rows "
+                f"(only in {label}: {len(frame_ids - paired_ids_26)}, "
+                f"only in paired: {len(paired_ids_26 - frame_ids)})"
+            )
+        aligned = frame.assign(_mid=ids.to_numpy()).set_index("_mid").loc[ids_26]
+        if not np.array_equal(aligned["y"].to_numpy(dtype=int), y_26):
+            raise ValueError(f"{label}: outcome y disagrees with the paired benchmark for identical IDs")
+        return aligned
+
+    df_26_aligned = _align_by_match_id(df_2026, "all_2026_joined")
+    p_c0_26_old = df_26_aligned["control__full__full"].to_numpy(dtype=float)
     p_c0_26_new = p_c0_26_old.copy()
     intl_26 = intl_mask[m2026]
-    shift_26 = logit_shift_i[m_sub.loc[intl_mask, "date"].to_numpy() >= "2026-01-01"]
-    p_c0_26_new[intl_26] = p_new_i[m_sub.loc[intl_mask, "date"].to_numpy() >= "2026-01-01"]
+    intl_in_2026 = m_sub.loc[intl_mask, "date"].to_numpy() >= "2026-01-01"
+    shift_26 = logit_shift_i[intl_in_2026]
+    p_c0_26_new[intl_26] = p_new_i[intl_in_2026]
 
     c0d_20t_path = PROJECT_ROOT / "data/08_reporting/c0_upgrade_and_distillation_20261017/multiscale_20token_predictions.parquet"
     c0d_pred_path = PROJECT_ROOT / "data/08_reporting/c0_upgrade_and_distillation_20261017/year_anchor_distilled.parquet"
     if c0d_20t_path.is_file():
-        df_c0d = pd.read_parquet(c0d_20t_path)
+        df_c0d = _align_by_match_id(pd.read_parquet(c0d_20t_path), "c0_d_20t_predictions")
         p_c0d_26_old = df_c0d["p_c0_d_20t_core__full"].to_numpy(dtype=float)
+        c0d_source = "multiscale_20token_predictions.parquet:p_c0_d_20t_core__full"
     elif c0d_pred_path.is_file():
-        df_c0d = pd.read_parquet(c0d_pred_path)
+        df_c0d = _align_by_match_id(pd.read_parquet(c0d_pred_path), "c0_d_year_anchor_predictions")
         p_c0d_26_old = df_c0d["p_c0_d_year_core__full"].to_numpy(dtype=float)
+        c0d_source = "year_anchor_distilled.parquet:p_c0_d_year_core__full"
     else:
         p_c0d_26_old = np.array(
             [
-                apply_model_calibration(float(p), model_c0d, best_of=int(bo))[0]
+                apply_model_calibration(
+                    float(p), model_c0d, best_of=int(bo), allow_surrogate=True
+                )[0]
                 for p, bo in zip(p_c0_26_old, bo_26)
             ]
         )
+        c0d_source = "legacy C0 + fixed logit-slope calibration (registry C0-D spec)"
     p_c0d_26_new = p_c0d_26_old.copy()
     p_c0d_26_new[intl_26] = expit(
         logit(np.clip(p_c0d_26_old[intl_26], 1e-6, 1.0 - 1e-6)) + shift_26
@@ -651,38 +688,67 @@ def compute_cross_region_normalization_benchmark(
     m_worlds_msi = m_all_intl & intl_mask
     m_dom = ~m_worlds_msi
 
-    c0d_old_summary = compute_benchmark_summary(y_26, p_c0d_26_old, probability_epsilon=None)
-    c0d_new_summary = compute_benchmark_summary(y_26, p_c0d_26_new, probability_epsilon=None)
-    c0_new_summary = compute_benchmark_summary(y_26, p_c0_26_new, probability_epsilon=None)
-    a0_new_full_summary = compute_benchmark_summary(y_all, p_full_new, probability_epsilon=None)
+    c0d_summary = compute_benchmark_summary(y_26, p_c0d_26_old, probability_epsilon=None)
+    c0d_lookahead = compute_benchmark_summary(y_26, p_c0d_26_new, probability_epsilon=None)
+    c0_lookahead = compute_benchmark_summary(y_26, p_c0_26_new, probability_epsilon=None)
+    a0_lookahead_full = compute_benchmark_summary(y_all, p_full_new, probability_epsilon=None)
 
     offsets_map = load_dynamic_region_offsets(DEFAULT_REGIONAL_STATE_PATH)
+    state_current_date: str | None = None
+    if DEFAULT_REGIONAL_STATE_PATH.is_file():
+        state_current_date = str(
+            json.loads(DEFAULT_REGIONAL_STATE_PATH.read_text(encoding="utf-8")).get("current_date")
+        )
+
+    def _tails(p: np.ndarray, y_s: np.ndarray) -> int:
+        return int(np.sum(-np.where(y_s, np.log(p), np.log1p(-p)) >= tail_threshold))
+
+    # HEADLINE = un-normalized predictions. The normalized variants below are LOOK-AHEAD
+    # DIAGNOSTICS: one current regional_offsets_state.json (latest rating_runs row) is applied to every
+    # 2024-2026 row, so October-2026 offsets score the international events they were fitted on.
+    # Per-cutoff offsets cannot be reconstructed from local files (only the latest checkpoint is exported),
+    # so no causal normalized figure exists and none may be reported as a result.
     return {
-        "c0d_2026_old_summary": {
-            **asdict(c0d_old_summary),
+        "c0d_2026_summary": {
+            **asdict(c0d_summary),
             "display_name": CANONICAL_MODEL_NOMENCLATURE["Distilled-PlayerHistory-Ensemble (C0-D)"]["display_name"],
             "short_code": "C0-D",
-            "tails_over_threshold": int(np.sum(-np.where(y_26, np.log(p_c0d_26_old), np.log1p(-p_c0d_26_old)) >= tail_threshold)),
+            "prediction_source": c0d_source,
+            "tails_over_threshold": _tails(p_c0d_26_old, y_26),
         },
-        "c0d_2026_norm_summary": {
-            **asdict(c0d_new_summary),
+        "lookahead_diagnostic_notice": (
+            "LOOK-AHEAD DIAGNOSTIC (IN-SAMPLE, NOT A RESULT): the normalized figures apply the latest "
+            f"regional offsets snapshot (state current_date={state_current_date}) to every 2024-2026 row; "
+            "they are fitted on the international events they score and must not be cited as predictive quality."
+        ),
+        "offsets_provenance": {
+            "as_of_reconstruction": "NOT_FEASIBLE_LOCALLY",
+            "state_current_date": state_current_date,
+            "reason": (
+                "Only the latest FamilyCalibratedGlicko2 checkpoint is exported "
+                "(export_db_regional_offsets_state reads the newest rating_runs row); historical "
+                "per-cutoff rating_runs states are not present in local data."
+            ),
+        },
+        "c0d_2026_lookahead_diagnostic_summary": {
+            **asdict(c0d_lookahead),
             "display_name": CANONICAL_MODEL_NOMENCLATURE["Input-Normalized C0-D"]["display_name"],
-            "short_code": "C0-D (Norm)",
-            "tails_over_threshold": int(np.sum(-np.where(y_26, np.log(p_c0d_26_new), np.log1p(-p_c0d_26_new)) >= tail_threshold)),
+            "short_code": "C0-D (Norm, look-ahead diagnostic)",
+            "tails_over_threshold": _tails(p_c0d_26_new, y_26),
         },
-        "c0_2026_norm_summary": {
-            **asdict(c0_new_summary),
+        "c0_2026_lookahead_diagnostic_summary": {
+            **asdict(c0_lookahead),
             "display_name": CANONICAL_MODEL_NOMENCLATURE["Input-Normalized C0"]["display_name"],
-            "short_code": "C0 (Norm)",
-            "tails_over_threshold": int(np.sum(-np.where(y_26, np.log(p_c0_26_new), np.log1p(-p_c0_26_new)) >= tail_threshold)),
+            "short_code": "C0 (Norm, look-ahead diagnostic)",
+            "tails_over_threshold": _tails(p_c0_26_new, y_26),
         },
-        "a0_full_11550_norm_summary": {
-            **asdict(a0_new_full_summary),
-            "display_name": "Input-Normalized WalkForward-Reference-Ensemble",
-            "short_code": "A0 (Norm)",
-            "tails_over_threshold": int(np.sum(-np.where(y_all, np.log(p_full_new), np.log1p(-p_full_new)) >= tail_threshold)),
+        "a0_full_11550_lookahead_diagnostic_summary": {
+            **asdict(a0_lookahead_full),
+            "display_name": "Input-Normalized WalkForward-Reference-Ensemble (look-ahead diagnostic)",
+            "short_code": "A0 (Norm, look-ahead diagnostic)",
+            "tails_over_threshold": _tails(p_full_new, y_all),
         },
-        "slices": {
+        "lookahead_diagnostic_slices": {
             "full_11550_walk_forward": _slice_stats(y_all, p_full_old, p_full_new),
             "cohort_a_2026_c0_d": _slice_stats(y_26, p_c0d_26_old, p_c0d_26_new),
             "cohort_a_2026_c0": _slice_stats(y_26, p_c0_26_old, p_c0_26_new),
@@ -699,7 +765,7 @@ def compute_cross_region_normalization_benchmark(
                 y_all[m_dom], p_full_old[m_dom], p_full_new[m_dom]
             ),
         },
-        "dynamic_regional_offsets": {
+        "lookahead_offsets_snapshot": {
             k: round(float(offsets_map[k]), 2)
             for k in ["LCK", "LPL", "LCS", "LEC", "LCP", "PCS", "VCS", "CBLOL", "LJL", "LLA"]
             if k in offsets_map
@@ -826,10 +892,8 @@ def run_stage2_model_benchmark(
         df_2026,
         tail_threshold=b_params.get("tail_loss_threshold", 2.5),
     )
-    cohort_a_results["Distilled-PlayerHistory-Ensemble (C0-D)"] = cross_region_bench["c0d_2026_old_summary"]
-    cohort_a_results["Input-Normalized C0-D"] = cross_region_bench["c0d_2026_norm_summary"]
-    cohort_a_results["Input-Normalized C0"] = cross_region_bench["c0_2026_norm_summary"]
-    cohort_b_full["Input-Normalized Annual Causal A0"] = cross_region_bench["a0_full_11550_norm_summary"]
+    cohort_a_results["Distilled-PlayerHistory-Ensemble (C0-D)"] = cross_region_bench["c0d_2026_summary"]
+    # The normalized (look-ahead) figures stay inside `cross_region_bench` only; they are never headline cohort entries.
     # -----------------------------------------------------------------------
     # Cohort C: Bayesian Market Shrinkage Grid (α in {0.0, 0.25, 0.35, 0.50, 0.75, 1.0})
     # -----------------------------------------------------------------------
@@ -1452,39 +1516,40 @@ def run_stage3_betting_simulation(
     # -----------------------------------------------------------------------
     # Simulation B: Strategy Comparison Matrix Across Regimes
     # -----------------------------------------------------------------------
+    def _replay_row(strategy: str, r: dict[str, Any]) -> dict[str, Any]:
+        """Strategy row built only from the replay simulator output (no literals)."""
+        n_replay = int(r.get("bets", 0))
+        if n_replay == 0:
+            roi_pct = claimed_pct = gap = win_pct = max_dd = None
+        else:
+            roi_pct = round(float(r["roi_pct"]), 2)
+            gap = round(float(r["ev_gap"]), 2)
+            claimed_pct = round(roi_pct + gap, 2)
+            win_pct = round(float(r["win_rate"]), 1)
+            max_dd = round(float(r["max_drawdown_pct"]), 2)
+        return {
+            "regime": "2026 Production Polish Books (12% Tax)",
+            "strategy": strategy,
+            "bets": n_replay,
+            "win_rate_pct": win_pct,
+            "claimed_ev_pct": claimed_pct,
+            "expected_ev_pct": claimed_pct,
+            "true_edge_net_clv_pct": None,
+            "net_clv_pct": None,
+            "net_clv_status": (
+                "NOT_RECOMPUTED: replay CLV is measured against the focal quote's own de-vig, not the closing line"
+            ),
+            "optimizers_curse_bias_pp": None,
+            "match_luck_noise_pp": None,
+            "realized_yield_pct": roi_pct,
+            "ev_overstatement_gap_pp": gap,
+            "max_drawdown_pct": max_dd,
+            "status": "REPLAY_COMPUTED_DEVELOPMENT_EXPOSED",
+        }
+
     strategy_rows = [
-        {
-            "regime": "2026 Production Polish Books (12% Tax)",
-            "strategy": "Unconstrained Pure C0 (No Shrinkage, No Guards)",
-            "bets": 454,
-            "win_rate_pct": 43.8,
-            "claimed_ev_pct": 31.93,
-            "expected_ev_pct": 31.93,
-            "true_edge_net_clv_pct": -13.69,
-            "net_clv_pct": -13.69,
-            "optimizers_curse_bias_pp": 45.62,
-            "match_luck_noise_pp": 9.15,
-            "realized_yield_pct": -4.54,
-            "ev_overstatement_gap_pp": 36.47,
-            "max_drawdown_pct": 67.0,
-            "status": "UNTRUSTED_OPTIMIZERS_CURSE",
-        },
-        {
-            "regime": "2026 Production Polish Books (12% Tax)",
-            "strategy": "Shrunk Hybrid C0 (α=0.50, Guard B ≤ 0.85, Caps)",
-            "bets": 147,
-            "win_rate_pct": 51.0,
-            "claimed_ev_pct": 13.41,
-            "expected_ev_pct": 13.41,
-            "true_edge_net_clv_pct": 1.85,
-            "net_clv_pct": 1.85,
-            "optimizers_curse_bias_pp": 11.56,
-            "match_luck_noise_pp": 9.65,
-            "realized_yield_pct": 11.50,
-            "ev_overstatement_gap_pp": 1.91,
-            "max_drawdown_pct": 15.0,
-            "status": "EFFECTIVE_RISK_REDUCTION",
-        },
+        _replay_row("Unconstrained Pure C0 (No Shrinkage, No Guards)", res_unconstrained),
+        _replay_row("Shrunk Hybrid C0 (α=0.50, Guard B ≤ 0.85, Caps)", res_hybrid),
         {
             "regime": "2026 Production Polish Books (12% Tax)",
             "strategy": "Optimal Synergy Strategy (Hybrid + Guard B + Thesis Veto + 1/4 Kelly)",
@@ -1494,28 +1559,31 @@ def run_stage3_betting_simulation(
             "expected_ev_pct": round(mean_model_ev, 2),
             "true_edge_net_clv_pct": round(mean_net_clv, 2),
             "net_clv_pct": round(mean_net_clv, 2),
+            "net_clv_status": "LEDGER_COMPUTED (gate parameters selected in-sample; no prospective validation)",
             "optimizers_curse_bias_pp": round(mean_model_ev - mean_net_clv, 2),
             "match_luck_noise_pp": round(realized_yield - mean_net_clv, 2),
             "realized_yield_pct": round(realized_yield, 2),
             "ev_overstatement_gap_pp": round(mean_model_ev - realized_yield, 2),
             "max_drawdown_pct": round(max_drawdown, 2),
-            "status": "ADOPTED_PRODUCTION_STRATEGY",
+            "status": "LEDGER_COMPUTED_DEVELOPMENT_EXPOSED",
         },
+    ]
+    # Claims that earlier revisions carried as hard-coded literals and that no code in the repo reproduces.
+    not_recomputed_claims = [
         {
             "regime": "OddsPortal Multi-Year (2021–2026, 0% Tax)",
-            "strategy": "Multi-Year Shrunk Hybrid + Caps (N=3,002)",
-            "bets": 3002,
-            "win_rate_pct": 57.6,
-            "claimed_ev_pct": 4.68,
-            "expected_ev_pct": 4.68,
-            "true_edge_net_clv_pct": 6.35,
-            "net_clv_pct": 6.35,
-            "optimizers_curse_bias_pp": -1.67,
-            "match_luck_noise_pp": 1.25,
-            "realized_yield_pct": 7.60,
-            "ev_overstatement_gap_pp": -2.92,
-            "max_drawdown_pct": 9.40,
-            "status": "VALIDATED_HISTORICAL_EDGE",
+            "strategy": "Multi-Year Shrunk Hybrid + Caps",
+            "status": "NOT_RECOMPUTED",
+            "reason": (
+                "No code path reproduces the former literal row; the only multi-year code uses de-vigged "
+                "closing averages as both price and reference, and C0 TRAIN overlaps 2021-2025."
+            ),
+        },
+        {
+            "regime": "2026 Production Polish Books (12% Tax)",
+            "strategy": "Optimal Synergy + Wasserstein-Robust-Gate (stake-weighted DRO haircut gate)",
+            "status": "NOT_RECOMPUTED",
+            "reason": "No code path in this pipeline recomputes the DRO-gated subset; the former row was a literal.",
         },
     ]
 
@@ -1528,12 +1596,14 @@ def run_stage3_betting_simulation(
         for k, v in r.items():
             if isinstance(v, pd.DataFrame):
                 continue
+            # The simulator's "sharpe_ratio" is mean/sd * sqrt(N) of per-bet returns, i.e. a t-statistic.
+            out_key = "t_statistic" if k == "sharpe_ratio" else k
             if isinstance(v, (np.floating, float)):
-                cleaned[k] = float(v) if math.isfinite(float(v)) else None
+                cleaned[out_key] = float(v) if math.isfinite(float(v)) else None
             elif isinstance(v, (np.integer, int)):
-                cleaned[k] = int(v)
+                cleaned[out_key] = int(v)
             else:
-                cleaned[k] = v
+                cleaned[out_key] = v
         return cleaned
 
     simulation_results = {
@@ -1551,10 +1621,15 @@ def run_stage3_betting_simulation(
             "mean_raw_clv_pct": round(mean_raw_clv, 2),
             "mean_net_clv_pct": round(mean_net_clv, 2),
             "max_drawdown_pct": round(max_drawdown, 2),
+            "max_drawdown_note": (
+                f"bounded by construction: per-bet stake cap (max ledger stake {float(ledger_df['stake'].max()):.0f} PLN) "
+                f"on a {b_params.get('initial_bankroll', 10000.0):,.0f} PLN bankroll"
+            ),
         },
         "monthly_breakdown": monthly_rows,
         "bookmaker_breakdown": bookmaker_rows,
         "strategy_comparison": strategy_rows,
+        "not_recomputed_claims": not_recomputed_claims,
     }
 
     out_file = out_dir / "stage3_betting_simulation.json"
@@ -1570,7 +1645,7 @@ def run_stage4_econometric_audit(
     catalog_path: Path | None = None,
     params_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Execute mathematical decomposition of True Profit, Optimizer's Curse, Noise Decay, and Props."""
+    """Compute ledger-return decomposition, per-bet inference, conditional sampling diagnostics, and props."""
     c_path = catalog_path or (PROJECT_ROOT / "conf/base/catalog.yml")
     p_path = params_path or (PROJECT_ROOT / "conf/base/parameters.yml")
     with c_path.open("r", encoding="utf-8") as f:
@@ -1646,27 +1721,36 @@ def run_stage4_econometric_audit(
 
     variance_ratio = float((np.std(realized_yield_unit, ddof=1) / np.std(net_clv, ddof=1)) ** 2)
 
-    # 3. Time-to-Profit & Noise Decay Table
+    # 3. Conditional sampling probability & required sample size (NOT a guarantee).
+    # sigma is the empirical per-bet SD of the ledger's realized unit return; mu is the ledger mean Net CLV
+    # treated as the known true edge. Both assume per-bet IID draws, that CLV converts 1:1 into post-tax
+    # yield, and that the stale prices stay available. mu is itself an in-sample estimate (gate parameters
+    # were selected on this cohort), so the probabilities below are conditional on that assumption only.
     mu_12pct = float(np.mean(net_clv))
-    sigma_12pct = 1.0979  # Theoretical per-bet noise at avg odds 2.53 under 12% tax
+    sigma_bet = float(np.std(realized_yield_unit, ddof=1))
     z_95 = e_params.get("confidence_z_95_one_sided", 1.6448536269514722)
 
-    n_min_12pct = int(math.ceil((z_95 * sigma_12pct / mu_12pct) ** 2))
-    n_min_0pct = int(math.ceil((z_95 * 1.010 / 0.0760) ** 2))  # At 0% tax: mu=7.60%, sigma=101.0%
+    n_for_95pct_conditional = (
+        int(math.ceil((z_95 * sigma_bet / mu_12pct) ** 2)) if mu_12pct > 0.0 else None
+    )
 
-    sample_sizes = e_params.get("noise_decay_sample_sizes", [10, 20, 50, 100, 250, 500, 1000, 1396, 2000, 2792])
+    sample_sizes = list(
+        e_params.get("noise_decay_sample_sizes", [10, 20, 50, 100, 250, 500, 1000, 2000, 5000])
+    )
+    if n_for_95pct_conditional is not None:
+        sample_sizes = sorted(set(sample_sizes) | {n_for_95pct_conditional})
     noise_decay_rows = []
     for n_size in sample_sizes:
-        se_n = sigma_12pct / math.sqrt(n_size)
+        se_n = sigma_bet / math.sqrt(n_size)
         ci_low = (mu_12pct - 1.96 * se_n) * 100.0
         ci_high = (mu_12pct + 1.96 * se_n) * 100.0
-        p_profit = float(stats.norm.cdf(mu_12pct / se_n)) * 100.0
+        p_cond = float(stats.norm.cdf(mu_12pct / se_n)) * 100.0
         noise_decay_rows.append({
             "bets_n": int(n_size),
             "se_noise_pct": round(se_n * 100.0, 2),
             "ci_95_lower_pct": round(ci_low, 2),
             "ci_95_upper_pct": round(ci_high, 2),
-            "prob_profit_pct": round(p_profit, 1),
+            "conditional_sampling_probability_pct": round(p_cond, 1),
         })
 
     noise_decay_df = pd.DataFrame(noise_decay_rows)
@@ -1730,11 +1814,20 @@ def run_stage4_econometric_audit(
             "realized_yield": stats_realized_yield,
             "claimed_ev": stats_claimed_ev,
             "variance_ratio": round(variance_ratio, 1),
+            "inference_unit": (
+                "per-bet IID: Student-t test and bet-level bootstrap over N ledger bets that are clustered in "
+                "time; NOT a monthly-block procedure, so standard errors are likely understated"
+            ),
         },
-        "time_to_profit": {
-            "n_min_12pct_tax": n_min_12pct,
-            "n_min_0pct_tax": n_min_0pct,
-            "theoretical_sigma_12pct": round(sigma_12pct * 100.0, 2),
+        "conditional_sampling": {
+            "n_for_95pct_conditional_sampling_probability_12pct_tax": n_for_95pct_conditional,
+            "empirical_per_bet_sd_12pct_tax": round(sigma_bet * 100.0, 2),
+            "conditional_sampling_probability_note": (
+                "conditional_sampling_probability = Phi(mu / (sigma / sqrt(N))) with mu = ledger mean Net CLV taken "
+                "as the known true edge and sigma = empirical per-bet SD of the ledger realized return. It is NOT a "
+                "guarantee of profit: it assumes per-bet IID outcomes, that CLV converts 1:1 into post-tax yield at "
+                "prices that stay available, and ignores uncertainty in mu (an in-sample estimate)."
+            ),
             "noise_decay_schedule": noise_decay_rows,
         },
         "prop_distribution_verification": {
@@ -1770,39 +1863,65 @@ def run_stage5_generate_report(
     s3 = json.loads((out_dir / "stage3_betting_simulation.json").read_text(encoding="utf-8"))
     s4 = json.loads((out_dir / "stage4_econometric_audit.json").read_text(encoding="utf-8"))
 
-    joint_rows = [r for r in s2.get("shrinkage_grid_summary", [])
-                  if "Joint Consensus" in r.get("cohort", "")]
-    best_joint = min(joint_rows, key=lambda r: r["log_loss"]) if joint_rows else None
-    optimal_alpha = float(best_joint["alpha"]) if best_joint else 0.50
-    min_joint_ll = float(best_joint["log_loss"]) if best_joint else 0.574693
+    cross_region = s2["cross_region_normalization"]
+    lookahead_slices = cross_region["lookahead_diagnostic_slices"]
+    normalization_rows = [
+        ("Full 2024–2026 walk-forward", "full_11550_walk_forward"),
+        ("2026 canonical C0-D", "cohort_a_2026_c0_d"),
+        ("2026 canonical C0", "cohort_a_2026_c0"),
+        ("International, 2024–2026", "all_international_2024_2026"),
+        ("International, 2026 C0-D", "international_2026_only_c0_d"),
+        ("Worlds / MSI / First Stand, 2024–2026", "worlds_msi_first_stand_2024_2026"),
+        ("Domestic, 2024–2026", "domestic_matches_2024_2026"),
+    ]
+    normalization_table_rows = "\n".join(
+        f"| {label} | {lookahead_slices[key]['n_matches']:,} | "
+        f"{lookahead_slices[key]['before_log_loss']:.6f} | "
+        f"{lookahead_slices[key]['after_log_loss']:.6f} | "
+        f"{lookahead_slices[key]['delta_log_loss']:+.6f} |"
+        for label, key in normalization_rows
+    )
+    production_horizons = s2["production_horizon_comparison"]
+    conditional_sampling = s4["conditional_sampling"]
+    joint_rows = [
+        r for r in s2["shrinkage_grid_summary"]
+        if "Joint Consensus" in r["cohort"]
+    ]
+    if not joint_rows:
+        raise ValueError("Stage 2 did not produce the required Joint Consensus shrinkage grid")
+    best_joint = min(joint_rows, key=lambda r: r["log_loss"])
+    optimal_alpha = float(best_joint["alpha"])
+    min_joint_ll = float(best_joint["log_loss"])
 
     dvc_metrics = {
-        "stage1_doctor_status": s1.get("doctor_suite", {}).get("status", "READY"),
+        "stage1_doctor_status": s1["doctor_suite"]["status"],
         "stage2_c0_2026_log_loss": round(s2["cohort_a_2026"]["Causal-C0 (W32/E12)"]["log_loss"], 6),
         "stage2_c0_2026_brier": round(s2["cohort_a_2026"]["Causal-C0 (W32/E12)"]["brier_score"], 6),
         "stage2_a0_2026_log_loss": round(s2["cohort_a_2026"]["Annual Causal A0"]["log_loss"], 6),
         "stage2_a0_full_log_loss": round(s2["cohort_b_full_11550"]["Annual Causal A0"]["log_loss"], 6),
         "stage2_a0_full_brier": round(s2["cohort_b_full_11550"]["Annual Causal A0"]["brier_score"], 6),
         "stage2_c0_d_2026_log_loss": round(s2["cohort_a_2026"]["Distilled-PlayerHistory-Ensemble (C0-D)"]["log_loss"], 6),
-        "stage2_c0_d_norm_2026_log_loss": round(s2["cohort_a_2026"]["Input-Normalized C0-D"]["log_loss"], 6),
-        "stage2_c0_norm_2026_log_loss": round(s2["cohort_a_2026"]["Input-Normalized C0"]["log_loss"], 6),
-        "stage2_a0_full_norm_log_loss": round(s2["cross_region_normalization"]["slices"]["full_11550_walk_forward"]["after_log_loss"], 6),
-        "stage2_worlds_msi_before_ll": round(s2["cross_region_normalization"]["slices"]["worlds_msi_first_stand_2024_2026"]["before_log_loss"], 6),
-        "stage2_worlds_msi_after_ll": round(s2["cross_region_normalization"]["slices"]["worlds_msi_first_stand_2024_2026"]["after_log_loss"], 6),
+        "stage2_lookahead_diagnostic_c0_d_2026_log_loss": round(cross_region["c0d_2026_lookahead_diagnostic_summary"]["log_loss"], 6),
+        "stage2_lookahead_diagnostic_c0_2026_log_loss": round(cross_region["c0_2026_lookahead_diagnostic_summary"]["log_loss"], 6),
+        "stage2_lookahead_diagnostic_a0_full_11550_log_loss": round(cross_region["a0_full_11550_lookahead_diagnostic_summary"]["log_loss"], 6),
+        "stage2_lookahead_diagnostic_full_11550_before_log_loss": round(lookahead_slices["full_11550_walk_forward"]["before_log_loss"], 6),
+        "stage2_lookahead_diagnostic_full_11550_after_log_loss": round(lookahead_slices["full_11550_walk_forward"]["after_log_loss"], 6),
+        "stage2_lookahead_diagnostic_worlds_msi_before_log_loss": round(lookahead_slices["worlds_msi_first_stand_2024_2026"]["before_log_loss"], 6),
+        "stage2_lookahead_diagnostic_worlds_msi_after_log_loss": round(lookahead_slices["worlds_msi_first_stand_2024_2026"]["after_log_loss"], 6),
         "stage2_pinnacle_t24h_c0_ll": round(s2["pinnacle_horizon_comparison"]["24"]["c0_log_loss"], 6),
         "stage2_pinnacle_t24h_market_ll": round(s2["pinnacle_horizon_comparison"]["24"]["pinnacle_log_loss"], 6),
         "stage2_pinnacle_t24h_hybrid_ll": round(s2["pinnacle_horizon_comparison"]["24"]["hybrid_pinnacle_log_loss"], 6),
         "stage2_pinnacle_t12h_c0_ll": round(s2["pinnacle_horizon_comparison"]["12"]["c0_log_loss"], 6),
         "stage2_pinnacle_t12h_market_ll": round(s2["pinnacle_horizon_comparison"]["12"]["pinnacle_log_loss"], 6),
         "stage2_pinnacle_t12h_hybrid_ll": round(s2["pinnacle_horizon_comparison"]["12"]["hybrid_pinnacle_log_loss"], 6),
-        "stage2_prod_t48h_c0_ll": round(s2.get("production_horizon_comparison", {}).get("T-48h", {}).get("c0_log_loss", 0.553525), 6),
-        "stage2_prod_t48h_market_ll": round(s2.get("production_horizon_comparison", {}).get("T-48h", {}).get("market_log_loss", 0.563429), 6),
-        "stage2_prod_t48h_hybrid_ll": round(s2.get("production_horizon_comparison", {}).get("T-48h", {}).get("hybrid_log_loss", 0.548091), 6),
-        "stage2_prod_t24h_c0_ll": round(s2.get("production_horizon_comparison", {}).get("T-24h", {}).get("c0_log_loss", 0.556513), 6),
-        "stage2_prod_t24h_market_ll": round(s2.get("production_horizon_comparison", {}).get("T-24h", {}).get("market_log_loss", 0.558981), 6),
-        "stage2_prod_t24h_hybrid_ll": round(s2.get("production_horizon_comparison", {}).get("T-24h", {}).get("hybrid_log_loss", 0.548155), 6),
-        "stage2_prod_lt2h_market_ll": round(s2.get("production_horizon_comparison", {}).get("<2h", {}).get("market_log_loss", 0.555258), 6),
-        "stage2_prod_lt2h_hybrid_ll": round(s2.get("production_horizon_comparison", {}).get("<2h", {}).get("hybrid_log_loss", 0.551709), 6),
+        "stage2_prod_t48h_c0_ll": round(production_horizons["T-48h"]["c0_log_loss"], 6),
+        "stage2_prod_t48h_market_ll": round(production_horizons["T-48h"]["market_log_loss"], 6),
+        "stage2_prod_t48h_hybrid_ll": round(production_horizons["T-48h"]["hybrid_log_loss"], 6),
+        "stage2_prod_t24h_c0_ll": round(production_horizons["T-24h"]["c0_log_loss"], 6),
+        "stage2_prod_t24h_market_ll": round(production_horizons["T-24h"]["market_log_loss"], 6),
+        "stage2_prod_t24h_hybrid_ll": round(production_horizons["T-24h"]["hybrid_log_loss"], 6),
+        "stage2_prod_lt2h_market_ll": round(production_horizons["<2h"]["market_log_loss"], 6),
+        "stage2_prod_lt2h_hybrid_ll": round(production_horizons["<2h"]["hybrid_log_loss"], 6),
         "stage2_polish_2plus_market_ll": round(s2["polish_production_comparison"]["Polish2plus"]["market_log_loss"], 6),
         "stage2_polish_2plus_hybrid_ll": round(s2["polish_production_comparison"]["Polish2plus"]["hybrid_log_loss"], 6),
         "stage2_shrinkage_joint_optimal_alpha": optimal_alpha,
@@ -1815,11 +1934,11 @@ def run_stage5_generate_report(
         "stage3_production_net_clv_pct": s3["optimal_synergy_summary"]["mean_net_clv_pct"],
         "stage4_claimed_ev_hybrid_pct": s4["decomposition"]["shrunk_hybrid_claimed_ev_pct"],
         "stage4_curse_removed_pct": -s4["decomposition"]["curse_removed_by_shrinkage_pp"],
-        "stage4_net_clv_t_stat": s4["hypothesis_testing"]["net_clv"]["t_statistic"],
+        "stage4_net_clv_t_statistic": s4["hypothesis_testing"]["net_clv"]["t_statistic"],
         "stage4_net_clv_p_value": s4["hypothesis_testing"]["net_clv"]["p_value"],
         "stage4_variance_ratio": s4["hypothesis_testing"]["variance_ratio"],
-        "stage4_n_min_12pct_tax": s4["time_to_profit"]["n_min_12pct_tax"],
-        "stage4_n_min_0pct_tax": s4["time_to_profit"]["n_min_0pct_tax"],
+        "stage4_n_for_95pct_conditional_sampling_probability_12pct_tax": conditional_sampling["n_for_95pct_conditional_sampling_probability_12pct_tax"],
+        "stage4_empirical_per_bet_sd_12pct_tax_pct": conditional_sampling["empirical_per_bet_sd_12pct_tax"],
         "stage4_prop_kills_nll": round(s4["prop_distribution_verification"]["metrics"]["kills_ridge1"]["nll"], 6),
         "stage4_prop_duration_nll": round(s4["prop_distribution_verification"]["metrics"]["duration_tree15"]["nll"], 6),
         "stage4_prop_length_nll": round(s4["prop_distribution_verification"]["metrics"]["series_length_neural"]["nll"], 6),
@@ -1828,158 +1947,204 @@ def run_stage5_generate_report(
     metrics_file = out_dir / "summary_metrics.json"
     metrics_file.write_text(json.dumps(dvc_metrics, indent=2), encoding="utf-8")
 
-    # Generate comprehensive Markdown Report with max 6-column tables
+    # Generate the report and flat DVC metrics from stage outputs.
+    def _report_number(
+        value: Any, precision: int = 2, signed: bool = False, suffix: str = ""
+    ) -> str:
+        if value is None:
+            return "NOT_RECOMPUTED"
+        sign = "+" if signed else ""
+        return f"{float(value):{sign}.{precision}f}{suffix}"
+
+    pinnacle_comparison = s2["pinnacle_horizon_comparison"]
+    pinnacle_rows = [
+        (f"T-{h}h", pinnacle_comparison[str(h)]) for h in (48, 24, 12, 6)
+    ] + [("T-1h", pinnacle_comparison["T-1h"])]
+    pinnacle_table_rows = "\n".join(
+        f"| {label} | {row['n_matches']:,} | {row['pinnacle_log_loss']:.6f} | "
+        f"{row['c0_log_loss']:.6f} | {row['hybrid_pinnacle_log_loss']:.6f} | "
+        f"{row['delta_ll_hybrid_vs_pinnacle']:+.6f} |"
+        for label, row in pinnacle_rows
+    )
+    production_table_rows = "\n".join(
+        f"| {label} | {row['n_matches']:,} | {row['market_log_loss']:.6f} | "
+        f"{row['c0_log_loss']:.6f} | {row['hybrid_log_loss']:.6f} | "
+        f"{row['delta_ll_hybrid_vs_market']:+.6f} |"
+        for label, row in production_horizons.items()
+    )
+    polish_comparisons = s2["polish_production_comparison"]
+    polish_table_rows = "\n".join(
+        f"| {label} | {row['n_matches']:,} | {row['market_log_loss']:.6f} | "
+        f"{row['c0_log_loss']:.6f} | {row['hybrid_log_loss']:.6f} | "
+        f"{row['delta_ll_hybrid_vs_market']:+.6f} |"
+        for label, row in polish_comparisons.items()
+    )
+    pinnacle_grid_rows = [
+        row for row in s2["shrinkage_grid_summary"] if "T-1h" in row["cohort"]
+    ]
+    shrinkage_table_rows = "\n".join(
+        f"| {row['cohort']} | {row['n_series']:,} | {row['alpha']:.2f} | "
+        f"{row['log_loss']:.6f} | {row['brier_score']:.6f} |"
+        for row in joint_rows + pinnacle_grid_rows
+    )
+    strategy_rows = s3["strategy_comparison"]
+    strategy_performance_rows = "\n".join(
+        f"| {row['strategy']} | {row['regime']} | {row['bets']:,} | "
+        f"{_report_number(row['win_rate_pct'], suffix='%')} | "
+        f"{_report_number(row['realized_yield_pct'], signed=True, suffix='%')} | "
+        f"{_report_number(row['max_drawdown_pct'], suffix='%')} | {row['status']} |"
+        for row in strategy_rows
+    )
+    strategy_econometric_rows = "\n".join(
+        f"| {row['strategy']} | {_report_number(row['claimed_ev_pct'], signed=True, suffix='%')} | "
+        f"{_report_number(row['net_clv_pct'], signed=True, suffix='%')} | "
+        f"{_report_number(row['optimizers_curse_bias_pp'], signed=True, suffix=' pp')} | "
+        f"{_report_number(row['match_luck_noise_pp'], signed=True, suffix=' pp')} | "
+        f"{_report_number(row['realized_yield_pct'], signed=True, suffix='%')} |"
+        for row in strategy_rows
+    )
+    not_recomputed_rows = "\n".join(
+        f"| {row['regime']} | {row['strategy']} | {row['status']} | {row['reason']} |"
+        for row in s3["not_recomputed_claims"]
+    )
+    noise_decay_rows = conditional_sampling["noise_decay_schedule"]
+    noise_decay_table_rows = "\n".join(
+        f"| {row['bets_n']:,} | ±{row['se_noise_pct']:.2f}% | "
+        f"[{row['ci_95_lower_pct']:+.2f}%, {row['ci_95_upper_pct']:+.2f}%] | "
+        f"{row['conditional_sampling_probability_pct']:.1f}% |"
+        for row in noise_decay_rows
+    )
+    shrinkage_best_alpha = optimal_alpha
+    shrinkage_best_log_loss = min_joint_ll
+    ledger_summary = s3["optimal_synergy_summary"]
+    decomposition = s4["decomposition"]
+    hypothesis = s4["hypothesis_testing"]
+    prop_metrics = s4["prop_distribution_verification"]["metrics"]
+    hypothesis_rows = [
+        ("Realized unit return", hypothesis["realized_yield"]),
+        ("Raw CLV", hypothesis["raw_clv"]),
+        ("Net CLV", hypothesis["net_clv"]),
+    ]
+    hypothesis_table_rows = "\n".join(
+        f"| {label} | {_report_number(row['point_estimate_pct'], signed=True)}% | "
+        f"{row['sample_std_pct']:.2f}% | {row['standard_error_pct']:.2f}% | "
+        f"{row['t_statistic']:.3f} ($p={row['p_value']:.6g}) | "
+        f"[{row['ci_95_bootstrap'][0]:+.2f}%, {row['ci_95_bootstrap'][1]:+.2f}%] |"
+        for label, row in hypothesis_rows
+    )
+    conditional_n = conditional_sampling["n_for_95pct_conditional_sampling_probability_12pct_tax"]
+    conditional_n_display = "NOT_COMPUTED" if conditional_n is None else f"{conditional_n:,}"
     report_content = f"""# End-to-End Model & Betting Simulation Pipeline Report
 
-**Pipeline Execution:** Verified 5-Stage Simulation Architecture (`dvc repro` / `run_simulation_pipeline.py`)  
+**Pipeline Execution:** 5-Stage Simulation Architecture (`dvc repro` / `run_simulation_pipeline.py`)  
 **Data Engineering Standard:** Kedro 8-Layer Pipeline (`data/01_raw` through `data/08_reporting`)  
-**Canonical Manifest Status:** `{dvc_metrics['stage1_doctor_status']}` (11,550 series walk-forward suite)
+**Canonical Manifest Status:** `{dvc_metrics['stage1_doctor_status']}`  
+**Evaluation exposure:** development-exposed data; in-sample gate selection where applicable; no prospective validation.
 
 ---
 
 ## 1. Sports Model Predictive Quality
 
-### A. 2026 Canonical Assessment Cohort ($N=3,103$ series, Jan–Sep 2026)
+### A. 2026 Canonical Assessment Cohort ($N={s2['cohort_a_2026']['Causal-C0 (W32/E12)']['sample_size']:,}$ series)
 
-| Model | Code | LogLoss | Brier Score | Accuracy (AUC) | Tails ($\\ge 2.5$) |
+| Model | Code | Log Loss | Brier Score | Accuracy (AUC) | Tails |
 |---|---|---:|---:|---:|---:|
-| **Input-Normalized Distilled Ensemble** | **`C0-D (Norm)`** | **{s2['cohort_a_2026']['Input-Normalized C0-D']['log_loss']:.6f}** | **{s2['cohort_a_2026']['Input-Normalized C0-D']['brier_score']:.6f}** | **{s2['cohort_a_2026']['Input-Normalized C0-D']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Input-Normalized C0-D']['auc']:.4f})** | **{s2['cohort_a_2026']['Input-Normalized C0-D']['tails_over_threshold']}** |
-| **Distilled-PlayerHistory-Ensemble** | **`C0-D`** | **{s2['cohort_a_2026']['Distilled-PlayerHistory-Ensemble (C0-D)']['log_loss']:.6f}** | **{s2['cohort_a_2026']['Distilled-PlayerHistory-Ensemble (C0-D)']['brier_score']:.6f}** | **{s2['cohort_a_2026']['Distilled-PlayerHistory-Ensemble (C0-D)']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Distilled-PlayerHistory-Ensemble (C0-D)']['auc']:.4f})** | **{s2['cohort_a_2026']['Distilled-PlayerHistory-Ensemble (C0-D)']['tails_over_threshold']}** |
-| **Input-Normalized PlayerHistory-Ensemble** | **`C0 (Norm)`** | **{s2['cohort_a_2026']['Input-Normalized C0']['log_loss']:.6f}** | **{s2['cohort_a_2026']['Input-Normalized C0']['brier_score']:.6f}** | **{s2['cohort_a_2026']['Input-Normalized C0']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Input-Normalized C0']['auc']:.4f})** | **{s2['cohort_a_2026']['Input-Normalized C0']['tails_over_threshold']}** |
-| **PlayerHistory-Attention-Ensemble** | **`C0`** | **{s2['cohort_a_2026']['Causal-C0 (W32/E12)']['log_loss']:.6f}** | **{s2['cohort_a_2026']['Causal-C0 (W32/E12)']['brier_score']:.6f}** | **{s2['cohort_a_2026']['Causal-C0 (W32/E12)']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Causal-C0 (W32/E12)']['auc']:.4f})** | **{s2['cohort_a_2026']['Causal-C0 (W32/E12)']['tails_over_threshold']}** |
-| **WalkForward-Reference-Ensemble** | `A0` | {s2['cohort_a_2026']['Annual Causal A0']['log_loss']:.6f} | {s2['cohort_a_2026']['Annual Causal A0']['brier_score']:.6f} | {s2['cohort_a_2026']['Annual Causal A0']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Annual Causal A0']['auc']:.4f}) | {s2['cohort_a_2026']['Annual Causal A0']['tails_over_threshold']} |
-| **ElasticNet-TeamForm-Baseline** | `EXP-039` | {s2['cohort_a_2026']['EXP-039 Research Derivative']['log_loss']:.6f} | {s2['cohort_a_2026']['EXP-039 Research Derivative']['brier_score']:.6f} | {s2['cohort_a_2026']['EXP-039 Research Derivative']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['EXP-039 Research Derivative']['auc']:.4f}) | {s2['cohort_a_2026']['EXP-039 Research Derivative']['tails_over_threshold']} |
-| **Player-Glicko2-Rating-Baseline** | `Glicko-2` | {s2['cohort_a_2026']['Calibrated Glicko-2']['log_loss']:.6f} | {s2['cohort_a_2026']['Calibrated Glicko-2']['brier_score']:.6f} | {s2['cohort_a_2026']['Calibrated Glicko-2']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Calibrated Glicko-2']['auc']:.4f}) | {s2['cohort_a_2026']['Calibrated Glicko-2']['tails_over_threshold']} |
-| **Player-Elo-Rating-Baseline** | `Elo` | {s2['cohort_a_2026']['Calibrated Elo']['log_loss']:.6f} | {s2['cohort_a_2026']['Calibrated Elo']['brier_score']:.6f} | {s2['cohort_a_2026']['Calibrated Elo']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Calibrated Elo']['auc']:.4f}) | {s2['cohort_a_2026']['Calibrated Elo']['tails_over_threshold']} |
+| PlayerHistory-Attention-Ensemble | `C0` | {s2['cohort_a_2026']['Causal-C0 (W32/E12)']['log_loss']:.6f} | {s2['cohort_a_2026']['Causal-C0 (W32/E12)']['brier_score']:.6f} | {s2['cohort_a_2026']['Causal-C0 (W32/E12)']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Causal-C0 (W32/E12)']['auc']:.4f}) | {s2['cohort_a_2026']['Causal-C0 (W32/E12)']['tails_over_threshold']}
+| Distilled-PlayerHistory-Ensemble | `C0-D` | {s2['cohort_a_2026']['Distilled-PlayerHistory-Ensemble (C0-D)']['log_loss']:.6f} | {s2['cohort_a_2026']['Distilled-PlayerHistory-Ensemble (C0-D)']['brier_score']:.6f} | {s2['cohort_a_2026']['Distilled-PlayerHistory-Ensemble (C0-D)']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Distilled-PlayerHistory-Ensemble (C0-D)']['auc']:.4f}) | {s2['cohort_a_2026']['Distilled-PlayerHistory-Ensemble (C0-D)']['tails_over_threshold']}
+| WalkForward-Reference-Ensemble | `A0` | {s2['cohort_a_2026']['Annual Causal A0']['log_loss']:.6f} | {s2['cohort_a_2026']['Annual Causal A0']['brier_score']:.6f} | {s2['cohort_a_2026']['Annual Causal A0']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Annual Causal A0']['auc']:.4f}) | {s2['cohort_a_2026']['Annual Causal A0']['tails_over_threshold']}
+| ElasticNet-TeamForm-Baseline | `EXP-039` | {s2['cohort_a_2026']['EXP-039 Research Derivative']['log_loss']:.6f} | {s2['cohort_a_2026']['EXP-039 Research Derivative']['brier_score']:.6f} | {s2['cohort_a_2026']['EXP-039 Research Derivative']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['EXP-039 Research Derivative']['auc']:.4f}) | {s2['cohort_a_2026']['EXP-039 Research Derivative']['tails_over_threshold']}
+| Calibrated Glicko-2 | `Glicko-2` | {s2['cohort_a_2026']['Calibrated Glicko-2']['log_loss']:.6f} | {s2['cohort_a_2026']['Calibrated Glicko-2']['brier_score']:.6f} | {s2['cohort_a_2026']['Calibrated Glicko-2']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Calibrated Glicko-2']['auc']:.4f}) | {s2['cohort_a_2026']['Calibrated Glicko-2']['tails_over_threshold']}
+| Calibrated Elo | `Elo` | {s2['cohort_a_2026']['Calibrated Elo']['log_loss']:.6f} | {s2['cohort_a_2026']['Calibrated Elo']['brier_score']:.6f} | {s2['cohort_a_2026']['Calibrated Elo']['accuracy']*100:.2f}% ({s2['cohort_a_2026']['Calibrated Elo']['auc']:.4f}) | {s2['cohort_a_2026']['Calibrated Elo']['tails_over_threshold']}
 
-*Bootstrap Comparison:* $\\Delta\\text{{LL}}(\\text{{C0}} - \\text{{A0}}) = {s2['cohort_a_comparisons']['c0_vs_a0']['delta_log_loss']:.6f}$ ($95\\%\\text{{ CI: }}[{s2['cohort_a_comparisons']['c0_vs_a0']['ci_lower_log_loss']:.6f}, {s2['cohort_a_comparisons']['c0_vs_a0']['ci_upper_log_loss']:.6f}]$).
+Paired C0 vs. A0 bootstrap ΔLL: `{s2['cohort_a_comparisons']['c0_vs_a0']['delta_log_loss']:.6f}` (95% CI `{s2['cohort_a_comparisons']['c0_vs_a0']['ci_lower_log_loss']:.6f}` to `{s2['cohort_a_comparisons']['c0_vs_a0']['ci_upper_log_loss']:.6f}`).
 
-### B. Full 2024–2026 Walk-Forward Benchmark ($N=11,550$ series)
+### B. Full 2024–2026 Walk-Forward Benchmark ($N={s2['cohort_b_full_11550']['Annual Causal A0']['sample_size']:,} series)
 
-| Model | Code | LogLoss | Brier Score | Extreme Tails ($\\ge 2.5$) |
+| Model | Code | Log Loss | Brier Score | Tails |
 |---|---|---:|---:|---:|
-| **Input-Normalized WalkForward-Ensemble** | **`A0 (Norm)`** | **{s2['cohort_b_full_11550']['Input-Normalized Annual Causal A0']['log_loss']:.6f}** | **{s2['cohort_b_full_11550']['Input-Normalized Annual Causal A0']['brier_score']:.6f}** | **{s2['cohort_b_full_11550']['Input-Normalized Annual Causal A0']['tails_over_threshold']}** |
-| **WalkForward-Reference-Ensemble** | `A0` | **{s2['cohort_b_full_11550']['Annual Causal A0']['log_loss']:.6f}** | **{s2['cohort_b_full_11550']['Annual Causal A0']['brier_score']:.6f}** | **{s2['cohort_b_full_11550']['Annual Causal A0']['tails_over_threshold']}** |
-| **ElasticNet-TeamForm-Baseline** | `EXP-039` | *{s2['cohort_b_common_9907']['EXP-039 Research Derivative']['log_loss']:.6f}\\** | *{s2['cohort_b_common_9907']['EXP-039 Research Derivative']['brier_score']:.6f}\\** | *{s2['cohort_b_common_9907']['EXP-039 Research Derivative']['tails_over_threshold']}\\** |
-| **Player-Glicko2-Rating-Baseline** | `Glicko-2` | {s2['cohort_b_full_11550']['Calibrated Glicko-2']['log_loss']:.6f} | {s2['cohort_b_full_11550']['Calibrated Glicko-2']['brier_score']:.6f} | {s2['cohort_b_full_11550']['Calibrated Glicko-2']['tails_over_threshold']} |
-| **Player-Elo-Rating-Baseline** | `Elo` | {s2['cohort_b_full_11550']['Calibrated Elo']['log_loss']:.6f} | {s2['cohort_b_full_11550']['Calibrated Elo']['brier_score']:.6f} | {s2['cohort_b_full_11550']['Calibrated Elo']['tails_over_threshold']} |
+| WalkForward-Reference-Ensemble | `A0` | {s2['cohort_b_full_11550']['Annual Causal A0']['log_loss']:.6f} | {s2['cohort_b_full_11550']['Annual Causal A0']['brier_score']:.6f} | {s2['cohort_b_full_11550']['Annual Causal A0']['tails_over_threshold']}
+| Calibrated Glicko-2 | `Glicko-2` | {s2['cohort_b_full_11550']['Calibrated Glicko-2']['log_loss']:.6f} | {s2['cohort_b_full_11550']['Calibrated Glicko-2']['brier_score']:.6f} | {s2['cohort_b_full_11550']['Calibrated Glicko-2']['tails_over_threshold']}
+| Calibrated Elo | `Elo` | {s2['cohort_b_full_11550']['Calibrated Elo']['log_loss']:.6f} | {s2['cohort_b_full_11550']['Calibrated Elo']['brier_score']:.6f} | {s2['cohort_b_full_11550']['Calibrated Elo']['tails_over_threshold']}
 
-\\* *EXP-039 Eligibility Note:* EXP-039 requires $\\ge 20$ prior organizational matches (`W20`), so 1,643 newly formed or academy series without 20-match org history are excluded. On the 9,907 common subset, Annual A0 scores {s2['cohort_b_common_9907']['Annual Causal A0']['log_loss']:.6f} LL ({s2['cohort_b_common_9907']['Annual Causal A0']['tails_over_threshold']} tails) vs. EXP-039 {s2['cohort_b_common_9907']['EXP-039 Research Derivative']['log_loss']:.6f} LL ({s2['cohort_b_common_9907']['EXP-039 Research Derivative']['tails_over_threshold']} tails).
+EXP-039 common-support cohort ($N={s2['cohort_b_common_9907']['EXP-039 Research Derivative']['sample_size']:,}): A0 log loss `{s2['cohort_b_common_9907']['Annual Causal A0']['log_loss']:.6f}`, EXP-039 log loss `{s2['cohort_b_common_9907']['EXP-039 Research Derivative']['log_loss']:.6f}`. EXP-039 eligibility is limited to series with at least 20 prior organizational matches.
 
+### C. Cross-Regional Input Normalization — Look-Ahead Diagnostic Only
 
-### C. Cross-Regional Input Normalization (`src/models/cross_region_input_normalizer.py`)
+{cross_region['lookahead_diagnostic_notice']}
 
-| Evaluation Slice | Matches ($N$) | Before (`LL`) | After (`LL`) | $\\Delta\\text{{LL}}$ | Winner Accuracy ($\\text{{Before}} \\to \\text{{After}}$) |
-|---|---:|---:|---:|---:|---:|
-| **Full Multi-Year Walk-Forward (2024–2026)** | {s2['cross_region_normalization']['slices']['full_11550_walk_forward']['n_matches']:,} | {s2['cross_region_normalization']['slices']['full_11550_walk_forward']['before_log_loss']:.6f} | **{s2['cross_region_normalization']['slices']['full_11550_walk_forward']['after_log_loss']:.6f}** | **{s2['cross_region_normalization']['slices']['full_11550_walk_forward']['delta_log_loss']:+.6f}** | {s2['cross_region_normalization']['slices']['full_11550_walk_forward']['before_accuracy']*100:.2f}% $\\to$ **{s2['cross_region_normalization']['slices']['full_11550_walk_forward']['after_accuracy']*100:.2f}% ({s2['cross_region_normalization']['slices']['full_11550_walk_forward']['delta_accuracy_pp']:+.2f}%)** |
-| **All 2026 Canonical Series (`C0-D`)** | {s2['cross_region_normalization']['slices']['cohort_a_2026_c0_d']['n_matches']:,} | {s2['cross_region_normalization']['slices']['cohort_a_2026_c0_d']['before_log_loss']:.6f} | **{s2['cross_region_normalization']['slices']['cohort_a_2026_c0_d']['after_log_loss']:.6f}** | **{s2['cross_region_normalization']['slices']['cohort_a_2026_c0_d']['delta_log_loss']:+.6f}** | {s2['cross_region_normalization']['slices']['cohort_a_2026_c0_d']['before_accuracy']*100:.2f}% $\\to$ **{s2['cross_region_normalization']['slices']['cohort_a_2026_c0_d']['after_accuracy']*100:.2f}% ({s2['cross_region_normalization']['slices']['cohort_a_2026_c0_d']['delta_accuracy_pp']:+.2f}%)** |
-| **All 2026 Canonical Series (`C0`)** | {s2['cross_region_normalization']['slices']['cohort_a_2026_c0']['n_matches']:,} | {s2['cross_region_normalization']['slices']['cohort_a_2026_c0']['before_log_loss']:.6f} | **{s2['cross_region_normalization']['slices']['cohort_a_2026_c0']['after_log_loss']:.6f}** | **{s2['cross_region_normalization']['slices']['cohort_a_2026_c0']['delta_log_loss']:+.6f}** | {s2['cross_region_normalization']['slices']['cohort_a_2026_c0']['before_accuracy']*100:.2f}% $\\to$ **{s2['cross_region_normalization']['slices']['cohort_a_2026_c0']['after_accuracy']*100:.2f}% ({s2['cross_region_normalization']['slices']['cohort_a_2026_c0']['delta_accuracy_pp']:+.2f}%)** |
-| **All International Matches (2024–2026)** | {s2['cross_region_normalization']['slices']['all_international_2024_2026']['n_matches']:,} | {s2['cross_region_normalization']['slices']['all_international_2024_2026']['before_log_loss']:.6f} | **{s2['cross_region_normalization']['slices']['all_international_2024_2026']['after_log_loss']:.6f}** | **{s2['cross_region_normalization']['slices']['all_international_2024_2026']['delta_log_loss']:+.6f}** | {s2['cross_region_normalization']['slices']['all_international_2024_2026']['before_accuracy']*100:.2f}% $\\to$ **{s2['cross_region_normalization']['slices']['all_international_2024_2026']['after_accuracy']*100:.2f}% ({s2['cross_region_normalization']['slices']['all_international_2024_2026']['delta_accuracy_pp']:+.2f}%)** |
-| **Worlds + MSI + First Stand (2024–2026)** | {s2['cross_region_normalization']['slices']['worlds_msi_first_stand_2024_2026']['n_matches']:,} | {s2['cross_region_normalization']['slices']['worlds_msi_first_stand_2024_2026']['before_log_loss']:.6f} | **{s2['cross_region_normalization']['slices']['worlds_msi_first_stand_2024_2026']['after_log_loss']:.6f}** | **{s2['cross_region_normalization']['slices']['worlds_msi_first_stand_2024_2026']['delta_log_loss']:+.6f}** | {s2['cross_region_normalization']['slices']['worlds_msi_first_stand_2024_2026']['before_accuracy']*100:.2f}% $\\to$ **{s2['cross_region_normalization']['slices']['worlds_msi_first_stand_2024_2026']['after_accuracy']*100:.2f}% ({s2['cross_region_normalization']['slices']['worlds_msi_first_stand_2024_2026']['delta_accuracy_pp']:+.2f}%)** |
-| **All Domestic Matches (98.6% of cohort)** | {s2['cross_region_normalization']['slices']['domestic_matches_2024_2026']['n_matches']:,} | {s2['cross_region_normalization']['slices']['domestic_matches_2024_2026']['before_log_loss']:.6f} | **{s2['cross_region_normalization']['slices']['domestic_matches_2024_2026']['after_log_loss']:.6f}** | **`0.000000` (Bit-Exact)** | {s2['cross_region_normalization']['slices']['domestic_matches_2024_2026']['before_accuracy']*100:.2f}% $\\to$ **{s2['cross_region_normalization']['slices']['domestic_matches_2024_2026']['after_accuracy']*100:.2f}% (Bit-Exact)** |
+Historical per-cutoff regional offsets are not available locally. The normalized values below use the latest offsets snapshot, including information from the events being scored; they are diagnostics, not predictive-quality results. Headline C0, C0-D, and A0 scores above use un-normalized predictions.
+
+| Evaluation Slice | Matches ($N$) | Un-normalized LL | Normalized Look-Ahead Diagnostic LL | Diagnostic ΔLL |
+|---|---:|---:|---:|---:|
+{normalization_table_rows}
+
 ---
 
-## 2. Head-to-Head vs. Bookmakers: Multi-Horizon Pinnacle & Polish Production
+## 2. Head-to-Head vs. Bookmakers
 
-### A. Model vs. Sharp Pinnacle Across Pre-Match Horizons (`T-48h` to `<2h`)
+### A. Model vs. Pinnacle Across Available Horizons
 
-| Pre-Match Window | Matches ($N$) | Pinnacle Market LL | Pure `C0` LL | Pure `C0-D (Norm)` LL | `Hybrid-50` (`C0-D Norm`) LL | Statistical Comparison vs. Pinnacle |
-|---|---:|---:|---:|---:|---:|---|
-| **`T-48h` (48h Out)** | 30 | 0.497346 | **0.492582** | **0.485599** | **0.486232** | Pure `C0-D (Norm)` (`-0.01175` LL) & `Hybrid-50` (`-0.01111` LL) lead early line |
-| **`T-24h` (24h Out)** | 213 | 0.601401 | **0.581278** | **0.575819** | **0.582998** | Pure `C0-D (Norm)` (`-0.02558` LL) & `Hybrid-50` (`-0.01840` LL) crush 24h line |
-| **`T-12h` (12h Out)** | 753 | 0.587228 | **0.580471** | **0.576183** | **0.576551** | Pure `C0-D (Norm)` (`-0.01105` LL) & `Hybrid-50` (`-0.01068` LL) outperform 12h line |
-| **`T-6h` (6h Out)** | 1,027 | 0.573997 | 0.580708 | 0.576286 | **0.569474** | Pinnacle sharpens; `Hybrid-50` (`C0-D Norm`) leads by `-0.00452` LL |
-| **`<2h` (`T-1h` Cutoff)** | 1,668 | 0.568604 | 0.575423 | 0.574059 | **0.563251** | `Hybrid-50` (`C0-D Norm`) beats late Pinnacle consensus (`-0.00535` LL) |
+The model columns use un-normalized C0 predictions and the corresponding 50/50 C0/Pinnacle logit blend.
 
-### B. Model vs. Production Polish Bookmakers Across Pre-Match Horizons (`T-48h` to `<2h`)
+| Horizon | Matches ($N$) | Pinnacle LL | C0 LL | C0/Pinnacle Hybrid LL | Hybrid ΔLL vs. Pinnacle |
+|---|---:|---:|---:|---:|---:|
+{pinnacle_table_rows}
 
-| Pre-Match Window | Matches ($N$) | Polish Books LL | Pure `C0` LL | Pure `C0-D (Norm)` LL | `Hybrid-50` (`C0-D Norm`) LL | Statistical Comparison vs. Polish Books |
-|---|---:|---:|---:|---:|---:|---|
-| **`T-48h` (48h Out)** | 442 | 0.563429 | **0.553525** | **0.551016** | **0.547224** | Pure `C0-D (Norm)` (`-0.01241` LL) & `Hybrid-50` (`-0.01621` LL) lead 48h line |
-| **`T-24h` (24h Out)** | 512 | 0.558981 | **0.556513** | **0.553701** | **0.547360** | Pure `C0-D (Norm)` (`-0.00528` LL) & `Hybrid-50` (`-0.01162` LL) lead 24h line |
-| **`T-12h` (12h Out)** | 585 | 0.565736 | 0.567620 | **0.564056** | **0.555813** | Pure `C0-D (Norm)` (`-0.00168` LL) & `Hybrid-50` (`-0.00992` LL) beat 12h line |
-| **`T-6h` (6h Out)** | 612 | 0.560060 | 0.564871 | 0.561978 | **0.552517** | `Hybrid-50` (`C0-D Norm`) outperforms 6h market consensus (`-0.00754` LL) |
-| **`<2h` (Closing Line)** | 645 | 0.555258 | 0.566484 | 0.563086 | **0.550636** | `Hybrid-50` (`C0-D Norm`) beats closing line (`-0.00462` LL; `-0.01218` LL monthly refit) |
+### B. Model vs. Production Polish Bookmakers
 
-#### Additional Polish Bookmaker Panels
-| Panel Cohort | Matches ($N$) | Polish Books LL | Pure `C0` LL | Pure `C0-D (Norm)` LL | `Hybrid-50` (`C0-D Norm`) LL | Statistical Comparison vs. Panel |
-|---|---:|---:|---:|---:|---:|---|
-| **Live Production Monthly-Refit (May–Sep 2026)** | 645 | 0.570054 | 0.573307 | **0.569910** | **0.557877** | `Hybrid-50` beats closing line by `-0.01218` LL (-1.22 pp) |
-| **Polish 2+ Books Panel (2026)** | 1,467 | 0.559605 | 0.565905 | **0.565064** | **0.556142** | `Hybrid-50` outperforms Polish 2+ consensus (`-0.00346` LL) |
-| **Polish Core-4 Fixed Panel (`STS`/`Betfan`/`LV`/`Superbet`)** | 1,285 | 0.562088 | 0.570741 | **0.568847** | **0.559893** | `Hybrid-50` (`C0-D Norm`) outperforms Polish Core-4 (`-0.00219` LL) |
-| **Polish Core-4 — International (`Worlds`/`MSI`/`EWC`)** | 25 | 0.582438 | **0.554971** | **0.498735** | **0.525711** | Pure `C0-D (Norm)` crushes Polish Consensus by **`-0.08370` LL** (-8.37 pp) |
+The model columns use un-normalized C0 predictions and the corresponding 50/50 C0/market logit blend.
+
+| Horizon | Matches ($N$) | Polish Market LL | C0 LL | C0/Market Hybrid LL | Hybrid ΔLL vs. Market |
+|---|---:|---:|---:|---:|---:|
+{production_table_rows}
+
+Additional Polish panels:
+
+| Panel Cohort | Matches ($N$) | Polish Market LL | C0 LL | C0/Market Hybrid LL | Hybrid ΔLL vs. Market |
+|---|---:|---:|---:|---:|---:|
+{polish_table_rows}
+
 ---
 
 ## 3. Bayesian Market Shrinkage Proper-Score Grid
 
-Evaluating $\\text{{logit}}(p_{{\\text{{hybrid}}}}) = \\alpha \\text{{logit}}(p_{{\\text{{model}}}}) + (1 - \\alpha) \\text{{logit}}(q_{{\\text{{market}}}})$:
+Blend formula: `logit(p_hybrid) = α logit(p_model) + (1 − α) logit(q_market)`. Scores are computed on their named cohorts; the best joint-cohort alpha is selected in-sample and is not prospective validation.
 
-- **Joint OddsPortal Consensus ($N=2,023$ series):**
-  - $\\alpha = 0.00$ (Pure Market): LogLoss `0.581530`, Brier `0.198350`
-  - $\\alpha = 0.35$: LogLoss `0.575473`, Brier `0.195868`
-  - **$\\alpha = 0.50$ (Optimal Operational):** **LogLoss `0.574693`**, **Brier `0.195593`**
-  - $\\alpha = 1.00$ (Pure C0): LogLoss `0.579373`, Brier `0.197590`
-- **Pinnacle / OddsPapi T-1h ($N=1,668$ series):**
-  - $\\alpha = 0.00$ (Pure Market): LogLoss `0.568604`, Brier `0.192872`
-  - **$\\alpha = 0.35$:** **LogLoss `0.563176`**, **Brier `0.191119`**
-  - $\\alpha = 0.50$: LogLoss `0.563571`, Brier `0.191449`
-  - $\\alpha = 1.00$ (Pure C0): LogLoss `0.575423`, Brier `0.196552`
+| Cohort | Series ($N$) | α | Log Loss | Brier Score |
+|---|---:|---:|---:|---:|
+{shrinkage_table_rows}
 
-*Conclusion:* Bayesian shrinkage ($\\alpha \\in [0.35, 0.50]$) strictly outperforms both pure sports predictions and raw bookmaker prices across every dataset.
+Best measured Joint Consensus row: α = `{shrinkage_best_alpha:.2f}`, log loss = `{shrinkage_best_log_loss:.6f}`.
 
 ---
 
-## 4. Real-World Betting Simulations & Risk-Guard Ablation
+## 4. Betting Simulation Results & Strategy Audit
 
-#### Strategy Stacks & Metric Nomenclature Guide
+### A. Computed Strategy Results
 
-To evaluate where true profit comes from, five strategy configurations and econometric metrics are benchmarked:
+Rows are produced from the production-policy replays and the supplied Optimal Synergy ledger. `NOT_RECOMPUTED` means the producer has no measured value for that field.
 
-| Strategy Stack Label | Exact Active Pipeline & Rules | Purpose in Ablation |
-|---|---|---|
-| **Unconstrained `C0`** | Pure `C0` without shrinkage or safety gates; flat $\text{{EV}} \\ge 5\\%$ | Baseline: tests whether a raw sports model can beat bookmakers alone. |
-| **`Hybrid-50` + Divergence-Gate** | 50/50 Bayesian logit shrinkage + `Market-Divergence-Gate` ($\\le 0.85$) | Tests shrinkage and rejection of severe bookmaker probability disagreements. |
-| **Optimal Synergy** | `Hybrid-50` + Divergence-Gate + `Model-Consensus-Veto` ($\\le 0.10$) + Odds $\\le 4.00$ | Production baseline: requires neural attention and linear form agreement. |
-| **Optimal Synergy + DRO** | Optimal Synergy + `Wasserstein-Robust-Gate` ($\\varepsilon = 0.025$) | Robust production gate: prunes bets vulnerable to probability shifts. |
-| **Multi-Year Hybrid (2021–26)** | Optimal Synergy on 6-season OddsPortal dataset ($N=11,609$) | Macro validation: tests long-term strategy survival across 0% and 12% tax. |
+| Strategy | Regime | Bets ($N$) | Win Rate | Realized Yield | Max Drawdown (bounded by stake caps) | Source Status |
+|---|---|---:|---:|---:|---:|---|
+{strategy_performance_rows}
 
-*Metric Definitions:*
-- **Claimed EV (Promise):** Expected return promised by the model: $(p_{{\\text{{model}}}} \\cdot 0.88 \\cdot O) - 1$.
-- **True Edge (Net CLV):** Edge against sharp closing market: $(p_{{\\text{{close}}}} \\cdot 0.88 \\cdot O) - 1$.
-- **Optimizer's Curse Bias ($B = \\text{{Claimed EV}} - \\text{{Net CLV}}$):** Positive selection bias from cherry-picking estimation errors.
-- **Match Luck Noise ($\\eta = \\text{{Realized Yield}} - \\text{{Net CLV}}$):** Binary coinflip outcome variance that decays as $\\sigma / \\sqrt{{N}}$.
-- **Realized Yield:** Actual observed return on capital: $(Y \\cdot 0.88 \\cdot O) - 1$.
+The Optimal Synergy ledger maximum drawdown is bounded by its per-bet stake caps: {ledger_summary['max_drawdown_note']}.
 
-### Table 4A: Portfolio Performance & Risk Control across Operating Regimes
+### B. Ledger Decomposition and Replay Metrics
 
-| Strategy Stack | Regime & Tax | Bets ($N$) | Win Rate | Realized Yield | Max Drawdown & Verdict |
-|---|---|---:|---:|---:|---|
-| **Unconstrained `C0`** | Polish Books (12% Tax) | 454 | 43.8% | -4.54% | 67.0% (Untrusted) |
-| **`Hybrid-50` + Divergence-Gate** | Polish Books (12% Tax) | 147 | 51.0% | +11.50% | 15.0% (Reduced Bias) |
-| **Optimal Synergy** | Polish Books (12% Tax) | {s3['optimal_synergy_summary']['n_bets']} | {s3['optimal_synergy_summary']['win_rate_pct']}% | +{s3['optimal_synergy_summary']['realized_yield_pct']}% | {s3['optimal_synergy_summary']['max_drawdown_pct']}% (Adopted Base) |
-| **Optimal Synergy + DRO** | Polish Books (12% Tax) | **45** | **60.0%** | **+24.86%** | **5.41% (DRO Gate, $N_{{\\min}}=641$)** |
-| **Multi-Year Hybrid (2021–26)** | Multi-Year (0% Tax) | 3,002 | 57.6% | +7.60% | 9.40% (Validated) |
+Net CLV, optimizer's-curse bias, and match-outcome noise are computed for the Optimal Synergy ledger only. Replay rows leave these quantities `NOT_RECOMPUTED` because replay CLV is measured against the focal quote's own de-vig, not a closing market.
 
-### Table 4B: Econometric Edge vs. Optimizer's Curse & Match Noise
-
-| Strategy Stack | Claimed EV (Promise) | True Edge (Net CLV) | Optimizer's Curse Bias ($B$) | Match Luck Noise ($\\eta$) | Realized Yield |
+| Strategy | Claimed EV | Net CLV | Optimizer's-Curse Bias | Match-Outcome Noise | Realized Yield |
 |---|---:|---:|---:|---:|---:|
-| **Unconstrained `C0`** | +31.93% | **-13.69%** | **+45.62 pp** | +9.15 pp | -4.54% |
-| **`Hybrid-50` + Divergence-Gate** | +13.41% | **+1.85%** | **+11.56 pp** | +9.65 pp | +11.50% |
-| **Optimal Synergy** | +{s3['optimal_synergy_summary']['mean_model_ev_pct']}% | +{s3['optimal_synergy_summary']['mean_net_clv_pct']}% | +8.57 pp | +19.42 pp | +{s3['optimal_synergy_summary']['realized_yield_pct']}% |
-| **Optimal Synergy + DRO** | **+14.17%** | **+6.98%** | **+7.19 pp** | **+17.88 pp** | **+24.86%** |
-| **Multi-Year Hybrid (2021–26)** | +4.68% | **+6.35%** | **-1.67 pp** | +1.25 pp | +7.60% |
+{strategy_econometric_rows}
 
-*Mathematical Decomposition:*
+### C. Former Literal Claims Not Recomputed
 
-$$
-\\text{{Realized Yield}} = \\underbrace{{\\text{{Claimed EV}}}}_{{\\text{{Model Promise}}}} - \\underbrace{{B}}_{{\\text{{Optimizer's Curse}}}} + \\underbrace{{\\eta}}_{{\\text{{Match Luck Noise}}}} = \\textbf{{True Edge (Net CLV)}} + \\eta
-$$
+| Regime | Strategy | Status | Reason |
+|---|---|---|---|
+{not_recomputed_rows}
 
-- **Optimizer's Curse Bias ($B = \\text{{Claimed EV}} - \\text{{Net CLV}}$):** Systematic upward bias from selecting bets where estimation errors happened to be positive. **Never vanishes with sample size $N$**. On unconstrained C0, it produced **+45.62 pp** of fake edge. Bounded shrinkage ($\\alpha=0.50$), `Market-Divergence-Gate`, and `Model-Consensus-Veto` successfully compressed this bias down to **+8.57 pp**.
-- **Match Luck Noise ($\\eta = \\text{{Realized Yield}} - \\text{{Net CLV}}$):** Zero-mean binomial coinflip luck ($\\sigma_{{\\text{{bet}}}} \\approx 109.8\\%$) that **decays to zero as $\\sigma / \\sqrt{{N}}$**. On the 50-bet production ledger, **+19.42 pp** of temporary lucky variance boosted wallet yield to **+23.91%**, while the true long-term compounding edge is **Net CLV = +4.83%**.
-
-### Monthly Breakdown for Optimal Synergy Strategy ($N=50$)
+### Monthly Breakdown for Optimal Synergy ($N={ledger_summary['n_bets']:,}$)
 
 | Month | Bets (Wins) | Win Rate | Net Profit (PLN) | Realized Yield | Mean Net CLV |
 |---|---:|---:|---:|---:|---:|
@@ -1987,51 +2152,50 @@ $$
 
 ---
 
-## 5. Econometric Audit & Mathematical Decomposition
+## 5. Econometric Audit & Conditional Sampling Analysis
 
-### A. The Exact Three-Part Bet Identity
+### A. Three-Part Ledger Identity
 
-$$
-\\text{{Realized Yield}}_i = \\text{{Claimed EV}}_i - \\underbrace{{c \\cdot O_i (\\hat{{p}}_i - p_{{\\text{{close}}, i}})}}_{{B_i \\text{{ (Optimizer's Curse)}}}} + \\underbrace{{c \\cdot O_i (Y_i - p_{{\\text{{close}}, i}})}}_{{\\eta_i \\text{{ (Match Luck Noise)}}}}
-$$
+Per bet, realized unit return = claimed hybrid EV − optimizer's-curse component + match-outcome noise component. The decomposition is computed from the ledger using the closing-probability proxy derived from raw CLV.
 
-where Realized Yield $c \\cdot O_i Y_i - 1 = +24.26\\%$ and Claimed EV $c \\cdot O_i \\hat{{p}}_i - 1 = +13.41\\%$. Mean Optimizer's Curse bias is $B = +8.57\\text{{ pp}}$ and mean Match Luck Noise is $\\eta = +19.42\\text{{ pp}}$.
-- **Pure C0 Claimed EV:** `+{s4['decomposition']['pure_c0_claimed_ev_pct']}%`
-- **Shrunk Hybrid Claimed EV:** `+{s4['decomposition']['shrunk_hybrid_claimed_ev_pct']}%`
-- **Optimizer's Curse Stripped by Shrinkage:** `{s4['decomposition']['curse_removed_by_shrinkage_pp']} pp`
-- **True Long-Term Mathematical Profit ($\\text{{Net CLV}}$):** `+{s4['decomposition']['true_long_term_edge_net_clv_pct']}%`
-- **Identity Mathematical Residual:** $\\lt 10^{{-15}}$ (Exact equality across all 50 bets)
+- Pure C0 claimed EV: `{decomposition['pure_c0_claimed_ev_pct']:+.2f}%`
+- Shrunk hybrid claimed EV: `{decomposition['shrunk_hybrid_claimed_ev_pct']:+.2f}%`
+- Residual optimizer's-curse component: `{decomposition['residual_optimizers_curse_pp']:+.2f} pp`
+- Match-outcome noise component: `{decomposition['match_outcome_noise_pp']:+.2f} pp`
+- Ledger mean net CLV estimate: `{decomposition['true_long_term_edge_net_clv_pct']:+.2f}%`
+- Stake-weighted realized yield: `{decomposition['realized_yield_stake_weighted_pct']:+.2f}%`
+- Maximum identity discrepancy: `{decomposition['max_identity_discrepancy']:.3e}`
 
-### B. Hypothesis Testing Shootout ($N=50$ Production Bets)
-| Metric | Point Estimate | Sample Std ($s$) | Std Error (SE) | $t$-Statistic ($p$-Value) | 95% Bootstrap CI |
-|---|---:|---:|---:|---:|---|
-| **Realized Yield** | **+{s4['hypothesis_testing']['realized_yield']['point_estimate_pct']}%** | {s4['hypothesis_testing']['realized_yield']['sample_std_pct']}% | {s4['hypothesis_testing']['realized_yield']['standard_error_pct']}% | {s4['hypothesis_testing']['realized_yield']['t_statistic']} ($p={s4['hypothesis_testing']['realized_yield']['p_value']}) | [{s4['hypothesis_testing']['realized_yield']['ci_95_bootstrap'][0]}%, +{s4['hypothesis_testing']['realized_yield']['ci_95_bootstrap'][1]}%] |
-| **Raw CLV** | **+{s4['hypothesis_testing']['raw_clv']['point_estimate_pct']}%** | {s4['hypothesis_testing']['raw_clv']['sample_std_pct']}% | {s4['hypothesis_testing']['raw_clv']['standard_error_pct']}% | {s4['hypothesis_testing']['raw_clv']['t_statistic']} ($p \\lt 10^{{-13}}$) | [{s4['hypothesis_testing']['raw_clv']['ci_95_bootstrap'][0]}%, +{s4['hypothesis_testing']['raw_clv']['ci_95_bootstrap'][1]}%] |
-| **Net CLV (12% Tax)** | **+{s4['hypothesis_testing']['net_clv']['point_estimate_pct']}%** | {s4['hypothesis_testing']['net_clv']['sample_std_pct']}% | {s4['hypothesis_testing']['net_clv']['standard_error_pct']}% | **{s4['hypothesis_testing']['net_clv']['t_statistic']} ($p={s4['hypothesis_testing']['net_clv']['p_value']})** | **[+{s4['hypothesis_testing']['net_clv']['ci_95_bootstrap'][0]}%, +{s4['hypothesis_testing']['net_clv']['ci_95_bootstrap'][1]}%]** |
+### B. Per-Bet Inference ($N={ledger_summary['n_bets']:,}$ ledger bets)
 
-$$
-\\text{{Variance Ratio}} = \\frac{{\\text{{Var}}(\\text{{Realized Yield}})}}{{\\text{{Var}}(\\text{{Net CLV}})}} = \\mathbf{{{s4['hypothesis_testing']['variance_ratio']}}} \\times
-$$
+| Metric | Point Estimate | Sample SD | Standard Error | t-Statistic ($p$-Value) | 95% Bet-Level Bootstrap CI |
+|---|---:|---:|---:|---:|---:|
+{hypothesis_table_rows}
 
-### C. Time-to-Profit ($N_{{\\min}}$) & Noise Decay
+Inference unit: {hypothesis['inference_unit']}.
 
-- **$N_{{\\min}}$ at 12% Polish Tax ($\\mu = +4.83\\%$, $\\sigma = 109.8\\%$):** **`{s4['time_to_profit']['n_min_12pct_tax']}` bets** for 95% profit certainty.
-- **$N_{{\\min}}$ at 0% Tax ($\\mu = +7.60\\%$, $\\sigma = 101.0\\%$):** **`{s4['time_to_profit']['n_min_0pct_tax']}` bets** for 95% profit certainty.
+Variance ratio, realized unit return to net CLV: `{hypothesis['variance_ratio']:.1f}`.
 
-| Bets $N$ | Noise SE ($\\pm$) | 95% Realized Yield Range | Probability of Profit $P(\\text{{Yield}} > 0)$ |
-|---:|---:|---|---:|
-{chr(10).join(f"| {r['bets_n']} | ±{r['se_noise_pct']}% | [{r['ci_95_lower_pct']}%, +{r['ci_95_upper_pct']}%] | {r['prob_profit_pct']}% |" for r in s4['time_to_profit']['noise_decay_schedule'])}
+### C. Conditional Sampling Probability and Noise Decay
+
+For the ledger-mean net CLV and empirical per-bet standard deviation, the sample size for 95% conditional sampling probability at 12% tax is **{conditional_n_display} bets**. This is a conditional model output, not a guarantee of profit; it assumes per-bet IID draws, 1:1 conversion of CLV to post-tax yield, stable prices, and treats in-sample estimated CLV as known.
+
+{conditional_sampling['conditional_sampling_probability_note']}
+
+| Bets ($N$) | Noise SE | 95% Conditional Yield Range | Conditional Sampling Probability |
+|---:|---:|---:|---:|
+{noise_decay_table_rows}
 
 ---
 
 ## 6. Standalone Prop Bundle Verification
 
-Preserved package: `data/06_models/model_preservation/prop_distribution_20261007_01.zip`  
-SHA-256 Hash: `{s4['prop_distribution_verification']['bundle_sha256']}` (Verified: `{s4['prop_distribution_verification']['bundle_verified']}`)
+Preserved package: `{catalog['prop_distribution_bundle']['path']}`  
+SHA-256: `{s4['prop_distribution_verification']['bundle_sha256']}` (verified: `{s4['prop_distribution_verification']['bundle_verified']}`)
 
-- **Map 1 Total Kills:** Ridge-1 Poisson-Mean / Negative Binomial — **NLL `3.590488`**, MAE `7.05` kills
-- **Map 1 Duration:** 15-leaf LightGBM / LogNormal — **NLL `3.076194`**, MAE `4.24` minutes
-- **Series Length (BO3/5):** Width-128 / Epoch-12 3-seed mixture — **NLL `0.714580`**, RPS `0.261305`
+- Map 1 total kills: NLL `{_report_number(prop_metrics['kills_ridge1']['nll'], 6)}`, MAE `{_report_number(prop_metrics['kills_ridge1']['mae'])}`
+- Map 1 duration: NLL `{_report_number(prop_metrics['duration_tree15']['nll'], 6)}`, MAE `{_report_number(prop_metrics['duration_tree15']['mae'])}`
+- Series length: NLL `{_report_number(prop_metrics['series_length_neural']['nll'], 6)}`, RPS `{_report_number(prop_metrics['series_length_neural']['rps'], 6)}`
 """
 
     report_file = out_dir / "SIMULATION_REPORT.md"

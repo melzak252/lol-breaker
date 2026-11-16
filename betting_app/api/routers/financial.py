@@ -282,8 +282,10 @@ def financial_analysis(
         params = {f"id_{i}": value for i, value in enumerate(chunk)}
         placeholders = ",".join(f":id_{i}" for i in range(len(chunk)))
         odds_rows.extend(query_df(db, f"""
-            SELECT os.canonical_match_id, os.bookmaker_id, b.name AS bookmaker,
-                   os.raw_team_a, os.raw_team_b, os.odds_a, os.odds_b, os.scraped_at
+            SELECT os.id AS odds_snapshot_id, os.canonical_match_id,
+                   os.bookmaker_id, b.name AS bookmaker,
+                   os.raw_team_a, os.raw_team_b, os.odds_a, os.odds_b,
+                   os.scraped_at
             FROM odds_snapshots os JOIN bookmakers b ON b.id = os.bookmaker_id
             JOIN canonical_matches cm ON cm.id = os.canonical_match_id
             WHERE os.canonical_match_id IN ({placeholders})
@@ -422,16 +424,41 @@ def financial_analysis(
         hours_before = (start_at - entry_at).total_seconds() / 3600 if entry_at else None
         key, label = _horizon(hours_before) if hours_before is not None else ("unknown", "Brak czasu")
         candidates.append({
-            "canonical_match_id": match_id, "start_time": match["start_time_normalized"],
-            "result_available_at": result_available_at, "league": match.get("league") or "Nieznana liga",
-            "team_a_name": match.get("team_a_name"), "team_b_name": match.get("team_b_name"), "bookmaker": entry["bookmaker"],
-            "side": side, "entry_odds": entry_odds, "close_odds": close_odds, "hours_before": hours_before,
-            "horizon": key, "horizon_label": label, "model_prob": model_prob, "target_prob": target_prob, "market_prob": market_prob, "ev": ev,
+            "canonical_match_id": match_id,
+            "prediction_id": match.get("prediction_id"),
+            "predicted_at": match.get("predicted_at"),
+            "data_cutoff_at": match.get("data_cutoff_at"),
+            "result_available_at": result_available_at,
+            "entry_quote_snapshot_id": entry.get("odds_snapshot_id"),
+            "reference_quote_snapshot_id": (
+                close.get("odds_snapshot_id") if close else None
+            ),
+            "bookmaker_id": entry.get("bookmaker_id"),
+            "start_time": match["start_time_normalized"],
+            "league": match.get("league") or "Nieznana liga",
+            "team_a_name": match.get("team_a_name"),
+            "team_b_name": match.get("team_b_name"),
+            "bookmaker": entry["bookmaker"],
+            "side": side,
+            "entry_odds": entry_odds,
+            "close_odds": close_odds,
+            "hours_before": hours_before,
+            "horizon": key,
+            "horizon_label": label,
+            "model_prob": model_prob,
+            "target_prob": target_prob,
+            "market_prob": market_prob,
+            "ev": ev,
             "uncertainty_basis": row_uncertainty_basis,
             "uncertainty_reason": row_uncertainty_reason,
-            "won": match["winner_side"] == ("team_a" if side == "a" else "team_b"), "entry_scraped_at": entry.get("scraped_at"),
+            "won": match["winner_side"] == ("team_a" if side == "a" else "team_b"),
+            "entry_scraped_at": entry.get("scraped_at"),
             "close_scraped_at": close.get("scraped_at") if close else None,
-            "clv_odds_pct": (entry_odds / close_odds - 1) if close_odds and close_odds > 0 else None,
+            "clv_odds_pct": (
+                entry_odds / close_odds - 1
+                if close_odds and close_odds > 0
+                else None
+            ),
         })
     eligible_match_ids = {int(match["canonical_match_id"]) for match in matches}
     no_quote_key = (

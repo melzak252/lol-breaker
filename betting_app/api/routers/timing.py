@@ -50,6 +50,7 @@ THESIS_HYBRID_MODEL_NAME = get_thesis_hybrid().hybrid_model_name
 ACTIVE_OPERATIONAL_MODEL_NAME = get_active_model().name
 ACTIVE_OPERATIONAL_MODEL_VERSION = get_active_model().version
 OPERATIONAL_HYBRID_MODEL_NAME = get_active_hybrid().hybrid_model_name
+OPERATIONAL_HYBRID_MODEL_VERSION = get_active_hybrid().hybrid_model_version
 # The Horizon page is a retrospective EXP-060 evaluation.  Do not silently
 # mix its reproducible, point-in-time backfill with opportunistic scheduler
 # predictions left over from earlier deployments (some were written after the
@@ -849,8 +850,8 @@ def historical_model_comparison(
     specifications = (
         {
             "key": "c0",
-            "label": "Native C0",
-            "description": "Causal-C0 native predictor using the exact frozen native artifacts.",
+            "label": "C0 + Regional",
+            "description": "Regional-input-corrected Causal-C0 serving identity using the unchanged frozen native artifacts.",
             "model_name": C0_NATIVE.name,
             "model_version": C0_NATIVE.version,
             "features_version": C0_NATIVE.feature_version,
@@ -858,7 +859,7 @@ def historical_model_comparison(
         {
             "key": "operational_hybrid",
             "label": "Hybryda Operacyjna (C0 + Rynek alpha=0.50)",
-            "description": "Hybrid-Operational-Market using native C0 and the active logit-shrinkage configuration.",
+            "description": "Hybrid-Operational-Market using regional-input-corrected C0 and the active logit-shrinkage configuration.",
             "model_name": get_active_hybrid().hybrid_model_name,
             "model_version": get_active_hybrid().hybrid_model_version,
             "features_version": C0_NATIVE.feature_version,
@@ -3237,7 +3238,7 @@ def model_profitability_audit(
         "c0": {
             "name": C0_NATIVE.name,
             "version": C0_NATIVE.version,
-            "title": "Native C0",
+            "title": "C0 + Regional",
         },
         "operational_hybrid": {
             "name": get_active_hybrid().hybrid_model_name,
@@ -3720,7 +3721,7 @@ def validation_report(
     tax_rate: float = 0.12,
     min_ev: float = 0.05,
     model_name: str = "Hybrid-Operational-Market",
-    model_version: str = "c0-native-2026-w32-e12-v1-a0.50-t1.00",
+    model_version: str = OPERATIONAL_HYBRID_MODEL_VERSION,
     db=Depends(get_db),
 ):
     """Historical single-cohort report using an explicit assumed research haircut."""

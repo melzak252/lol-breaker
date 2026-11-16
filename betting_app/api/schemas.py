@@ -302,6 +302,13 @@ class MatchResultsResponse(BaseModel):
 
 class FinancialLedgerEntry(BaseModel):
     canonical_match_id: int
+    prediction_id: int | None = None
+    predicted_at: str | None = None
+    data_cutoff_at: str | None = None
+    result_available_at: datetime | None = None
+    entry_quote_snapshot_id: int | None = None
+    reference_quote_snapshot_id: int | None = None
+    bookmaker_id: int | None = None
     start_time: str | None = None
     league: str | None = None
     team_a_name: str | None = None
@@ -426,7 +433,7 @@ class BettingRecommendation(BaseModel):
     thesis_guard_passed: bool | None = None
     guard_b_passed: bool | None = None
     logit_disagreement: float | None = None
-    raw_clv: float | None = None
+    current_market_edge: float | None = None
 
 class MatchDetailResponse(BaseModel):
     canonical_match_id: int
