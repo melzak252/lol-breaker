@@ -31,17 +31,13 @@ The current saved-ledger replay has a dedicated DVC target. Run only this stage;
 ```bash
 set -e
 python -m pip install -e '.[replay]'
-bundle=$(mktemp -d)
-curl -fL https://github.com/melzak252/lol-breaker/releases/download/readme-replay-v4/dvc-cache-transfer.zip -o "$bundle/replay.zip"
-echo "eed54979bfde38920b53bf2fe7d2d393ab74111cac8720cee6003bdf896cde97  $bundle/replay.zip" | sha256sum -c -
-unzip -n "$bundle/replay.zip" -d "$(.venv/bin/dvc cache dir)"
-.venv/bin/dvc checkout --with-deps project_results_replay_v4
+.venv/bin/dvc pull --with-deps project_results_replay_v4
 DVC_NO_ANALYTICS=1 DVC_CHECK_UPDATE=false .venv/bin/dvc repro --force project_results_replay_v4
 ```
 
 It writes to `data/08_reporting/project_results_replay_v4_dvc_20261116`, an exclusive DVC-owned output directory. Standard DVC stage reruns remove only that declared output before invoking the existing runner, which still refuses any occupied `--output-dir`.
 
-The 37 input `.dvc` pointers, stage, lock, and code are versioned together. The release ZIP supplies only the corresponding content-addressed cache objects. Its SHA-256 is pinned above; verify it before extraction. No Google authentication, Drive plugin, original worktree cache, or GitHub login is needed to download the public asset. The legacy Drive remote remains named for older studies but is no longer the default, so local checkout does not load its blocked Google integration.
+The 37 input `.dvc` pointers, stage, lock, and code are versioned together. The default read-only HTTP remote serves the DVC objects from the public `Melzak/lol-breaker-replay` Hugging Face dataset, pinned to an immutable commit. Readers need no account or token. Upload credentials remain local and are never committed. The GitHub Release remains a backup; the named legacy Drive remote is not used.
 
 This stage covers saved-ledger aggregate replay only; it does not version the complete C20R inference/training closure or the prop-v2/draft model artifacts.
 
@@ -64,11 +60,11 @@ An isolated workspace restored all 37 inputs (56,803,982 bytes) from local DVC c
 
 ## Environment prerequisite
 
-Install `.[replay]` for the recorded numerical stack: `numpy==2.4.4`, `pandas==3.0.3`, `pyarrow==24.0.0`, `scipy==1.17.1`, and `scikit-learn==1.8.0`, exercised on Python 3.12.3. It includes DVC 3.67.1 core, without the Google Drive plugin or its legacy OpenSSL constraints. The download commands additionally require a POSIX shell, `curl`, `unzip`, and `sha256sum`. The separate `.[demo]` extra does not include replay dependencies or research data.
+Install `.[replay]` for the recorded numerical stack: `numpy==2.4.4`, `pandas==3.0.3`, `pyarrow==24.0.0`, `scipy==1.17.1`, and `scikit-learn==1.8.0`, exercised on Python 3.12.3. It includes DVC 3.67.1 core with HTTP support; no Google plugin, Hugging Face CLI, login, or archive tools are needed for readers. The separate `.[demo]` extra does not include replay dependencies or research data.
 
 ## Required artifacts and evidence checking
 
-The 37 consumed `data/` files remain Git-ignored payloads with individual DVC pointers. The replay receipt records SHA-256 values for the 52 paths in `PATHS`. The named-stage checkout restores only this replay and its dependencies, not all historical datasets. A complete online reproduction requires downloading the public ZIP into an empty cache, checking out the inputs, and independently executing the replay to match the checked summary.
+The 37 consumed `data/` files remain Git-ignored payloads with individual DVC pointers. The replay receipt records SHA-256 values for the 52 paths in `PATHS`. The named-stage pull restores only this replay and its dependencies, not all historical datasets. A complete online reproduction requires an anonymous pull into an empty cache followed by an independently executed replay matching the checked summary.
 
 | Domain | Key | Repository-relative required path |
 |---|---|---|

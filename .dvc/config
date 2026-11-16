@@ -1,4 +1,7 @@
-# Historical studies only; README replay restores the public release into cache.
+[core]
+    remote = portfolio
+['remote "portfolio"']
+    url = https://huggingface.co/datasets/Melzak/lol-breaker-replay/resolve/876b3806144a8e6a830561ebf667a11a61dd6fdd
 ['remote "gdrive-storage"']
     url = gdrive://1Koo0-3d-1BssznDWXzz9PactUfmZbn7g
     gdrive_acknowledge_abuse = true
